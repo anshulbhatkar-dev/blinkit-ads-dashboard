@@ -1,0 +1,2135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Blinkit Ads Dashboard — Mosaic Wellness</title>
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      var r = document.getElementById('root');
+      if (r) r.innerHTML = '<div style="padding:48px;text-align:center;font-family:monospace">'
+        + '<div style="font-size:28px;margin-bottom:16px">⚠️</div>'
+        + '<h2 style="color:#ef4444;margin:0 0 12px">Error</h2>'
+        + '<p style="color:#f9fafb;font-size:14px">' + msg + '</p>'
+        + '<p style="color:#9ca3af;font-size:12px;margin-top:8px">Line ' + line + '</p>'
+        + '</div>';
+      return false;
+    };
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    body{background:#070711;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#f9fafb;}
+    *{box-sizing:border-box;}
+    ::-webkit-scrollbar{width:5px;height:5px;}
+    ::-webkit-scrollbar-track{background:#111827;}
+    ::-webkit-scrollbar-thumb{background:#374151;border-radius:4px;}
+    ::-webkit-scrollbar-thumb:hover{background:#4b5563;}
+    .fade-in{animation:fadeIn 0.2s ease;}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
+    input::placeholder{color:#374151;}
+    select option{background:#111827;}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+if (typeof React === 'undefined') throw new Error('React failed to load from CDN. Check internet connection.');
+if (typeof ReactDOM === 'undefined') throw new Error('ReactDOM failed to load. Check internet connection.');
+if (typeof XLSX === 'undefined') throw new Error('SheetJS failed to load. Check internet connection.');
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+
+const SHEET_ID = '1enTpKSWbTqSEEZDo4WRsFj9HwlDjgbpVfUyW5icPGuM';
+const SHEET_BASE = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=`;
+const BENCHMARKS = {
+  'Generic Head': {
+    roasF: 1.2,
+    roasH: 1.8,
+    roasS: 2.7,
+    ltvF: 2.0,
+    ltvH: 3.0,
+    ltvS: 4.5,
+    nurF: 0.50,
+    nurH: 0.60,
+    nurS: 0.660,
+    roasWt: 0.20,
+    ltvWt: 0.30,
+    nurWt: 0.50,
+    posThr: 9
+  },
+  'Generic Tail': {
+    roasF: 2.0,
+    roasH: 3.0,
+    roasS: 4.5,
+    ltvF: 2.5,
+    ltvH: 3.75,
+    ltvS: 5.625,
+    nurF: 0.40,
+    nurH: 0.48,
+    nurS: 0.528,
+    roasWt: 0.50,
+    ltvWt: 0.35,
+    nurWt: 0.15,
+    posThr: 6
+  },
+  'Comp': {
+    roasF: 0.8,
+    roasH: 1.2,
+    roasS: 1.8,
+    ltvF: 1.5,
+    ltvH: 2.25,
+    ltvS: 3.375,
+    nurF: 0.50,
+    nurH: 0.60,
+    nurS: 0.660,
+    roasWt: 0.40,
+    ltvWt: 0.45,
+    nurWt: 0.15,
+    posThr: 6
+  },
+  'Similar Product Recommendations': {
+    roasF: 2.0,
+    roasH: 3.0,
+    roasS: 4.5,
+    ltvF: 1.5,
+    ltvH: 2.25,
+    ltvS: 3.375,
+    nurF: 0.55,
+    nurH: 0.66,
+    nurS: 0.726,
+    roasWt: 0.20,
+    ltvWt: 0.30,
+    nurWt: 0.50,
+    posThr: null
+  },
+  'Cart Recommendations': {
+    roasF: 1.5,
+    roasH: 2.25,
+    roasS: 3.375,
+    ltvF: 1.5,
+    ltvH: 2.25,
+    ltvS: 3.375,
+    nurF: 0.35,
+    nurH: 0.42,
+    nurS: 0.462,
+    roasWt: 0.40,
+    ltvWt: 0.30,
+    nurWt: 0.30,
+    posThr: null
+  },
+  'Next Product Recommendations': {
+    roasF: 1.5,
+    roasH: 2.25,
+    roasS: 3.375,
+    ltvF: 1.5,
+    ltvH: 2.25,
+    ltvS: 3.375,
+    nurF: 0.40,
+    nurH: 0.48,
+    nurS: 0.528,
+    roasWt: 0.20,
+    ltvWt: 0.35,
+    nurWt: 0.45,
+    posThr: null
+  },
+  'Homepage Display Direct shelf': {
+    roasF: 0.9,
+    roasH: 1.35,
+    roasS: 2.025,
+    ltvF: 0.9,
+    ltvH: 1.35,
+    ltvS: 2.025,
+    nurF: 0.40,
+    nurH: 0.48,
+    nurS: 0.528,
+    roasWt: 0.30,
+    ltvWt: 0.20,
+    nurWt: 0.50,
+    posThr: null
+  },
+  'Category Display Direct shelf': {
+    roasF: 1.2,
+    roasH: 1.8,
+    roasS: 2.7,
+    ltvF: 0.9,
+    ltvH: 1.35,
+    ltvS: 2.025,
+    nurF: 0.45,
+    nurH: 0.54,
+    nurS: 0.594,
+    roasWt: 0.30,
+    ltvWt: 0.20,
+    nurWt: 0.50,
+    posThr: null
+  }
+};
+const LTV_TABLE = {
+  'beard care': 401,
+  'body exfoliator & scrub': 249,
+  'body lotion': 301,
+  'body wash': 283,
+  'chocolate spreads': 334,
+  'creatine powder': 501,
+  'derma rollers': 200,
+  'foot cream': 281,
+  'hair gummies': 422,
+  'hair serum': 456,
+  'jams': 233,
+  'ketchup': 253,
+  'kids cereals': 220,
+  'magnesium sleep supplements': 773,
+  'milk drink mixes': 514,
+  'mv gummies': 371,
+  'pain relief': 234,
+  'roll-on': 167,
+  'shampoos': 310,
+  'shilajit': 522,
+  'sunscreen': 334,
+  'underarm roll on': 250
+};
+const SEG_SHORT = {
+  'Generic Head': 'Gen Head',
+  'Generic Tail': 'Gen Tail',
+  'Comp': 'Comp',
+  'Similar Product Recommendations': 'Reco Similar',
+  'Cart Recommendations': 'Reco Cart',
+  'Next Product Recommendations': 'Reco Next',
+  'Homepage Display Direct shelf': 'Homepage Display',
+  'Category Display Direct shelf': 'Category Display',
+  'Unindexed': 'Unindexed'
+};
+const VERDICT_CFG = {
+  'Scale': {
+    color: '#22c55e',
+    bg: 'rgba(34,197,94,0.12)',
+    border: 'rgba(34,197,94,0.35)'
+  },
+  'Maintain': {
+    color: '#3b82f6',
+    bg: 'rgba(59,130,246,0.12)',
+    border: 'rgba(59,130,246,0.35)'
+  },
+  'Optimise': {
+    color: '#f59e0b',
+    bg: 'rgba(245,158,11,0.12)',
+    border: 'rgba(245,158,11,0.35)'
+  },
+  'Reduce': {
+    color: '#f97316',
+    bg: 'rgba(249,115,22,0.12)',
+    border: 'rgba(249,115,22,0.35)'
+  },
+  'Cut': {
+    color: '#ef4444',
+    bg: 'rgba(239,68,68,0.12)',
+    border: 'rgba(239,68,68,0.35)'
+  },
+  'Insufficient Data': {
+    color: '#8b5cf6',
+    bg: 'rgba(139,92,246,0.12)',
+    border: 'rgba(139,92,246,0.35)'
+  },
+  'Inactive': {
+    color: '#6b7280',
+    bg: 'rgba(107,114,128,0.10)',
+    border: 'rgba(107,114,128,0.30)'
+  },
+  'Unindexed': {
+    color: '#6b7280',
+    bg: 'rgba(107,114,128,0.10)',
+    border: 'rgba(107,114,128,0.30)'
+  }
+};
+const VERDICT_ORDER = ['Scale', 'Maintain', 'Optimise', 'Reduce', 'Cut', 'Insufficient Data', 'Inactive', 'Unindexed'];
+const BRAND_COLORS = {
+  'Be Bodywise': '#3b82f6',
+  'Man Matters': '#8b5cf6',
+  'Little Joys': '#f59e0b'
+};
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+function metricScore(v, floor, healthy, strong) {
+  if (v === null || v === undefined || isNaN(v)) return null;
+  if (v >= strong) return 100;
+  if (v >= healthy) return 70 + 30 * (v - healthy) / (strong - healthy);
+  if (v >= floor) return 40 + 30 * (v - floor) / (healthy - floor);
+  return Math.max(0, 40 * v / floor);
+}
+function computeVerdict(roas, nur, ltvCac, score, bm, isInactive, isInsuf) {
+  if (isInactive) return 'Inactive';
+  if (isInsuf) return 'Insufficient Data';
+  if (!bm) return 'Unindexed';
+  let breaches = 0;
+  if (roas !== null && roas < bm.roasF) breaches++;
+  if (nur !== null && nur < bm.nurF) breaches++;
+  if (ltvCac !== null && ltvCac < bm.ltvF) breaches++;
+  if (breaches >= 3) return 'Cut';
+  if (breaches === 2 && (score === null || score < 20)) return 'Cut';
+  if (breaches === 2) return 'Reduce';
+  if (breaches === 1) return 'Optimise';
+  if (score === null) return 'Insufficient Data';
+  if (score >= 70) return 'Scale';
+  if (score >= 50) return 'Maintain';
+  if (score >= 35) return 'Optimise';
+  if (score >= 20) return 'Reduce';
+  return 'Cut';
+}
+function mColor(v, floor, healthy, strong) {
+  if (v === null || v === undefined || isNaN(v)) return '#4b5563';
+  if (strong != null && v >= strong) return '#22c55e';
+  if (healthy != null && v >= healthy) return '#3b82f6';
+  if (floor != null && v >= floor) return '#f59e0b';
+  return '#ef4444';
+}
+function fmt(n, type) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  if (type === 'rs') return '₹' + Math.round(n).toLocaleString('en-IN');
+  if (type === 'rsk') return n >= 100000 ? '₹' + (n / 100000).toFixed(1) + 'L' : n >= 1000 ? '₹' + (n / 1000).toFixed(0) + 'K' : '₹' + Math.round(n);
+  if (type === 'x') return n.toFixed(2) + 'x';
+  if (type === '%') return (n * 100).toFixed(0) + '%';
+  if (type === 'int') return Math.round(n).toLocaleString('en-IN');
+  return n.toFixed(1);
+}
+function parseDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+  if (typeof v === 'number') {
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof v === 'string') {
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+function colIdx(headers, ...names) {
+  for (const n of names) {
+    const i = headers.findIndex(h => String(h || '').trim().toLowerCase() === n.toLowerCase());
+    if (i >= 0) return i;
+  }
+  for (const n of names) {
+    const nl = n.toLowerCase();
+    const i = headers.findIndex(h => String(h || '').trim().toLowerCase().includes(nl));
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
+// ─── CSV PARSER ──────────────────────────────────────────────────────────────
+
+function parseCSV(text) {
+  const rows = [];
+  let row = [],
+    field = '',
+    inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      if (inQuote && text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else {
+        inQuote = !inQuote;
+      }
+    } else if (c === ',' && !inQuote) {
+      row.push(field);
+      field = '';
+    } else if ((c === '\n' || c === '\r') && !inQuote) {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field);
+      field = '';
+      if (row.length > 0) rows.push(row);
+      row = [];
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+// ─── FRAMEWORK PARSING FROM ROW ARRAYS ───────────────────────────────────────
+
+function parseFrameworkFromRows(raRows, niRows, condRows) {
+  const segmentMap = {};
+  const metaMap = {};
+  const ltvMap = {
+    ...LTV_TABLE
+  };
+
+  // Rough Analysis: col A/B, F/G, J/K → campaign → segment
+  if (raRows) {
+    raRows.forEach(row => {
+      const s0 = String(row[0] || '').trim(),
+        s1 = String(row[1] || '').trim();
+      const s5 = String(row[5] || '').trim(),
+        s6 = String(row[6] || '').trim();
+      const s9 = String(row[9] || '').trim(),
+        s10 = String(row[10] || '').trim();
+      if (s0 && s1 && !s0.toLowerCase().includes('campaign name') && !s0.toLowerCase().includes('head?')) segmentMap[s0.toLowerCase()] = s1;
+      if (s5 && s6 && !s5.toLowerCase().includes('campaign name') && !s5.toLowerCase().includes('type')) segmentMap[s5.toLowerCase()] = s6;
+      if (s9 && s10 && !s9.toLowerCase().includes('campaign name') && !s9.toLowerCase().includes('type')) segmentMap[s9.toLowerCase()] = s10;
+    });
+  }
+
+  // New Index: col G/H/I (index 6/7/8) → campaign → brand, category
+  if (niRows) {
+    niRows.forEach(row => {
+      const name = String(row[6] || '').trim();
+      if (name && !name.toLowerCase().includes('campaign name') && name.length > 3) {
+        const brand = String(row[7] || '').trim();
+        const category = String(row[8] || '').trim();
+        if (brand || category) {
+          metaMap[name.toLowerCase()] = {
+            brand,
+            category
+          };
+        }
+      }
+    });
+  }
+
+  // Conditions: LTV table — find 'GC Category' row, read until blank/section-end
+  if (condRows) {
+    let inLtv = false;
+    for (const row of condRows) {
+      const a = String(row[0] || '').trim();
+      if (a.toLowerCase() === 'gc category') {
+        inLtv = true;
+        continue;
+      }
+      if (inLtv) {
+        if (!a || a.startsWith('B.') || a.startsWith('--')) break;
+        const ltv = parseFloat(row[3]);
+        if (a && !isNaN(ltv) && ltv > 0) ltvMap[a.toLowerCase()] = ltv;
+      }
+    }
+  }
+  return {
+    segmentMap,
+    metaMap,
+    ltvMap
+  };
+}
+
+// ─── FETCH FRAMEWORK FROM GOOGLE SHEETS ──────────────────────────────────────
+
+async function fetchFrameworkFromSheets() {
+  const [raText, niText, condText] = await Promise.all([fetch(SHEET_BASE + 'Rough%20Analysis').then(r => {
+    if (!r.ok) throw new Error('Rough Analysis fetch failed');
+    return r.text();
+  }), fetch(SHEET_BASE + 'New%20Index').then(r => {
+    if (!r.ok) throw new Error('New Index fetch failed');
+    return r.text();
+  }), fetch(SHEET_BASE + 'Conditions').then(r => {
+    if (!r.ok) throw new Error('Conditions fetch failed');
+    return r.text();
+  })]);
+  const raRows = parseCSV(raText);
+  const niRows = parseCSV(niText);
+  const condRows = parseCSV(condText);
+  return parseFrameworkFromRows(raRows, niRows, condRows);
+}
+
+// ─── FRAMEWORK PARSER (from uploaded file, fallback) ─────────────────────────
+
+function parseFramework(buffer) {
+  const wb = XLSX.read(buffer, {
+    type: 'array',
+    cellDates: true
+  });
+  const raRows = wb.Sheets['Rough Analysis'] ? XLSX.utils.sheet_to_json(wb.Sheets['Rough Analysis'], {
+    header: 1,
+    defval: ''
+  }) : null;
+  const niRows = wb.Sheets['New Index'] ? XLSX.utils.sheet_to_json(wb.Sheets['New Index'], {
+    header: 1,
+    defval: ''
+  }) : null;
+  const condRows = wb.Sheets['Conditions'] ? XLSX.utils.sheet_to_json(wb.Sheets['Conditions'], {
+    header: 1,
+    defval: ''
+  }) : null;
+  return parseFrameworkFromRows(raRows, niRows, condRows);
+}
+
+// ─── RAW REPORT PARSER ───────────────────────────────────────────────────────
+
+function parseRawReport(buffer, segmentMap, metaMap, ltvMap) {
+  const wb = XLSX.read(buffer, {
+    type: 'array',
+    cellDates: true,
+    raw: true
+  });
+  const campaignData = {};
+  function processSheet(sheetName, type, extractor) {
+    const ws = wb.Sheets[sheetName];
+    if (!ws) return;
+    const rows = XLSX.utils.sheet_to_json(ws, {
+      header: 1,
+      defval: 0,
+      raw: true
+    });
+    if (rows.length < 2) return;
+    const headers = rows[0].map(h => String(h || '').trim());
+    rows.slice(1).forEach(row => {
+      const r = extractor(row, headers);
+      if (!r || !r.campaign || r.campaign === '0') return;
+      const key = r.campaign.trim();
+      if (!campaignData[key]) campaignData[key] = {
+        type,
+        rows: []
+      };
+      campaignData[key].rows.push(r);
+    });
+  }
+
+  // Keyword Targeting (Search)
+  processSheet('Keyword Targeting', 'Search', (row, h) => {
+    const iCamp = colIdx(h, 'Campaign Name'),
+      iDate = colIdx(h, 'date_ist'),
+      iImp = colIdx(h, 'Impressions'),
+      iPos = colIdx(h, 'Most Viewed Position'),
+      iNU = colIdx(h, 'New Users'),
+      iDS = colIdx(h, 'Direct Sales'),
+      iDQ = colIdx(h, 'Direct Quantities Sold'),
+      iIQ = colIdx(h, 'Indirect Quantities Sold'),
+      iSp = colIdx(h, 'Estimated Budget Consumed');
+    return {
+      campaign: String(row[iCamp] || '').trim(),
+      date: parseDate(row[iDate]),
+      impressions: Number(row[iImp]) || 0,
+      position: Number(row[iPos]) || null,
+      newUsers: Number(row[iNU]) || 0,
+      directSales: Number(row[iDS]) || 0,
+      directQty: Number(row[iDQ]) || 0,
+      indirectQty: Number(row[iIQ]) || 0,
+      spend: Number(row[iSp]) || 0,
+      asset: null,
+      layout: null
+    };
+  });
+
+  // Product Recommendation (Reco)
+  processSheet('Product Recommendation', 'Reco', (row, h) => {
+    const iCamp = colIdx(h, 'Campaign Name'),
+      iDate = colIdx(h, 'date_ist'),
+      iImp = colIdx(h, 'Impressions'),
+      iAsset = colIdx(h, 'Asset'),
+      iNU = colIdx(h, 'New Users'),
+      iDS = colIdx(h, 'Direct Sales'),
+      iDQ = colIdx(h, 'Direct Quantities Sold'),
+      iIQ = colIdx(h, 'Indirect Quantities Sold'),
+      iSp = colIdx(h, 'Estimated Budget Consumed');
+    return {
+      campaign: String(row[iCamp] || '').trim(),
+      date: parseDate(row[iDate]),
+      impressions: Number(row[iImp]) || 0,
+      position: null,
+      newUsers: Number(row[iNU]) || 0,
+      directSales: Number(row[iDS]) || 0,
+      directQty: Number(row[iDQ]) || 0,
+      indirectQty: Number(row[iIQ]) || 0,
+      spend: Number(row[iSp]) || 0,
+      asset: String(row[iAsset] || '').trim(),
+      layout: null
+    };
+  });
+
+  // Product Shelf (Display)
+  processSheet('Product Shelf', 'Display', (row, h) => {
+    const iCamp = colIdx(h, 'Campaign Name'),
+      iDate = colIdx(h, 'date_ist'),
+      iImp = colIdx(h, 'Impressions'),
+      iLayout = colIdx(h, 'Targeting Layout'),
+      iNU = colIdx(h, 'New Users'),
+      iDS = colIdx(h, 'Direct Sales'),
+      iDQ = colIdx(h, 'Direct Quantities Sold'),
+      iIQ = colIdx(h, 'Indirect Quantities Sold'),
+      iSp = colIdx(h, 'Estimated Budget Consumed');
+    return {
+      campaign: String(row[iCamp] || '').trim(),
+      date: parseDate(row[iDate]),
+      impressions: Number(row[iImp]) || 0,
+      position: null,
+      newUsers: Number(row[iNU]) || 0,
+      directSales: Number(row[iDS]) || 0,
+      directQty: Number(row[iDQ]) || 0,
+      indirectQty: Number(row[iIQ]) || 0,
+      spend: Number(row[iSp]) || 0,
+      asset: null,
+      layout: String(row[iLayout] || '').trim()
+    };
+  });
+
+  // Find global max date
+  let maxDate = null;
+  Object.values(campaignData).forEach(c => c.rows.forEach(r => {
+    if (r.date && (!maxDate || r.date > maxDate)) maxDate = r.date;
+  }));
+  if (!maxDate) return [];
+  const campaigns = [];
+  Object.entries(campaignData).forEach(([name, data]) => {
+    const lookback = data.type === 'Display' ? 15 : 7;
+    const cutoff = new Date(maxDate.getTime() - lookback * 86400000);
+    const winRows = data.rows.filter(r => r.date && r.date >= cutoff);
+    const allDates = [...new Set(data.rows.map(r => r.date?.toDateString()).filter(Boolean))];
+    const lastRow = data.rows.reduce((m, r) => r.date && r.date > (m?.date || 0) ? r : m, null);
+    const daysSinceLive = lastRow?.date ? (maxDate - lastRow.date) / 86400000 : 999;
+
+    // Segment
+    let segment = segmentMap[name.toLowerCase()];
+    if (!segment && data.type === 'Reco') {
+      const assets = data.rows.map(r => r.asset).filter(Boolean);
+      segment = assets[0] || 'Unindexed';
+    }
+    if (!segment && data.type === 'Display') {
+      const layout = data.rows[0]?.layout || '';
+      if (layout === 'feed') segment = 'Homepage Display Direct shelf';else if (layout === 'plp') segment = 'Category Display Direct shelf';else if (name.toLowerCase().includes('homepage')) segment = 'Homepage Display Direct shelf';else if (name.toLowerCase().includes('category')) segment = 'Category Display Direct shelf';else segment = 'Unindexed';
+    }
+    if (!segment) segment = 'Unindexed';
+    const meta = metaMap[name.toLowerCase()] || {
+      brand: '',
+      category: ''
+    };
+    const totSpend = winRows.reduce((s, r) => s + r.spend, 0);
+    const totDS = winRows.reduce((s, r) => s + r.directSales, 0);
+    const totNU = winRows.reduce((s, r) => s + r.newUsers, 0);
+    const totDQ = winRows.reduce((s, r) => s + r.directQty, 0);
+    const totIQ = winRows.reduce((s, r) => s + r.indirectQty, 0);
+    const totImp = winRows.reduce((s, r) => s + r.impressions, 0);
+    let avgPos = null;
+    if (data.type === 'Search') {
+      const posRows = winRows.filter(r => r.position && r.position > 0 && r.impressions > 0);
+      if (posRows.length > 0) {
+        const totI = posRows.reduce((s, r) => s + r.impressions, 0);
+        avgPos = posRows.reduce((s, r) => s + r.position * r.impressions, 0) / (totI || 1);
+      }
+    }
+    const roas = totSpend > 0 && totDS > 0 ? totDS / totSpend : totSpend > 0 ? 0 : null;
+    const totQty = totDQ + totIQ;
+    const nur = totQty > 0 ? totNU / totQty : null;
+    const ltv = ltvMap[meta.category.toLowerCase()] || null;
+    const cac = totNU > 0 ? totSpend / totNU : null;
+    const ltvCac = ltv && cac ? ltv / cac : null;
+    const isInactive = daysSinceLive > 1;
+    const isInsuf = allDates.length < 10;
+    const bm = BENCHMARKS[segment] || null;
+    let roasScore = null,
+      nurScore = null,
+      ltvScore = null,
+      score = null;
+    if (bm) {
+      roasScore = roas !== null ? metricScore(roas, bm.roasF, bm.roasH, bm.roasS) : null;
+      nurScore = nur !== null ? metricScore(nur, bm.nurF, bm.nurH, bm.nurS) : null;
+      ltvScore = ltvCac !== null ? metricScore(ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null;
+      if (roasScore !== null && nurScore !== null && ltvScore !== null) score = roasScore * bm.roasWt + nurScore * bm.nurWt + ltvScore * bm.ltvWt;
+    }
+    const verdict = computeVerdict(roas, nur, ltvCac, score, bm, isInactive, isInsuf);
+    campaigns.push({
+      campaign: name,
+      brand: meta.brand,
+      category: meta.category,
+      segment,
+      type: data.type,
+      spend: totSpend,
+      directSales: totDS,
+      impressions: totImp,
+      newUsers: totNU,
+      totalQty: totQty,
+      roas,
+      nur,
+      ltvCac,
+      ltv,
+      roasScore,
+      nurScore,
+      ltvScore,
+      score,
+      verdict,
+      daysLive: allDates.length,
+      isInactive,
+      isInsuf,
+      avgPos,
+      windowDays: [...new Set(winRows.map(r => r.date?.toDateString()).filter(Boolean))].length
+    });
+  });
+  return campaigns.sort((a, b) => (b.spend || 0) - (a.spend || 0));
+}
+
+// ─── UI ATOMS ────────────────────────────────────────────────────────────────
+
+const {
+  useState,
+  useMemo,
+  useCallback,
+  useRef,
+  useEffect
+} = React;
+function VBadge({
+  verdict,
+  sm
+}) {
+  const cfg = VERDICT_CFG[verdict] || VERDICT_CFG['Inactive'];
+  const label = verdict === 'Insufficient Data' ? 'Insuf. Data' : verdict;
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: cfg.bg,
+      color: cfg.color,
+      border: `1px solid ${cfg.border}`,
+      fontSize: sm ? 10 : 11,
+      padding: sm ? '1px 6px' : '2px 8px',
+      borderRadius: 999,
+      fontWeight: 600,
+      whiteSpace: 'nowrap',
+      display: 'inline-block'
+    }
+  }, label);
+}
+function ScoreBar({
+  score
+}) {
+  if (score === null || score === undefined) return /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563'
+    }
+  }, "\u2014");
+  const s = Math.max(0, Math.min(100, Math.round(score)));
+  const c = s >= 70 ? '#22c55e' : s >= 50 ? '#3b82f6' : s >= 35 ? '#f59e0b' : s >= 20 ? '#f97316' : '#ef4444';
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 44,
+      height: 4,
+      background: '#1f2937',
+      borderRadius: 2,
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: `${s}%`,
+      height: '100%',
+      background: c,
+      borderRadius: 2
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: c,
+      fontSize: 11,
+      fontWeight: 600,
+      minWidth: 24
+    }
+  }, s));
+}
+function MCell({
+  val,
+  floor,
+  healthy,
+  strong,
+  type = 'x'
+}) {
+  if (val === null || val === undefined) return /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563'
+    }
+  }, "\u2014");
+  const c = mColor(val, floor, healthy, strong);
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: c,
+      fontWeight: 600
+    }
+  }, fmt(val, type));
+}
+function Select({
+  value,
+  onChange,
+  options,
+  placeholder
+}) {
+  return /*#__PURE__*/React.createElement("select", {
+    value: value,
+    onChange: e => onChange(e.target.value),
+    style: {
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: '#d1d5db',
+      borderRadius: 6,
+      fontSize: 11,
+      padding: '5px 10px',
+      cursor: 'pointer',
+      outline: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, placeholder), options.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o,
+    value: o
+  }, o)));
+}
+function Card({
+  children,
+  style
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#0d1117',
+      border: '1px solid #1f2937',
+      borderRadius: 12,
+      padding: 20,
+      ...style
+    }
+  }, children);
+}
+
+// ─── CUSTOM CHARTS ────────────────────────────────────────────────────────────
+
+function VBarChart({
+  data,
+  xKey,
+  yKey,
+  colorFn,
+  height = 190
+}) {
+  const [tip, setTip] = useState(null);
+  const max = Math.max(...data.map(d => d[yKey] || 0), 1);
+  const fmtV = v => v >= 100000 ? '₹' + (v / 100000).toFixed(1) + 'L' : v >= 1000 ? '₹' + (v / 1000).toFixed(0) + 'K' : '₹' + Math.round(v);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative'
+    }
+  }, tip && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: 0,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      background: '#1f2937',
+      border: '1px solid #374151',
+      borderRadius: 6,
+      padding: '4px 10px',
+      fontSize: 11,
+      color: '#fff',
+      whiteSpace: 'nowrap',
+      zIndex: 10,
+      pointerEvents: 'none'
+    }
+  }, tip.label, ": ", fmtV(tip.val)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-end',
+      gap: 4,
+      height,
+      paddingTop: 24,
+      paddingBottom: 2
+    }
+  }, data.map((d, i) => {
+    const pct = (d[yKey] || 0) / max * 100;
+    const color = colorFn ? colorFn(d) : '#3b82f6';
+    const label = String(d[xKey]);
+    const short = label === 'Insufficient Data' ? 'Insuf.' : label.length > 9 ? label.slice(0, 8) + '…' : label;
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        cursor: 'default'
+      },
+      onMouseEnter: () => setTip({
+        label,
+        val: d[yKey]
+      }),
+      onMouseLeave: () => setTip(null)
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: '100%',
+        height: `${pct}%`,
+        background: color,
+        opacity: 0.85,
+        borderRadius: '3px 3px 0 0',
+        minHeight: pct > 0 ? 3 : 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#6b7280',
+        fontSize: 9,
+        textAlign: 'center',
+        marginTop: 4,
+        lineHeight: 1.2
+      }
+    }, short));
+  })));
+}
+function HBarChart({
+  data,
+  yKey,
+  xKey,
+  colorFn,
+  yWidth = 70
+}) {
+  const [tip, setTip] = useState(null);
+  const max = Math.max(...data.map(d => d[xKey] || 0), 1);
+  const fmtV = v => v >= 100000 ? '₹' + (v / 100000).toFixed(1) + 'L' : v >= 1000 ? '₹' + (v / 1000).toFixed(0) + 'K' : '₹' + Math.round(v);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+      position: 'relative'
+    }
+  }, tip && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: -26,
+      left: '50%',
+      transform: 'translateX(-50%)',
+      background: '#1f2937',
+      border: '1px solid #374151',
+      borderRadius: 6,
+      padding: '3px 8px',
+      fontSize: 11,
+      color: '#fff',
+      whiteSpace: 'nowrap',
+      zIndex: 10,
+      pointerEvents: 'none'
+    }
+  }, tip.label, ": ", fmtV(tip.val)), data.map((d, i) => {
+    const pct = (d[xKey] || 0) / max * 100;
+    const color = colorFn ? colorFn(d) : '#3b82f6';
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        cursor: 'default'
+      },
+      onMouseEnter: () => setTip({
+        label: String(d[yKey]),
+        val: d[xKey]
+      }),
+      onMouseLeave: () => setTip(null)
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#d1d5db',
+        fontSize: 11,
+        minWidth: yWidth,
+        textAlign: 'right',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        flexShrink: 0
+      }
+    }, d[yKey]), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        height: 16,
+        background: '#1f2937',
+        borderRadius: 3,
+        overflow: 'hidden'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: `${pct}%`,
+        height: '100%',
+        background: color,
+        opacity: 0.85,
+        borderRadius: 3
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 10,
+        minWidth: 48,
+        textAlign: 'right',
+        flexShrink: 0
+      }
+    }, fmtV(d[xKey])));
+  }));
+}
+
+// ─── PORTFOLIO VIEW ──────────────────────────────────────────────────────────
+
+function PortfolioView({
+  campaigns
+}) {
+  const active = campaigns.filter(c => c.verdict !== 'Inactive' && c.verdict !== 'Unindexed');
+  const totalSpend = campaigns.reduce((s, c) => s + (c.spend || 0), 0);
+  const totalSales = campaigns.reduce((s, c) => s + (c.directSales || 0), 0);
+  const totalImp = campaigns.reduce((s, c) => s + (c.impressions || 0), 0);
+  const avgRoas = totalSpend > 0 ? totalSales / totalSpend : null;
+  const byVerdict = VERDICT_ORDER.map(v => ({
+    verdict: v,
+    spend: campaigns.filter(c => c.verdict === v).reduce((s, c) => s + (c.spend || 0), 0),
+    count: campaigns.filter(c => c.verdict === v).length
+  })).filter(x => x.count > 0);
+  const brands = [...new Set(campaigns.map(c => c.brand).filter(Boolean))];
+  const byBrand = brands.map(b => ({
+    brand: b,
+    spend: campaigns.filter(c => c.brand === b).reduce((s, c) => s + (c.spend || 0), 0),
+    color: BRAND_COLORS[b] || '#6b7280'
+  })).sort((a, b) => b.spend - a.spend);
+  const segs = [...new Set(campaigns.map(c => c.segment).filter(Boolean))];
+  const bySeg = segs.map(s => ({
+    seg: SEG_SHORT[s] || s,
+    spend: campaigns.filter(c => c.segment === s).reduce((t, c) => t + (c.spend || 0), 0)
+  })).sort((a, b) => b.spend - a.spend);
+  const statBox = (label, val, sub) => /*#__PURE__*/React.createElement(Card, {
+    style: {
+      flex: 1,
+      minWidth: 140
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 11,
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 20,
+      fontWeight: 700
+    }
+  }, val), sub && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 10,
+      marginTop: 2
+    }
+  }, sub));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 12,
+      flexWrap: 'wrap'
+    }
+  }, statBox('Total Spend (window)', fmt(totalSpend, 'rsk'), `${campaigns.length} campaigns`), statBox('Direct Sales', fmt(totalSales, 'rsk'), `ROAS ${avgRoas ? avgRoas.toFixed(2) + 'x' : '—'}`), statBox('Impressions', fmt(totalImp, 'int'), 'in lookback window'), statBox('Active Campaigns', active.length, `${campaigns.filter(c => c.verdict === 'Scale').length} scaling`)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: '1fr 1fr',
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      marginBottom: 14
+    }
+  }, "Spend by Verdict"), /*#__PURE__*/React.createElement(VBarChart, {
+    data: byVerdict,
+    xKey: "verdict",
+    yKey: "spend",
+    colorFn: d => (VERDICT_CFG[d.verdict] || {
+      color: '#6b7280'
+    }).color,
+    height: 190
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      marginBottom: 14
+    }
+  }, "Campaigns by Verdict"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      marginTop: 8
+    }
+  }, byVerdict.map(({
+    verdict,
+    count,
+    spend
+  }) => {
+    const cfg = VERDICT_CFG[verdict] || {
+      color: '#6b7280'
+    };
+    const pct = totalSpend > 0 ? spend / totalSpend * 100 : 0;
+    return /*#__PURE__*/React.createElement("div", {
+      key: verdict,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        minWidth: 100
+      }
+    }, /*#__PURE__*/React.createElement(VBadge, {
+      verdict: verdict,
+      sm: true
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        height: 6,
+        background: '#1f2937',
+        borderRadius: 3
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: `${pct}%`,
+        height: '100%',
+        background: cfg.color,
+        borderRadius: 3,
+        opacity: 0.7
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 11,
+        minWidth: 20,
+        textAlign: 'right'
+      }
+    }, count), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#4b5563',
+        fontSize: 10,
+        minWidth: 50,
+        textAlign: 'right'
+      }
+    }, fmt(spend, 'rsk')));
+  }))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      marginBottom: 14
+    }
+  }, "Spend by Brand"), /*#__PURE__*/React.createElement(HBarChart, {
+    data: byBrand,
+    yKey: "brand",
+    xKey: "spend",
+    colorFn: d => d.color,
+    yWidth: 100
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      marginBottom: 14
+    }
+  }, "Spend by Segment"), /*#__PURE__*/React.createElement(HBarChart, {
+    data: bySeg,
+    yKey: "seg",
+    xKey: "spend",
+    yWidth: 110
+  }))));
+}
+
+// ─── SCORECARD VIEW ──────────────────────────────────────────────────────────
+
+function ScorecardView({
+  campaigns
+}) {
+  const [search, setSearch] = useState('');
+  const [brand, setBrand] = useState('');
+  const [cat, setCat] = useState('');
+  const [seg, setSeg] = useState('');
+  const [verdict, setVerdict] = useState('');
+  const [sort, setSort] = useState({
+    col: 'spend',
+    dir: -1
+  });
+  const brands = [...new Set(campaigns.map(c => c.brand).filter(Boolean))].sort();
+  const cats = [...new Set(campaigns.map(c => c.category).filter(Boolean))].sort();
+  const segs = [...new Set(campaigns.map(c => c.segment).filter(Boolean))].sort();
+  const verdicts = VERDICT_ORDER.filter(v => campaigns.some(c => c.verdict === v));
+  const filtered = useMemo(() => {
+    let out = campaigns;
+    if (search) out = out.filter(c => c.campaign.toLowerCase().includes(search.toLowerCase()));
+    if (brand) out = out.filter(c => c.brand === brand);
+    if (cat) out = out.filter(c => c.category === cat);
+    if (seg) out = out.filter(c => c.segment === seg);
+    if (verdict) out = out.filter(c => c.verdict === verdict);
+    return [...out].sort((a, b) => {
+      const av = a[sort.col],
+        bv = b[sort.col];
+      if (av === null || av === undefined) return 1;
+      if (bv === null || bv === undefined) return -1;
+      return sort.dir * (av > bv ? 1 : av < bv ? -1 : 0);
+    });
+  }, [campaigns, search, brand, cat, seg, verdict, sort]);
+  const toggleSort = col => setSort(s => ({
+    col,
+    dir: s.col === col ? -s.dir : -1
+  }));
+  const Th = ({
+    col,
+    children
+  }) => /*#__PURE__*/React.createElement("th", {
+    onClick: () => toggleSort(col),
+    style: {
+      padding: '8px 10px',
+      textAlign: 'left',
+      color: '#6b7280',
+      fontSize: 10,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      cursor: 'pointer',
+      whiteSpace: 'nowrap',
+      userSelect: 'none',
+      background: sort.col === col ? 'rgba(59,130,246,0.05)' : 'transparent'
+    }
+  }, children, " ", sort.col === col ? sort.dir > 0 ? '↑' : '↓' : '');
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      flexWrap: 'wrap',
+      alignItems: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: search,
+    onChange: e => setSearch(e.target.value),
+    placeholder: "Search campaign\u2026",
+    style: {
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: '#d1d5db',
+      borderRadius: 6,
+      fontSize: 11,
+      padding: '5px 10px',
+      outline: 'none',
+      width: 200
+    }
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: brand,
+    onChange: setBrand,
+    options: brands,
+    placeholder: "All Brands"
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: cat,
+    onChange: setCat,
+    options: cats,
+    placeholder: "All Categories"
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: seg,
+    onChange: setSeg,
+    options: segs,
+    placeholder: "All Segments"
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: verdict,
+    onChange: setVerdict,
+    options: verdicts,
+    placeholder: "All Verdicts"
+  }), (search || brand || cat || seg || verdict) && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setSearch('');
+      setBrand('');
+      setCat('');
+      setSeg('');
+      setVerdict('');
+    },
+    style: {
+      color: '#6b7280',
+      fontSize: 11,
+      background: 'transparent',
+      border: 'none',
+      cursor: 'pointer'
+    }
+  }, "Clear \xD7"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 11,
+      marginLeft: 'auto'
+    }
+  }, filtered.length, " campaigns")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto',
+      borderRadius: 10,
+      border: '1px solid #1f2937'
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      borderBottom: '1px solid #1f2937'
+    }
+  }, /*#__PURE__*/React.createElement(Th, {
+    col: "campaign"
+  }, "Campaign"), /*#__PURE__*/React.createElement(Th, {
+    col: "brand"
+  }, "Brand"), /*#__PURE__*/React.createElement(Th, {
+    col: "category"
+  }, "Category"), /*#__PURE__*/React.createElement(Th, {
+    col: "segment"
+  }, "Segment"), /*#__PURE__*/React.createElement(Th, {
+    col: "spend"
+  }, "Spend"), /*#__PURE__*/React.createElement(Th, {
+    col: "roas"
+  }, "ROAS"), /*#__PURE__*/React.createElement(Th, {
+    col: "nur"
+  }, "NUR"), /*#__PURE__*/React.createElement(Th, {
+    col: "ltvCac"
+  }, "LTV:CAC"), /*#__PURE__*/React.createElement(Th, {
+    col: "score"
+  }, "Score"), /*#__PURE__*/React.createElement(Th, {
+    col: "verdict"
+  }, "Verdict"), /*#__PURE__*/React.createElement(Th, {
+    col: "daysLive"
+  }, "Days"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((c, i) => {
+    const bm = BENCHMARKS[c.segment] || null;
+    return /*#__PURE__*/React.createElement("tr", {
+      key: i,
+      style: {
+        borderBottom: '1px solid #111827',
+        background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)'
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px',
+        color: '#e5e7eb',
+        maxWidth: 220,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      },
+      title: c.campaign
+    }, c.campaign), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px',
+        color: BRAND_COLORS[c.brand] || '#6b7280',
+        fontWeight: 600
+      }
+    }, c.brand || '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px',
+        color: '#9ca3af'
+      }
+    }, c.category || '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px',
+        color: '#6b7280',
+        whiteSpace: 'nowrap'
+      }
+    }, SEG_SHORT[c.segment] || c.segment), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px',
+        color: '#d1d5db',
+        fontWeight: 600
+      }
+    }, fmt(c.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px'
+      }
+    }, /*#__PURE__*/React.createElement(MCell, {
+      val: c.roas,
+      floor: bm?.roasF,
+      healthy: bm?.roasH,
+      strong: bm?.roasS,
+      type: "x"
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px'
+      }
+    }, /*#__PURE__*/React.createElement(MCell, {
+      val: c.nur,
+      floor: bm?.nurF,
+      healthy: bm?.nurH,
+      strong: bm?.nurS,
+      type: "%"
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px'
+      }
+    }, /*#__PURE__*/React.createElement(MCell, {
+      val: c.ltvCac,
+      floor: bm?.ltvF,
+      healthy: bm?.ltvH,
+      strong: bm?.ltvS,
+      type: "x"
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px'
+      }
+    }, /*#__PURE__*/React.createElement(ScoreBar, {
+      score: c.score
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px'
+      }
+    }, /*#__PURE__*/React.createElement(VBadge, {
+      verdict: c.verdict,
+      sm: true
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '7px 10px',
+        color: '#4b5563',
+        textAlign: 'center'
+      }
+    }, c.daysLive));
+  })))));
+}
+
+// ─── SEGMENT HEALTH VIEW ─────────────────────────────────────────────────────
+
+function SegmentHealthView({
+  campaigns
+}) {
+  const segs = [...new Set(campaigns.map(c => c.segment).filter(s => s && s !== 'Unindexed'))];
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
+    }
+  }, segs.map(seg => {
+    const bm = BENCHMARKS[seg];
+    const cs = campaigns.filter(c => c.segment === seg && c.verdict !== 'Inactive' && c.verdict !== 'Unindexed');
+    if (!bm || cs.length === 0) return null;
+    const totSpend = cs.reduce((s, c) => s + (c.spend || 0), 0);
+    const wtRoas = cs.filter(c => c.roas !== null && c.spend > 0).reduce((s, c) => s + c.roas * c.spend, 0) / (totSpend || 1);
+    const wtNur = cs.filter(c => c.nur !== null && c.spend > 0).reduce((s, c) => s + c.nur * c.spend, 0) / (totSpend || 1);
+    const wtLtv = cs.filter(c => c.ltvCac !== null && c.spend > 0).reduce((s, c) => s + c.ltvCac * c.spend, 0) / (totSpend || 1);
+    const roasBreach = cs.filter(c => c.roas !== null && c.roas < bm.roasF).length;
+    const nurBreach = cs.filter(c => c.nur !== null && c.nur < bm.nurF).length;
+    const ltvBreach = cs.filter(c => c.ltvCac !== null && c.ltvCac < bm.ltvF).length;
+    const MetricRow = ({
+      label,
+      val,
+      floor,
+      healthy,
+      strong,
+      type
+    }) => {
+      const c = mColor(val, floor, healthy, strong);
+      const pct = strong > 0 ? Math.min(100, val / strong * 100) : 0;
+      return /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginBottom: 10
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          justifyContent: 'space-between',
+          marginBottom: 4
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#9ca3af',
+          fontSize: 11
+        }
+      }, label), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: c,
+          fontSize: 12,
+          fontWeight: 700
+        }
+      }, fmt(val, type))), /*#__PURE__*/React.createElement("div", {
+        style: {
+          height: 6,
+          background: '#1f2937',
+          borderRadius: 3,
+          position: 'relative'
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          width: `${pct}%`,
+          height: '100%',
+          background: c,
+          borderRadius: 3,
+          opacity: 0.7
+        }
+      }), /*#__PURE__*/React.createElement("div", {
+        style: {
+          position: 'absolute',
+          top: -3,
+          bottom: -3,
+          left: `${Math.min(100, floor / strong * 100)}%`,
+          width: 2,
+          background: '#ef444460',
+          borderRadius: 1
+        }
+      }), /*#__PURE__*/React.createElement("div", {
+        style: {
+          position: 'absolute',
+          top: -3,
+          bottom: -3,
+          left: `${Math.min(100, healthy / strong * 100)}%`,
+          width: 2,
+          background: '#3b82f660',
+          borderRadius: 1
+        }
+      })), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          gap: 8,
+          marginTop: 3,
+          fontSize: 9,
+          color: '#4b5563'
+        }
+      }, /*#__PURE__*/React.createElement("span", null, "Floor ", fmt(floor, type)), /*#__PURE__*/React.createElement("span", null, "Healthy ", fmt(healthy, type)), /*#__PURE__*/React.createElement("span", null, "Strong ", fmt(strong, type))));
+    };
+    return /*#__PURE__*/React.createElement(Card, {
+      key: seg
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#f9fafb',
+        fontSize: 13,
+        fontWeight: 700
+      }
+    }, SEG_SHORT[seg] || seg), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#4b5563',
+        fontSize: 11,
+        marginLeft: 8
+      }
+    }, cs.length, " campaigns \xB7 ", fmt(totSpend, 'rsk'))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 6
+      }
+    }, roasBreach > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444',
+        fontSize: 10,
+        background: 'rgba(239,68,68,0.1)',
+        padding: '2px 6px',
+        borderRadius: 4
+      }
+    }, "ROAS \u26A0 ", roasBreach), nurBreach > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444',
+        fontSize: 10,
+        background: 'rgba(239,68,68,0.1)',
+        padding: '2px 6px',
+        borderRadius: 4
+      }
+    }, "NUR \u26A0 ", nurBreach), ltvBreach > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444',
+        fontSize: 10,
+        background: 'rgba(239,68,68,0.1)',
+        padding: '2px 6px',
+        borderRadius: 4
+      }
+    }, "LTV \u26A0 ", ltvBreach))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr 1fr',
+        gap: 20
+      }
+    }, /*#__PURE__*/React.createElement(MetricRow, {
+      label: "Avg ROAS (spend-weighted)",
+      val: wtRoas,
+      floor: bm.roasF,
+      healthy: bm.roasH,
+      strong: bm.roasS,
+      type: "x"
+    }), /*#__PURE__*/React.createElement(MetricRow, {
+      label: "Avg NUR (spend-weighted)",
+      val: wtNur,
+      floor: bm.nurF,
+      healthy: bm.nurH,
+      strong: bm.nurS,
+      type: "%"
+    }), /*#__PURE__*/React.createElement(MetricRow, {
+      label: "Avg LTV:CAC (spend-weighted)",
+      val: wtLtv,
+      floor: bm.ltvF,
+      healthy: bm.ltvH,
+      strong: bm.ltvS,
+      type: "x"
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 6,
+        marginTop: 12,
+        flexWrap: 'wrap'
+      }
+    }, VERDICT_ORDER.filter(v => cs.some(c => c.verdict === v)).map(v => /*#__PURE__*/React.createElement("span", {
+      key: v,
+      style: {
+        fontSize: 10,
+        color: (VERDICT_CFG[v] || {
+          color: '#6b7280'
+        }).color,
+        background: (VERDICT_CFG[v] || {
+          bg: 'rgba(107,114,128,0.1)'
+        }).bg,
+        padding: '1px 7px',
+        borderRadius: 4
+      }
+    }, v === 'Insufficient Data' ? 'Insuf.' : v, ": ", cs.filter(c => c.verdict === v).length))));
+  }));
+}
+
+// ─── ACTION QUEUE VIEW ───────────────────────────────────────────────────────
+
+function ActionQueueView({
+  campaigns
+}) {
+  const urgent = ['Cut', 'Reduce', 'Optimise', 'Scale'];
+  const queue = campaigns.filter(c => urgent.includes(c.verdict)).sort((a, b) => urgent.indexOf(a.verdict) - urgent.indexOf(b.verdict) || (b.spend || 0) - (a.spend || 0));
+  const actionText = c => {
+    const bm = BENCHMARKS[c.segment];
+    const breaches = [];
+    if (bm && c.roas !== null && c.roas < bm.roasF) breaches.push(`ROAS ${fmt(c.roas, 'x')} < floor ${fmt(bm.roasF, 'x')}`);
+    if (bm && c.nur !== null && c.nur < bm.nurF) breaches.push(`NUR ${fmt(c.nur, '%')} < floor ${fmt(bm.nurF, '%')}`);
+    if (bm && c.ltvCac !== null && c.ltvCac < bm.ltvF) breaches.push(`LTV:CAC ${fmt(c.ltvCac, 'x')} < floor ${fmt(bm.ltvF, 'x')}`);
+    if (c.verdict === 'Cut') return `Pause immediately. ${breaches.join(' · ')}`;
+    if (c.verdict === 'Reduce') return `Reduce budget 25%. ${breaches.join(' · ')}`;
+    if (c.verdict === 'Optimise') {
+      if (c.ltvCac !== null && bm && c.ltvCac < bm.ltvF) return `Lower CPM — acquisition cost too high. ${breaches.join(' · ')}`;
+      if (c.roas !== null && bm && c.roas < bm.roasF) return `Hold CPM — ROAS weak but check conversion. ${breaches.join(' · ')}`;
+      return `Optimise: ${breaches.join(' · ')}`;
+    }
+    if (c.verdict === 'Scale') return `Increase budget${c.avgPos && bm?.posThr && c.avgPos > bm.posThr ? ' and raise CPM' : ''} — all metrics above floor.`;
+    return '';
+  };
+  const byVerdict = urgent.filter(v => queue.some(c => c.verdict === v));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 20
+    }
+  }, byVerdict.map(v => {
+    const group = queue.filter(c => c.verdict === v);
+    const cfg = VERDICT_CFG[v];
+    return /*#__PURE__*/React.createElement("div", {
+      key: v
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        marginBottom: 10
+      }
+    }, /*#__PURE__*/React.createElement(VBadge, {
+      verdict: v
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#4b5563',
+        fontSize: 11
+      }
+    }, group.length, " campaigns \xB7 ", fmt(group.reduce((s, c) => s + (c.spend || 0), 0), 'rsk'), " spend")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6
+      }
+    }, group.map((c, i) => {
+      const bm = BENCHMARKS[c.segment];
+      return /*#__PURE__*/React.createElement("div", {
+        key: i,
+        style: {
+          background: '#0d1117',
+          border: `1px solid ${cfg.border}`,
+          borderRadius: 8,
+          padding: '10px 14px',
+          display: 'grid',
+          gridTemplateColumns: '1fr auto auto auto auto',
+          gap: 12,
+          alignItems: 'center'
+        }
+      }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+        style: {
+          color: '#e5e7eb',
+          fontSize: 12,
+          fontWeight: 600,
+          marginBottom: 2
+        },
+        title: c.campaign
+      }, c.campaign.length > 55 ? c.campaign.slice(0, 55) + '…' : c.campaign), /*#__PURE__*/React.createElement("div", {
+        style: {
+          color: '#4b5563',
+          fontSize: 10
+        }
+      }, actionText(c))), /*#__PURE__*/React.createElement(MCell, {
+        val: c.roas,
+        floor: bm?.roasF,
+        healthy: bm?.roasH,
+        strong: bm?.roasS,
+        type: "x"
+      }), /*#__PURE__*/React.createElement(MCell, {
+        val: c.nur,
+        floor: bm?.nurF,
+        healthy: bm?.nurH,
+        strong: bm?.nurS,
+        type: "%"
+      }), /*#__PURE__*/React.createElement(MCell, {
+        val: c.ltvCac,
+        floor: bm?.ltvF,
+        healthy: bm?.ltvH,
+        strong: bm?.ltvS,
+        type: "x"
+      }), /*#__PURE__*/React.createElement("div", {
+        style: {
+          textAlign: 'right'
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          color: '#d1d5db',
+          fontSize: 12,
+          fontWeight: 600
+        }
+      }, fmt(c.spend, 'rsk')), /*#__PURE__*/React.createElement("div", {
+        style: {
+          color: '#4b5563',
+          fontSize: 10
+        }
+      }, SEG_SHORT[c.segment] || c.segment)));
+    })));
+  }), queue.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      textAlign: 'center',
+      padding: 40
+    }
+  }, "No action items found."));
+}
+
+// ─── UPLOAD SCREEN ───────────────────────────────────────────────────────────
+
+function UploadScreen({
+  onLoad
+}) {
+  const [rawFile, setRawFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  // Framework: 'loading' | 'ok' | 'error' | 'file_protocol' | 'manual'
+  const [fwState, setFwState] = useState('loading');
+  const [fw, setFw] = useState(null);
+  const [fwErr, setFwErr] = useState('');
+  const [fwFile, setFwFile] = useState(null);
+  const fwRef = useRef();
+  useEffect(() => {
+    // file:// protocol cannot make cross-origin fetch — skip and use file upload fallback
+    if (window.location.protocol === 'file:') {
+      setFwState('file_protocol');
+      return;
+    }
+    fetchFrameworkFromSheets().then(data => {
+      setFw(data);
+      setFwState('ok');
+    }).catch(e => {
+      setFwState('error');
+      setFwErr(e.message);
+    });
+  }, []);
+  const ref = useRef();
+  const [over, setOver] = useState(false);
+  const readBuf = f => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = e => res(e.target.result);
+    r.onerror = rej;
+    r.readAsArrayBuffer(f);
+  });
+  const loadFwFile = async file => {
+    setFwFile(file);
+    try {
+      const buf = await readBuf(file);
+      const data = parseFramework(new Uint8Array(buf));
+      setFw(data);
+      setFwState('ok');
+    } catch (e) {
+      setFwState('error');
+      setFwErr('Could not parse framework file: ' + e.message);
+    }
+  };
+  const load = async () => {
+    if (!rawFile) return;
+    setBusy(true);
+    setErr('');
+    try {
+      const rawBuf = await readBuf(rawFile);
+      const {
+        segmentMap,
+        metaMap,
+        ltvMap
+      } = fw || {
+        segmentMap: {},
+        metaMap: {},
+        ltvMap: {
+          ...LTV_TABLE
+        }
+      };
+      const campaigns = parseRawReport(new Uint8Array(rawBuf), segmentMap, metaMap, ltvMap);
+      if (!campaigns.length) {
+        setErr('No campaigns found. Check the file format.');
+        setBusy(false);
+        return;
+      }
+      onLoad(campaigns);
+    } catch (e) {
+      setErr('Error processing file: ' + e.message);
+    }
+    setBusy(false);
+  };
+  const fwBadge = () => {
+    if (fwState === 'loading') return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        color: '#6b7280',
+        fontSize: 12
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: 'inline-block',
+        width: 8,
+        height: 8,
+        borderRadius: '50%',
+        background: '#374151',
+        animation: 'pulse 1s infinite'
+      }
+    }), "Loading framework from Google Sheets\u2026");
+    if (fwState === 'ok') return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        color: '#22c55e',
+        fontSize: 12
+      }
+    }, /*#__PURE__*/React.createElement("span", null, "\u2713"), " Framework loaded \u2014 segments, benchmarks & brand mapping ready", fwFile && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#4b5563'
+      }
+    }, "(from file)"));
+    if (fwState === 'file_protocol' || fwState === 'error') return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#f59e0b',
+        fontSize: 12,
+        marginBottom: 10
+      }
+    }, fwState === 'file_protocol' ? '⚠ Auto-connect requires HTTPS. Upload framework file manually, or deploy to Vercel for auto-connect.' : `⚠ Could not load from Sheets. Upload framework file manually.`), /*#__PURE__*/React.createElement("div", {
+      onClick: () => fwRef.current.click(),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '8px 12px',
+        background: '#111827',
+        border: `1px solid ${fwFile ? '#22c55e55' : '#374151'}`,
+        borderRadius: 8,
+        cursor: 'pointer',
+        transition: 'all 0.15s'
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      ref: fwRef,
+      type: "file",
+      accept: ".xlsx,.xls",
+      style: {
+        display: 'none'
+      },
+      onChange: e => e.target.files[0] && loadFwFile(e.target.files[0])
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 18
+      }
+    }, fwFile ? '✅' : '📋'), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#d1d5db',
+        fontSize: 12,
+        fontWeight: 600
+      }
+    }, fwFile ? fwFile.name : 'Upload Framework File'), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 10
+      }
+    }, fwFile ? 'Framework loaded ✓' : 'Google Sheet export — Conditions + Rough Analysis + New Index'))));
+    return null;
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 24
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}`), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxWidth: 520,
+      width: '100%'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'center',
+      marginBottom: 36
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 28,
+      marginBottom: 8
+    }
+  }, "\u26A1"), /*#__PURE__*/React.createElement("h1", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 22,
+      fontWeight: 700,
+      margin: 0
+    }
+  }, "Blinkit Ads Dashboard"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      color: '#6b7280',
+      fontSize: 13,
+      marginTop: 6
+    }
+  }, "Mosaic Wellness \xB7 Be Bodywise \xB7 Man Matters \xB7 Little Joys")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#0d1117',
+      border: '1px solid #1f2937',
+      borderRadius: 10,
+      padding: '12px 16px',
+      marginBottom: 20
+    }
+  }, fwBadge()), /*#__PURE__*/React.createElement("div", {
+    onClick: () => ref.current.click(),
+    onDragOver: e => {
+      e.preventDefault();
+      setOver(true);
+    },
+    onDragLeave: () => setOver(false),
+    onDrop: e => {
+      e.preventDefault();
+      setOver(false);
+      const f = e.dataTransfer.files[0];
+      if (f) setRawFile(f);
+    },
+    style: {
+      border: `2px dashed ${over ? '#3b82f6' : rawFile ? '#22c55e55' : '#1f2937'}`,
+      borderRadius: 12,
+      padding: '32px 20px',
+      textAlign: 'center',
+      cursor: 'pointer',
+      background: over ? '#1e293b' : rawFile ? 'rgba(34,197,94,0.04)' : '#0d1117',
+      transition: 'all 0.15s',
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    ref: ref,
+    type: "file",
+    accept: ".xlsx,.xls",
+    style: {
+      display: 'none'
+    },
+    onChange: e => e.target.files[0] && setRawFile(e.target.files[0])
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 32,
+      marginBottom: 8
+    }
+  }, rawFile ? '✅' : '📊'), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#d1d5db',
+      fontSize: 13,
+      fontWeight: 600,
+      marginBottom: 4
+    }
+  }, "Raw Blinkit Report"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 11,
+      marginBottom: 6
+    }
+  }, "Search_Reports_*.xlsx downloaded from Blinkit"), rawFile ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#22c55e',
+      fontSize: 11
+    }
+  }, "\u2713 ", rawFile.name) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 11
+    }
+  }, "Drop file here or click to browse")), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#ef4444',
+      fontSize: 12,
+      marginBottom: 12,
+      textAlign: 'center'
+    }
+  }, err), /*#__PURE__*/React.createElement("button", {
+    onClick: load,
+    disabled: busy || !rawFile || fwState === 'loading',
+    style: {
+      width: '100%',
+      padding: '13px',
+      borderRadius: 8,
+      border: 'none',
+      fontSize: 14,
+      fontWeight: 600,
+      cursor: rawFile && fwState !== 'loading' ? 'pointer' : 'not-allowed',
+      transition: 'all 0.15s',
+      background: rawFile && fwState !== 'loading' ? '#2563eb' : '#1f2937',
+      color: rawFile && fwState !== 'loading' ? '#fff' : '#4b5563'
+    }
+  }, busy ? 'Processing…' : fwState === 'loading' ? 'Loading framework…' : 'Analyse Campaigns →')));
+}
+
+// ─── APP ─────────────────────────────────────────────────────────────────────
+
+function App() {
+  const [campaigns, setCampaigns] = useState(null);
+  const [tab, setTab] = useState('portfolio');
+  if (!campaigns) return /*#__PURE__*/React.createElement(UploadScreen, {
+    onLoad: setCampaigns
+  });
+  const tabs = [{
+    id: 'portfolio',
+    label: 'Portfolio'
+  }, {
+    id: 'scorecard',
+    label: 'Scorecard'
+  }, {
+    id: 'segment',
+    label: 'Segment Health'
+  }, {
+    id: 'actions',
+    label: 'Action Queue'
+  }];
+  const totalCut = campaigns.filter(c => c.verdict === 'Cut').length;
+  const totalScale = campaigns.filter(c => c.verdict === 'Scale').length;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      minHeight: '100vh',
+      background: '#070711'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#0d1117',
+      borderBottom: '1px solid #1f2937',
+      padding: '12px 24px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 20
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 15,
+      fontWeight: 700
+    }
+  }, "\u26A1 Blinkit Ads"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 4
+    }
+  }, tabs.map(t => /*#__PURE__*/React.createElement("button", {
+    key: t.id,
+    onClick: () => setTab(t.id),
+    style: {
+      background: tab === t.id ? '#1e3a5f' : 'transparent',
+      color: tab === t.id ? '#93c5fd' : '#6b7280',
+      border: `1px solid ${tab === t.id ? '#2563eb' : 'transparent'}`,
+      borderRadius: 6,
+      padding: '5px 14px',
+      fontSize: 12,
+      cursor: 'pointer',
+      fontWeight: tab === t.id ? 600 : 400
+    }
+  }, t.label))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginLeft: 'auto',
+      display: 'flex',
+      gap: 12,
+      alignItems: 'center'
+    }
+  }, totalCut > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: '#ef4444',
+      background: 'rgba(239,68,68,0.1)',
+      padding: '2px 8px',
+      borderRadius: 4
+    }
+  }, "\u2702 ", totalCut, " Cut"), totalScale > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: '#22c55e',
+      background: 'rgba(34,197,94,0.1)',
+      padding: '2px 8px',
+      borderRadius: 4
+    }
+  }, "\u2191 ", totalScale, " Scale"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 11
+    }
+  }, campaigns.length, " campaigns"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setCampaigns(null),
+    style: {
+      color: '#4b5563',
+      fontSize: 11,
+      background: 'transparent',
+      border: '1px solid #1f2937',
+      borderRadius: 6,
+      padding: '4px 10px',
+      cursor: 'pointer'
+    }
+  }, "\u21A9 Reset"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '20px 24px',
+      maxWidth: 1400,
+      margin: '0 auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "fade-in"
+  }, tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
+    campaigns: campaigns
+  }), tab === 'scorecard' && /*#__PURE__*/React.createElement(ScorecardView, {
+    campaigns: campaigns
+  }), tab === 'segment' && /*#__PURE__*/React.createElement(SegmentHealthView, {
+    campaigns: campaigns
+  }), tab === 'actions' && /*#__PURE__*/React.createElement(ActionQueueView, {
+    campaigns: campaigns
+  }))));
+}
+ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(App, null));
+
+</script>
+</body>
+</html>
