@@ -808,7 +808,7 @@ function VBarChart({
   }, tip.label, ": ", fmtV(tip.val)), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
-      alignItems: 'flex-end',
+      alignItems: 'stretch',
       gap: 4,
       height,
       paddingTop: 24,
@@ -826,6 +826,7 @@ function VBarChart({
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
+        justifyContent: 'flex-end',
         cursor: 'default'
       },
       onMouseEnter: () => setTip({
