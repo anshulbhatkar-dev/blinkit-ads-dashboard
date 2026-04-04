@@ -18,7 +18,6 @@
   </script>
   <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
     body{background:#070711;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#f9fafb;}
     *{box-sizing:border-box;}
@@ -37,11 +36,39 @@
 <script>
 if (typeof React === 'undefined') throw new Error('React failed to load from CDN. Check internet connection.');
 if (typeof ReactDOM === 'undefined') throw new Error('ReactDOM failed to load. Check internet connection.');
-if (typeof XLSX === 'undefined') throw new Error('SheetJS failed to load. Check internet connection.');
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
 const SHEET_ID = '1enTpKSWbTqSEEZDo4WRsFj9HwlDjgbpVfUyW5icPGuM';
-const SHEET_BASE = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=`;
+const SHEET_BASE = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&gid=`;
+
+// Raw data GID configs  (hdrSkip = rows to skip before data begins)
+const RAW_SHEET_CFGS = [{
+  key: 'search',
+  gid: 1816954201,
+  hdrSkip: 1,
+  type: 'Search'
+}, {
+  key: 'reco',
+  gid: 1273174129,
+  hdrSkip: 2,
+  type: 'Reco'
+}, {
+  key: 'shelf',
+  gid: 1074422540,
+  hdrSkip: 1,
+  type: 'Display'
+}, {
+  key: 'spotlight',
+  gid: 1856562139,
+  hdrSkip: 1,
+  type: 'Spotlight'
+}, {
+  key: 'catBrowse',
+  gid: 968103037,
+  hdrSkip: 2,
+  type: 'CategoryBrowse'
+}];
+const CONDITIONS_GID = 988587276;
 const BENCHMARKS = {
   'Generic Head': {
     roasF: 1.2,
@@ -188,6 +215,25 @@ const LTV_TABLE = {
   'sunscreen': 334,
   'underarm roll on': 250
 };
+
+// Search "Type" column → benchmark segment
+const TYPE_TO_SEG = {
+  'generic head': 'Generic Head',
+  'generic tail': 'Generic Tail',
+  'comp': 'Comp',
+  'brand': 'Generic Head'
+};
+// Reco "Asset" column → benchmark segment
+const ASSET_TO_SEG = {
+  'similar product recommendations': 'Similar Product Recommendations',
+  'cart recommendations': 'Cart Recommendations',
+  'next product recommendations': 'Next Product Recommendations'
+};
+// Display Shelf "Targeting Layout" → segment
+const LAYOUT_TO_SEG = {
+  'feed': 'Homepage Display Direct shelf',
+  'plp': 'Category Display Direct shelf'
+};
 const SEG_SHORT = {
   'Generic Head': 'Gen Head',
   'Generic Tail': 'Gen Tail',
@@ -300,22 +346,13 @@ function parseDate(v) {
     return isNaN(d.getTime()) ? null : d;
   }
   if (typeof v === 'string') {
-    const d = new Date(v);
+    const s = v.trim();
+    if (!s) return null;
+    // "YYYY-MM-DD" or ISO
+    const d = new Date(s.length >= 10 ? s.slice(0, 10) : s);
     return isNaN(d.getTime()) ? null : d;
   }
   return null;
-}
-function colIdx(headers, ...names) {
-  for (const n of names) {
-    const i = headers.findIndex(h => String(h || '').trim().toLowerCase() === n.toLowerCase());
-    if (i >= 0) return i;
-  }
-  for (const n of names) {
-    const nl = n.toLowerCase();
-    const i = headers.findIndex(h => String(h || '').trim().toLowerCase().includes(nl));
-    if (i >= 0) return i;
-  }
-  return -1;
 }
 
 // ─── CSV PARSER ──────────────────────────────────────────────────────────────
@@ -354,268 +391,212 @@ function parseCSV(text) {
   return rows;
 }
 
-// ─── FRAMEWORK PARSING FROM ROW ARRAYS ───────────────────────────────────────
+// ─── EXTRACT ROW BY SHEET TYPE ───────────────────────────────────────────────
 
-function parseFrameworkFromRows(raRows, niRows, condRows) {
-  const segmentMap = {};
-  const metaMap = {};
+function extractRow(row, type) {
+  const s = i => String(row[i] || '').trim();
+  const n = i => {
+    const v = row[i];
+    return v !== undefined && v !== '' ? Number(v) || 0 : 0;
+  };
+  const d = i => parseDate(row[i]);
+  if (type === 'Search') return {
+    date: d(1),
+    campaign: s(3),
+    impressions: n(10),
+    position: n(5) || null,
+    directQty: n(16),
+    indirectQty: n(17),
+    newUsers: n(13),
+    directSales: n(14),
+    spend: n(18),
+    segment: TYPE_TO_SEG[s(26).toLowerCase()] || s(26) || null,
+    brand: s(27),
+    category: s(28),
+    hasMetrics: true
+  };
+  if (type === 'Reco') return {
+    date: d(1),
+    campaign: s(3),
+    impressions: n(8),
+    position: null,
+    directQty: n(15),
+    indirectQty: n(16),
+    newUsers: n(11),
+    directSales: n(12),
+    spend: n(14),
+    segment: ASSET_TO_SEG[s(4).toLowerCase()] || s(4) || null,
+    brand: s(22),
+    category: s(23),
+    hasMetrics: true
+  };
+  if (type === 'Display') return {
+    date: d(1),
+    campaign: s(3),
+    impressions: n(11),
+    position: null,
+    directQty: n(17),
+    indirectQty: n(18),
+    newUsers: n(14),
+    directSales: n(15),
+    spend: n(21),
+    segment: LAYOUT_TO_SEG[s(5).toLowerCase()] || null,
+    brand: s(23),
+    category: s(24),
+    hasMetrics: true
+  };
+  if (type === 'CategoryBrowse') return {
+    date: d(1),
+    campaign: s(3),
+    impressions: n(9),
+    position: n(6) || null,
+    directQty: n(15),
+    indirectQty: n(16),
+    newUsers: n(12),
+    directSales: n(13),
+    spend: n(17),
+    segment: 'Category Display Direct shelf',
+    brand: s(23),
+    category: s(24),
+    hasMetrics: true
+  };
+  if (type === 'Spotlight') return {
+    date: d(1),
+    campaign: s(3),
+    impressions: n(9),
+    position: null,
+    directQty: 0,
+    indirectQty: 0,
+    newUsers: 0,
+    directSales: 0,
+    spend: n(13),
+    segment: null,
+    brand: s(15),
+    category: s(16),
+    hasMetrics: false
+  };
+  return null;
+}
+
+// ─── FETCH ALL DATA FROM GOOGLE SHEETS ───────────────────────────────────────
+
+async function fetchAllDataFromSheets() {
+  const fetchGid = gid => fetch(SHEET_BASE + gid).then(r => {
+    if (!r.ok) throw new Error(`Sheet ${gid} returned ${r.status}`);
+    return r.text();
+  });
+
+  // Fetch Conditions + all 5 raw sheets in parallel
+  const [condText, ...rawTexts] = await Promise.all([fetchGid(CONDITIONS_GID), ...RAW_SHEET_CFGS.map(c => fetchGid(c.gid))]);
+
+  // Parse LTV from Conditions sheet
   const ltvMap = {
     ...LTV_TABLE
   };
-
-  // Rough Analysis: col A/B, F/G, J/K → campaign → segment
-  if (raRows) {
-    raRows.forEach(row => {
-      const s0 = String(row[0] || '').trim(),
-        s1 = String(row[1] || '').trim();
-      const s5 = String(row[5] || '').trim(),
-        s6 = String(row[6] || '').trim();
-      const s9 = String(row[9] || '').trim(),
-        s10 = String(row[10] || '').trim();
-      if (s0 && s1 && !s0.toLowerCase().includes('campaign name') && !s0.toLowerCase().includes('head?')) segmentMap[s0.toLowerCase()] = s1;
-      if (s5 && s6 && !s5.toLowerCase().includes('campaign name') && !s5.toLowerCase().includes('type')) segmentMap[s5.toLowerCase()] = s6;
-      if (s9 && s10 && !s9.toLowerCase().includes('campaign name') && !s9.toLowerCase().includes('type')) segmentMap[s9.toLowerCase()] = s10;
-    });
-  }
-
-  // New Index: col G/H/I (index 6/7/8) → campaign → brand, category
-  if (niRows) {
-    niRows.forEach(row => {
-      const name = String(row[6] || '').trim();
-      if (name && !name.toLowerCase().includes('campaign name') && name.length > 3) {
-        const brand = String(row[7] || '').trim();
-        const category = String(row[8] || '').trim();
-        if (brand || category) {
-          metaMap[name.toLowerCase()] = {
-            brand,
-            category
-          };
-        }
-      }
-    });
-  }
-
-  // Conditions: LTV table — find 'GC Category' row, read until blank/section-end
-  if (condRows) {
-    let inLtv = false;
-    for (const row of condRows) {
-      const a = String(row[0] || '').trim();
-      if (a.toLowerCase() === 'gc category') {
-        inLtv = true;
-        continue;
-      }
-      if (inLtv) {
-        if (!a || a.startsWith('B.') || a.startsWith('--')) break;
-        const ltv = parseFloat(row[3]);
-        if (a && !isNaN(ltv) && ltv > 0) ltvMap[a.toLowerCase()] = ltv;
-      }
+  const condRows = parseCSV(condText);
+  let inLtv = false;
+  for (const row of condRows) {
+    const a = String(row[0] || '').trim();
+    if (a.toLowerCase() === 'gc category') {
+      inLtv = true;
+      continue;
+    }
+    if (inLtv) {
+      if (!a || a.startsWith('B.') || a.startsWith('--')) break;
+      const ltv = parseFloat(row[3]);
+      if (a && !isNaN(ltv) && ltv > 0) ltvMap[a.toLowerCase()] = ltv;
     }
   }
   return {
-    segmentMap,
-    metaMap,
+    rawTexts,
     ltvMap
   };
 }
 
-// ─── FETCH FRAMEWORK FROM GOOGLE SHEETS ──────────────────────────────────────
+// ─── PARSE ALL CAMPAIGNS FROM GSHEET CSVs ────────────────────────────────────
 
-async function fetchFrameworkFromSheets() {
-  const [raText, niText, condText] = await Promise.all([fetch(SHEET_BASE + 'Rough%20Analysis').then(r => {
-    if (!r.ok) throw new Error('Rough Analysis fetch failed');
-    return r.text();
-  }), fetch(SHEET_BASE + 'New%20Index').then(r => {
-    if (!r.ok) throw new Error('New Index fetch failed');
-    return r.text();
-  }), fetch(SHEET_BASE + 'Conditions').then(r => {
-    if (!r.ok) throw new Error('Conditions fetch failed');
-    return r.text();
-  })]);
-  const raRows = parseCSV(raText);
-  const niRows = parseCSV(niText);
-  const condRows = parseCSV(condText);
-  return parseFrameworkFromRows(raRows, niRows, condRows);
-}
-
-// ─── FRAMEWORK PARSER (from uploaded file, fallback) ─────────────────────────
-
-function parseFramework(buffer) {
-  const wb = XLSX.read(buffer, {
-    type: 'array',
-    cellDates: true
-  });
-  const raRows = wb.Sheets['Rough Analysis'] ? XLSX.utils.sheet_to_json(wb.Sheets['Rough Analysis'], {
-    header: 1,
-    defval: ''
-  }) : null;
-  const niRows = wb.Sheets['New Index'] ? XLSX.utils.sheet_to_json(wb.Sheets['New Index'], {
-    header: 1,
-    defval: ''
-  }) : null;
-  const condRows = wb.Sheets['Conditions'] ? XLSX.utils.sheet_to_json(wb.Sheets['Conditions'], {
-    header: 1,
-    defval: ''
-  }) : null;
-  return parseFrameworkFromRows(raRows, niRows, condRows);
-}
-
-// ─── RAW REPORT PARSER ───────────────────────────────────────────────────────
-
-function parseRawReport(buffer, segmentMap, metaMap, ltvMap) {
-  const wb = XLSX.read(buffer, {
-    type: 'array',
-    cellDates: true,
-    raw: true
-  });
+function parseGSheetCampaigns(rawTexts, ltvMap) {
+  // campaignData: name.lower → { name, type, segment, brand, category, rows[] }
   const campaignData = {};
-  function processSheet(sheetName, type, extractor) {
-    const ws = wb.Sheets[sheetName];
-    if (!ws) return;
-    const rows = XLSX.utils.sheet_to_json(ws, {
-      header: 1,
-      defval: 0,
-      raw: true
+  RAW_SHEET_CFGS.forEach(({
+    type,
+    hdrSkip
+  }, idx) => {
+    const rows = parseCSV(rawTexts[idx]);
+    rows.slice(hdrSkip).forEach(row => {
+      if (!row || row.length < 4) return;
+      const name = String(row[3] || '').trim();
+      if (!name || name.toLowerCase() === 'campaign name') return;
+      const parsed = extractRow(row, type);
+      if (!parsed || !parsed.date) return;
+      const key = name.toLowerCase();
+      if (!campaignData[key]) {
+        campaignData[key] = {
+          name,
+          type,
+          hasMetrics: parsed.hasMetrics,
+          segment: parsed.segment,
+          brand: parsed.brand,
+          category: parsed.category,
+          rows: []
+        };
+      }
+      // Fill in segment/brand/category if missing
+      if (!campaignData[key].segment && parsed.segment) campaignData[key].segment = parsed.segment;
+      if (!campaignData[key].brand && parsed.brand) campaignData[key].brand = parsed.brand;
+      if (!campaignData[key].category && parsed.category) campaignData[key].category = parsed.category;
+      if (parsed.hasMetrics) campaignData[key].hasMetrics = true;
+      campaignData[key].rows.push(parsed);
     });
-    if (rows.length < 2) return;
-    const headers = rows[0].map(h => String(h || '').trim());
-    rows.slice(1).forEach(row => {
-      const r = extractor(row, headers);
-      if (!r || !r.campaign || r.campaign === '0') return;
-      const key = r.campaign.trim();
-      if (!campaignData[key]) campaignData[key] = {
-        type,
-        rows: []
-      };
-      campaignData[key].rows.push(r);
+  });
+
+  // Compute per-type max date (so lookback is relative to each sheet's latest data)
+  const typeMaxDate = {};
+  Object.values(campaignData).forEach(c => {
+    c.rows.forEach(r => {
+      if (r.date) {
+        if (!typeMaxDate[c.type] || r.date > typeMaxDate[c.type]) typeMaxDate[c.type] = r.date;
+      }
     });
-  }
-
-  // Keyword Targeting (Search)
-  processSheet('Keyword Targeting', 'Search', (row, h) => {
-    const iCamp = colIdx(h, 'Campaign Name'),
-      iDate = colIdx(h, 'date_ist'),
-      iImp = colIdx(h, 'Impressions'),
-      iPos = colIdx(h, 'Most Viewed Position'),
-      iNU = colIdx(h, 'New Users'),
-      iDS = colIdx(h, 'Direct Sales'),
-      iDQ = colIdx(h, 'Direct Quantities Sold'),
-      iIQ = colIdx(h, 'Indirect Quantities Sold'),
-      iSp = colIdx(h, 'Estimated Budget Consumed');
-    return {
-      campaign: String(row[iCamp] || '').trim(),
-      date: parseDate(row[iDate]),
-      impressions: Number(row[iImp]) || 0,
-      position: Number(row[iPos]) || null,
-      newUsers: Number(row[iNU]) || 0,
-      directSales: Number(row[iDS]) || 0,
-      directQty: Number(row[iDQ]) || 0,
-      indirectQty: Number(row[iIQ]) || 0,
-      spend: Number(row[iSp]) || 0,
-      asset: null,
-      layout: null
-    };
   });
 
-  // Product Recommendation (Reco)
-  processSheet('Product Recommendation', 'Reco', (row, h) => {
-    const iCamp = colIdx(h, 'Campaign Name'),
-      iDate = colIdx(h, 'date_ist'),
-      iImp = colIdx(h, 'Impressions'),
-      iAsset = colIdx(h, 'Asset'),
-      iNU = colIdx(h, 'New Users'),
-      iDS = colIdx(h, 'Direct Sales'),
-      iDQ = colIdx(h, 'Direct Quantities Sold'),
-      iIQ = colIdx(h, 'Indirect Quantities Sold'),
-      iSp = colIdx(h, 'Estimated Budget Consumed');
-    return {
-      campaign: String(row[iCamp] || '').trim(),
-      date: parseDate(row[iDate]),
-      impressions: Number(row[iImp]) || 0,
-      position: null,
-      newUsers: Number(row[iNU]) || 0,
-      directSales: Number(row[iDS]) || 0,
-      directQty: Number(row[iDQ]) || 0,
-      indirectQty: Number(row[iIQ]) || 0,
-      spend: Number(row[iSp]) || 0,
-      asset: String(row[iAsset] || '').trim(),
-      layout: null
-    };
-  });
-
-  // Product Shelf (Display)
-  processSheet('Product Shelf', 'Display', (row, h) => {
-    const iCamp = colIdx(h, 'Campaign Name'),
-      iDate = colIdx(h, 'date_ist'),
-      iImp = colIdx(h, 'Impressions'),
-      iLayout = colIdx(h, 'Targeting Layout'),
-      iNU = colIdx(h, 'New Users'),
-      iDS = colIdx(h, 'Direct Sales'),
-      iDQ = colIdx(h, 'Direct Quantities Sold'),
-      iIQ = colIdx(h, 'Indirect Quantities Sold'),
-      iSp = colIdx(h, 'Estimated Budget Consumed');
-    return {
-      campaign: String(row[iCamp] || '').trim(),
-      date: parseDate(row[iDate]),
-      impressions: Number(row[iImp]) || 0,
-      position: null,
-      newUsers: Number(row[iNU]) || 0,
-      directSales: Number(row[iDS]) || 0,
-      directQty: Number(row[iDQ]) || 0,
-      indirectQty: Number(row[iIQ]) || 0,
-      spend: Number(row[iSp]) || 0,
-      asset: null,
-      layout: String(row[iLayout] || '').trim()
-    };
-  });
-
-  // Find global max date
-  let maxDate = null;
-  Object.values(campaignData).forEach(c => c.rows.forEach(r => {
-    if (r.date && (!maxDate || r.date > maxDate)) maxDate = r.date;
-  }));
-  if (!maxDate) return [];
+  // Global max date for Inactive check
+  const globalMax = Object.values(typeMaxDate).reduce((m, d) => d > m ? d : m, new Date(0));
+  if (globalMax.getFullYear() < 2020) return [];
   const campaigns = [];
-  Object.entries(campaignData).forEach(([name, data]) => {
-    const lookback = data.type === 'Display' ? 15 : 7;
+  Object.values(campaignData).forEach(data => {
+    const maxDate = typeMaxDate[data.type] || globalMax;
+    const isDisplay = data.type === 'Display' || data.type === 'CategoryBrowse';
+    const lookback = isDisplay ? 15 : 7;
     const cutoff = new Date(maxDate.getTime() - lookback * 86400000);
     const winRows = data.rows.filter(r => r.date && r.date >= cutoff);
     const allDates = [...new Set(data.rows.map(r => r.date?.toDateString()).filter(Boolean))];
-    const lastRow = data.rows.reduce((m, r) => r.date && r.date > (m?.date || 0) ? r : m, null);
-    const daysSinceLive = lastRow?.date ? (maxDate - lastRow.date) / 86400000 : 999;
-
-    // Segment
-    let segment = segmentMap[name.toLowerCase()];
-    if (!segment && data.type === 'Reco') {
-      const assets = data.rows.map(r => r.asset).filter(Boolean);
-      segment = assets[0] || 'Unindexed';
-    }
-    if (!segment && data.type === 'Display') {
-      const layout = data.rows[0]?.layout || '';
-      if (layout === 'feed') segment = 'Homepage Display Direct shelf';else if (layout === 'plp') segment = 'Category Display Direct shelf';else if (name.toLowerCase().includes('homepage')) segment = 'Homepage Display Direct shelf';else if (name.toLowerCase().includes('category')) segment = 'Category Display Direct shelf';else segment = 'Unindexed';
-    }
-    if (!segment) segment = 'Unindexed';
-    const meta = metaMap[name.toLowerCase()] || {
-      brand: '',
-      category: ''
-    };
+    const lastDate = data.rows.reduce((m, r) => r.date && r.date > m ? r.date : m, new Date(0));
+    const daysSinceLive = (maxDate - lastDate) / 86400000;
+    const segment = data.segment || 'Unindexed';
+    const {
+      brand,
+      category,
+      hasMetrics
+    } = data;
     const totSpend = winRows.reduce((s, r) => s + r.spend, 0);
     const totDS = winRows.reduce((s, r) => s + r.directSales, 0);
     const totNU = winRows.reduce((s, r) => s + r.newUsers, 0);
     const totDQ = winRows.reduce((s, r) => s + r.directQty, 0);
     const totIQ = winRows.reduce((s, r) => s + r.indirectQty, 0);
     const totImp = winRows.reduce((s, r) => s + r.impressions, 0);
+
+    // Impression-weighted average position (Search + Category Browse)
     let avgPos = null;
-    if (data.type === 'Search') {
-      const posRows = winRows.filter(r => r.position && r.position > 0 && r.impressions > 0);
-      if (posRows.length > 0) {
-        const totI = posRows.reduce((s, r) => s + r.impressions, 0);
-        avgPos = posRows.reduce((s, r) => s + r.position * r.impressions, 0) / (totI || 1);
-      }
+    const posRows = winRows.filter(r => r.position && r.position > 0 && r.impressions > 0);
+    if (posRows.length > 0) {
+      const totI = posRows.reduce((s, r) => s + r.impressions, 0);
+      avgPos = posRows.reduce((s, r) => s + r.position * r.impressions, 0) / (totI || 1);
     }
-    const roas = totSpend > 0 && totDS > 0 ? totDS / totSpend : totSpend > 0 ? 0 : null;
     const totQty = totDQ + totIQ;
+    const roas = totSpend > 0 ? totDS > 0 ? totDS / totSpend : 0 : null;
     const nur = totQty > 0 ? totNU / totQty : null;
-    const ltv = ltvMap[meta.category.toLowerCase()] || null;
+    const ltv = ltvMap[(category || '').toLowerCase()] || null;
     const cac = totNU > 0 ? totSpend / totNU : null;
     const ltvCac = ltv && cac ? ltv / cac : null;
     const isInactive = daysSinceLive > 1;
@@ -625,17 +606,17 @@ function parseRawReport(buffer, segmentMap, metaMap, ltvMap) {
       nurScore = null,
       ltvScore = null,
       score = null;
-    if (bm) {
+    if (bm && hasMetrics) {
       roasScore = roas !== null ? metricScore(roas, bm.roasF, bm.roasH, bm.roasS) : null;
       nurScore = nur !== null ? metricScore(nur, bm.nurF, bm.nurH, bm.nurS) : null;
       ltvScore = ltvCac !== null ? metricScore(ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null;
       if (roasScore !== null && nurScore !== null && ltvScore !== null) score = roasScore * bm.roasWt + nurScore * bm.nurWt + ltvScore * bm.ltvWt;
     }
-    const verdict = computeVerdict(roas, nur, ltvCac, score, bm, isInactive, isInsuf);
+    const verdict = hasMetrics ? computeVerdict(roas, nur, ltvCac, score, bm, isInactive, isInsuf) : 'Insufficient Data';
     campaigns.push({
-      campaign: name,
-      brand: meta.brand,
-      category: meta.category,
+      campaign: data.name,
+      brand,
+      category,
       segment,
       type: data.type,
       spend: totSpend,
@@ -1728,286 +1709,158 @@ function ActionQueueView({
   }, "No action items found."));
 }
 
-// ─── UPLOAD SCREEN ───────────────────────────────────────────────────────────
+// ─── LOADING SCREEN ───────────────────────────────────────────────────────────
 
-function UploadScreen({
+function LoadingScreen({
   onLoad
 }) {
-  const [rawFile, setRawFile] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState('loading'); // 'loading' | 'error'
+  const [step, setStep] = useState('Connecting to Google Sheets…');
   const [err, setErr] = useState('');
-  // Framework: 'loading' | 'ok' | 'error' | 'file_protocol' | 'manual'
-  const [fwState, setFwState] = useState('loading');
-  const [fw, setFw] = useState(null);
-  const [fwErr, setFwErr] = useState('');
-  const [fwFile, setFwFile] = useState(null);
-  const fwRef = useRef();
   useEffect(() => {
-    // file:// protocol cannot make cross-origin fetch — skip and use file upload fallback
-    if (window.location.protocol === 'file:') {
-      setFwState('file_protocol');
-      return;
-    }
-    fetchFrameworkFromSheets().then(data => {
-      setFw(data);
-      setFwState('ok');
-    }).catch(e => {
-      setFwState('error');
-      setFwErr(e.message);
-    });
+    (async () => {
+      try {
+        setStep('Fetching campaign data from Google Sheets…');
+        const {
+          rawTexts,
+          ltvMap
+        } = await fetchAllDataFromSheets();
+        setStep('Processing & scoring campaigns…');
+        const campaigns = parseGSheetCampaigns(rawTexts, ltvMap);
+        if (!campaigns.length) throw new Error('No campaign data found. Check that the sheet is publicly shared.');
+        onLoad(campaigns);
+      } catch (e) {
+        setStatus('error');
+        setErr(e.message);
+      }
+    })();
   }, []);
-  const ref = useRef();
-  const [over, setOver] = useState(false);
-  const readBuf = f => new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = e => res(e.target.result);
-    r.onerror = rej;
-    r.readAsArrayBuffer(f);
+  const Dot = ({
+    delay
+  }) => /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'inline-block',
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: '#3b82f6',
+      margin: '0 3px',
+      animation: `pulse 1.2s ${delay}s infinite`
+    }
   });
-  const loadFwFile = async file => {
-    setFwFile(file);
-    try {
-      const buf = await readBuf(file);
-      const data = parseFramework(new Uint8Array(buf));
-      setFw(data);
-      setFwState('ok');
-    } catch (e) {
-      setFwState('error');
-      setFwErr('Could not parse framework file: ' + e.message);
-    }
-  };
-  const load = async () => {
-    if (!rawFile) return;
-    setBusy(true);
-    setErr('');
-    try {
-      const rawBuf = await readBuf(rawFile);
-      const {
-        segmentMap,
-        metaMap,
-        ltvMap
-      } = fw || {
-        segmentMap: {},
-        metaMap: {},
-        ltvMap: {
-          ...LTV_TABLE
-        }
-      };
-      const campaigns = parseRawReport(new Uint8Array(rawBuf), segmentMap, metaMap, ltvMap);
-      if (!campaigns.length) {
-        setErr('No campaigns found. Check the file format.');
-        setBusy(false);
-        return;
-      }
-      onLoad(campaigns);
-    } catch (e) {
-      setErr('Error processing file: ' + e.message);
-    }
-    setBusy(false);
-  };
-  const fwBadge = () => {
-    if (fwState === 'loading') return /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        color: '#6b7280',
-        fontSize: 12
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        display: 'inline-block',
-        width: 8,
-        height: 8,
-        borderRadius: '50%',
-        background: '#374151',
-        animation: 'pulse 1s infinite'
-      }
-    }), "Loading framework from Google Sheets\u2026");
-    if (fwState === 'ok') return /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        color: '#22c55e',
-        fontSize: 12
-      }
-    }, /*#__PURE__*/React.createElement("span", null, "\u2713"), " Framework loaded \u2014 segments, benchmarks & brand mapping ready", fwFile && /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#4b5563'
-      }
-    }, "(from file)"));
-    if (fwState === 'file_protocol' || fwState === 'error') return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#f59e0b',
-        fontSize: 12,
-        marginBottom: 10
-      }
-    }, fwState === 'file_protocol' ? '⚠ Auto-connect requires HTTPS. Upload framework file manually, or deploy to Vercel for auto-connect.' : `⚠ Could not load from Sheets. Upload framework file manually.`), /*#__PURE__*/React.createElement("div", {
-      onClick: () => fwRef.current.click(),
-      style: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: '8px 12px',
-        background: '#111827',
-        border: `1px solid ${fwFile ? '#22c55e55' : '#374151'}`,
-        borderRadius: 8,
-        cursor: 'pointer',
-        transition: 'all 0.15s'
-      }
-    }, /*#__PURE__*/React.createElement("input", {
-      ref: fwRef,
-      type: "file",
-      accept: ".xlsx,.xls",
-      style: {
-        display: 'none'
-      },
-      onChange: e => e.target.files[0] && loadFwFile(e.target.files[0])
-    }), /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 18
-      }
-    }, fwFile ? '✅' : '📋'), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#d1d5db',
-        fontSize: 12,
-        fontWeight: 600
-      }
-    }, fwFile ? fwFile.name : 'Upload Framework File'), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 10
-      }
-    }, fwFile ? 'Framework loaded ✓' : 'Google Sheet export — Conditions + Rough Analysis + New Index'))));
-    return null;
-  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       minHeight: '100vh',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: 24
+      padding: 24,
+      background: '#070711'
     }
-  }, /*#__PURE__*/React.createElement("style", null, `@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}`), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("style", null, `@keyframes pulse{0%,100%{opacity:0.2;transform:scale(0.8)}50%{opacity:1;transform:scale(1)}}`), /*#__PURE__*/React.createElement("div", {
     style: {
-      maxWidth: 520,
-      width: '100%'
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      textAlign: 'center',
-      marginBottom: 36
+      maxWidth: 480,
+      width: '100%',
+      textAlign: 'center'
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
-      fontSize: 28,
-      marginBottom: 8
+      fontSize: 32,
+      marginBottom: 16
     }
   }, "\u26A1"), /*#__PURE__*/React.createElement("h1", {
     style: {
       color: '#f9fafb',
       fontSize: 22,
       fontWeight: 700,
-      margin: 0
+      margin: '0 0 6px'
     }
   }, "Blinkit Ads Dashboard"), /*#__PURE__*/React.createElement("p", {
     style: {
       color: '#6b7280',
       fontSize: 13,
-      marginTop: 6
+      marginBottom: 36
     }
-  }, "Mosaic Wellness \xB7 Be Bodywise \xB7 Man Matters \xB7 Little Joys")), /*#__PURE__*/React.createElement("div", {
+  }, "Mosaic Wellness \xB7 Be Bodywise \xB7 Man Matters \xB7 Little Joys"), status === 'loading' && /*#__PURE__*/React.createElement("div", {
     style: {
       background: '#0d1117',
       border: '1px solid #1f2937',
-      borderRadius: 10,
-      padding: '12px 16px',
-      marginBottom: 20
-    }
-  }, fwBadge()), /*#__PURE__*/React.createElement("div", {
-    onClick: () => ref.current.click(),
-    onDragOver: e => {
-      e.preventDefault();
-      setOver(true);
-    },
-    onDragLeave: () => setOver(false),
-    onDrop: e => {
-      e.preventDefault();
-      setOver(false);
-      const f = e.dataTransfer.files[0];
-      if (f) setRawFile(f);
-    },
-    style: {
-      border: `2px dashed ${over ? '#3b82f6' : rawFile ? '#22c55e55' : '#1f2937'}`,
       borderRadius: 12,
-      padding: '32px 20px',
-      textAlign: 'center',
-      cursor: 'pointer',
-      background: over ? '#1e293b' : rawFile ? 'rgba(34,197,94,0.04)' : '#0d1117',
-      transition: 'all 0.15s',
+      padding: 32
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
       marginBottom: 16
     }
-  }, /*#__PURE__*/React.createElement("input", {
-    ref: ref,
-    type: "file",
-    accept: ".xlsx,.xls",
-    style: {
-      display: 'none'
-    },
-    onChange: e => e.target.files[0] && setRawFile(e.target.files[0])
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 32,
-      marginBottom: 8
-    }
-  }, rawFile ? '✅' : '📊'), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(Dot, {
+    delay: 0
+  }), /*#__PURE__*/React.createElement(Dot, {
+    delay: 0.2
+  }), /*#__PURE__*/React.createElement(Dot, {
+    delay: 0.4
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#d1d5db',
       fontSize: 13,
       fontWeight: 600,
-      marginBottom: 4
+      marginBottom: 6
     }
-  }, "Raw Blinkit Report"), /*#__PURE__*/React.createElement("div", {
+  }, step), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 11
+    }
+  }, "Pulling live data from Google Sheets\u2026")), status === 'error' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#0d1117',
+      border: '1px solid #7f1d1d',
+      borderRadius: 12,
+      padding: 32
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 28,
+      marginBottom: 12
+    }
+  }, "\u26A0\uFE0F"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#ef4444',
+      fontSize: 13,
+      fontWeight: 600,
+      marginBottom: 8
+    }
+  }, "Could not load data"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 11,
+      marginBottom: 20
+    }
+  }, err), /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4b5563',
       fontSize: 11,
-      marginBottom: 6
+      marginBottom: 16
     }
-  }, "Search_Reports_*.xlsx downloaded from Blinkit"), rawFile ? /*#__PURE__*/React.createElement("div", {
+  }, "Make sure the Google Sheet is shared as ", /*#__PURE__*/React.createElement("strong", {
     style: {
-      color: '#22c55e',
-      fontSize: 11
+      color: '#9ca3af'
     }
-  }, "\u2713 ", rawFile.name) : /*#__PURE__*/React.createElement("div", {
+  }, "\"Anyone with the link can view\"")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setStatus('loading');
+      setStep('Retrying…');
+    },
     style: {
-      color: '#374151',
-      fontSize: 11
-    }
-  }, "Drop file here or click to browse")), err && /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#ef4444',
-      fontSize: 12,
-      marginBottom: 12,
-      textAlign: 'center'
-    }
-  }, err), /*#__PURE__*/React.createElement("button", {
-    onClick: load,
-    disabled: busy || !rawFile || fwState === 'loading',
-    style: {
-      width: '100%',
-      padding: '13px',
-      borderRadius: 8,
+      background: '#1d4ed8',
+      color: '#fff',
       border: 'none',
-      fontSize: 14,
-      fontWeight: 600,
-      cursor: rawFile && fwState !== 'loading' ? 'pointer' : 'not-allowed',
-      transition: 'all 0.15s',
-      background: rawFile && fwState !== 'loading' ? '#2563eb' : '#1f2937',
-      color: rawFile && fwState !== 'loading' ? '#fff' : '#4b5563'
+      borderRadius: 8,
+      padding: '10px 24px',
+      fontSize: 13,
+      cursor: 'pointer',
+      fontWeight: 600
     }
-  }, busy ? 'Processing…' : fwState === 'loading' ? 'Loading framework…' : 'Analyse Campaigns →')));
+  }, "\u21BA Retry"))));
 }
 
 // ─── APP ─────────────────────────────────────────────────────────────────────
@@ -2015,7 +1868,7 @@ function UploadScreen({
 function App() {
   const [campaigns, setCampaigns] = useState(null);
   const [tab, setTab] = useState('portfolio');
-  if (!campaigns) return /*#__PURE__*/React.createElement(UploadScreen, {
+  if (!campaigns) return /*#__PURE__*/React.createElement(LoadingScreen, {
     onLoad: setCampaigns
   });
   const tabs = [{
@@ -2045,7 +1898,8 @@ function App() {
       padding: '12px 24px',
       display: 'flex',
       alignItems: 'center',
-      gap: 20
+      gap: 20,
+      flexWrap: 'wrap'
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
@@ -2101,8 +1955,9 @@ function App() {
     }
   }, campaigns.length, " campaigns"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setCampaigns(null),
+    title: "Refresh data from Google Sheets",
     style: {
-      color: '#4b5563',
+      color: '#6b7280',
       fontSize: 11,
       background: 'transparent',
       border: '1px solid #1f2937',
@@ -2110,7 +1965,7 @@ function App() {
       padding: '4px 10px',
       cursor: 'pointer'
     }
-  }, "\u21A9 Reset"))), /*#__PURE__*/React.createElement("div", {
+  }, "\u21BA Refresh"))), /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '20px 24px',
       maxWidth: 1400,
