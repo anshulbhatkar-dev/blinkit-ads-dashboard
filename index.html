@@ -36,8 +36,8 @@
 <body>
 <div id="root"></div>
 <script>
-if (typeof React === 'undefined') throw new Error('React failed to load from CDN. Check internet connection.');
-if (typeof ReactDOM === 'undefined') throw new Error('ReactDOM failed to load. Check internet connection.');
+if (typeof React === 'undefined') throw new Error('React failed to load from CDN.');
+if (typeof ReactDOM === 'undefined') throw new Error('ReactDOM failed to load.');
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
 const SHEET_ID = '1enTpKSWbTqSEEZDo4WRsFj9HwlDjgbpVfUyW5icPGuM';
@@ -2590,7 +2590,7 @@ function LoadingScreen({
 // ─── APP ─────────────────────────────────────────────────────────────────────
 
 function App() {
-  const [data, setData] = useState(null); // {allRows, ltvMap}
+  const [data, setData] = useState(null); // {allRows, ltvMap, bounds}
   const [tab, setTab] = useState('portfolio');
   const [startDate, setStartDate] = useState(null);
   const [endDate, setEndDate] = useState(null);
@@ -2609,7 +2609,9 @@ function App() {
       bounds
     });
   }, []);
-  if (!data) return /*#__PURE__*/React.createElement(LoadingScreen, {
+
+  // Guard: show loading until ALL state is ready
+  if (!data || !startDate || !endDate) return /*#__PURE__*/React.createElement(LoadingScreen, {
     onLoad: handleLoad
   });
   const {
@@ -2617,20 +2619,24 @@ function App() {
     ltvMap,
     bounds
   } = data;
-  const campaigns = useMemo(() => aggregateCampaigns(allRows, ltvMap, startDate, endDate), [allRows, ltvMap, startDate, endDate]);
 
-  // Previous period for MoM comparison
-  const periodLen = daysBetween(startDate, endDate) + 1;
-  const prevEnd = new Date(startDate.getTime() - 864e5);
-  const prevStart = new Date(prevEnd.getTime() - (periodLen - 1) * 864e5);
+  // Memoize start/end timestamps to stabilise downstream useMemo deps
+  const startTs = startDate.getTime();
+  const endTs = endDate.getTime();
+  const campaigns = useMemo(() => aggregateCampaigns(allRows, ltvMap, startDate, endDate), [allRows, ltvMap, startTs, endTs]);
+
+  // Previous period for MoM comparison (memoised with stable deps)
   const prevCampaigns = useMemo(() => {
-    if (prevStart < bounds.min) return null;
-    return aggregateCampaigns(allRows, ltvMap, prevStart, prevEnd);
-  }, [allRows, ltvMap, prevStart, prevEnd]);
-  const onDateChange = (s, e) => {
+    const periodLen = Math.round((endTs - startTs) / 864e5) + 1;
+    const pEnd = new Date(startTs - 864e5);
+    const pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
+    if (pStart < bounds.min) return null;
+    return aggregateCampaigns(allRows, ltvMap, pStart, pEnd);
+  }, [allRows, ltvMap, startTs, endTs, bounds.min]);
+  const onDateChange = useCallback((s, e) => {
     setStartDate(s);
     setEndDate(e);
-  };
+  }, []);
   const tabs = [{
     id: 'portfolio',
     label: 'Portfolio'
@@ -2756,7 +2762,7 @@ function App() {
       fontSize: 10,
       marginLeft: 'auto'
     }
-  }, periodLen, " days \xB7 Data ", toISODate(bounds.min), " to ", toISODate(bounds.max))), /*#__PURE__*/React.createElement("div", {
+  }, Math.round((endTs - startTs) / 864e5) + 1, " days \xB7 Data ", toISODate(bounds.min), " to ", toISODate(bounds.max))), /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '16px 24px',
       maxWidth: 1440,
