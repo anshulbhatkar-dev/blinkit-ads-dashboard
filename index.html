@@ -49,6 +49,8 @@ const RAW_SHEET_CFGS = [{
   type: 'CategoryBrowse'
 }];
 const CONDITIONS_GID = 988587276;
+const CAMPAIGN_IDX_GID = 1095613721; // "Rough Analysis" — campaign → segment index
+
 const BENCHMARKS = {
   'Generic Head': {
     roasF: 1.2,
@@ -481,7 +483,9 @@ async function fetchAllDataFromSheets() {
     if (!r.ok) throw new Error(`Sheet ${gid} returned ${r.status}`);
     return r.text();
   });
-  const [condText, ...rawTexts] = await Promise.all([fetchGid(CONDITIONS_GID), ...RAW_SHEET_CFGS.map(c => fetchGid(c.gid))]);
+  const [condText, idxText, ...rawTexts] = await Promise.all([fetchGid(CONDITIONS_GID), fetchGid(CAMPAIGN_IDX_GID), ...RAW_SHEET_CFGS.map(c => fetchGid(c.gid))]);
+
+  // Parse LTV from Conditions sheet
   const ltvMap = {
     ...LTV_TABLE
   };
@@ -499,9 +503,23 @@ async function fetchAllDataFromSheets() {
       if (a && !isNaN(ltv) && ltv > 0) ltvMap[a.toLowerCase()] = ltv;
     }
   }
+
+  // Parse campaign-level segment index from Rough Analysis sheet
+  // Col A = campaign name, Col B = Generic Head / Generic Tail / Comp
+  const VALID_SEGS = new Set(['Generic Head', 'Generic Tail', 'Comp']);
+  const campaignIndexMap = {};
+  const idxRows = parseCSV(idxText);
+  for (const row of idxRows) {
+    const name = String(row[0] || '').trim();
+    const seg = String(row[1] || '').trim();
+    if (name && VALID_SEGS.has(seg)) {
+      campaignIndexMap[name.toLowerCase()] = seg;
+    }
+  }
   return {
     rawTexts,
-    ltvMap
+    ltvMap,
+    campaignIndexMap
   };
 }
 
@@ -527,7 +545,7 @@ function parseAllRows(rawTexts) {
 
 // ─── AGGREGATE CAMPAIGNS ─────────────────────────────────────────────────────
 
-function aggregateCampaigns(allRows, ltvMap, startDate, endDate) {
+function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMap = {}) {
   const windowRows = allRows.filter(r => r.date >= startDate && r.date <= endDate);
 
   // Group by campaign (lowercased key)
@@ -567,7 +585,7 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate) {
     const {
       rows
     } = data;
-    const segment = data.segment || 'Unindexed';
+    const segment = data.segment || campaignIndexMap[key] || 'Unindexed';
     const {
       brand,
       category,
@@ -2425,14 +2443,16 @@ function LoadingScreen({
       setStep('Fetching campaign data from Google Sheets…');
       const {
         rawTexts,
-        ltvMap
+        ltvMap,
+        campaignIndexMap
       } = await fetchAllDataFromSheets();
       setStep('Processing & scoring campaigns…');
       const allRows = parseAllRows(rawTexts);
       if (!allRows.length) throw new Error('No campaign data found. Check that the sheet is publicly shared.');
       onLoad({
         allRows,
-        ltvMap
+        ltvMap,
+        campaignIndexMap
       });
     } catch (e) {
       setStatus('error');
@@ -2574,7 +2594,8 @@ function App() {
   const [tab, setTab] = useState('portfolio');
   const handleLoad = useCallback(({
     allRows,
-    ltvMap
+    ltvMap,
+    campaignIndexMap
   }) => {
     const bounds = getDateBounds(allRows);
     const endDate = bounds.max;
@@ -2583,6 +2604,7 @@ function App() {
     setAppState({
       allRows,
       ltvMap,
+      campaignIndexMap: campaignIndexMap || {},
       bounds,
       startDate,
       endDate
@@ -2602,16 +2624,18 @@ function App() {
     const {
       allRows,
       ltvMap,
+      campaignIndexMap,
       startDate,
       endDate
     } = appState;
-    return aggregateCampaigns(allRows, ltvMap, startDate, endDate);
+    return aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMap);
   }, [appState]);
   const prevCampaigns = useMemo(() => {
     if (!appState) return null;
     const {
       allRows,
       ltvMap,
+      campaignIndexMap,
       bounds,
       startDate,
       endDate
@@ -2622,7 +2646,7 @@ function App() {
     const pEnd = new Date(startTs - 864e5);
     const pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
     if (pStart < bounds.min) return null;
-    return aggregateCampaigns(allRows, ltvMap, pStart, pEnd);
+    return aggregateCampaigns(allRows, ltvMap, pStart, pEnd, campaignIndexMap);
   }, [appState]);
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -2631,6 +2655,7 @@ function App() {
     onLoad: handleLoad
   });
   const {
+    allRows,
     bounds,
     startDate,
     endDate
