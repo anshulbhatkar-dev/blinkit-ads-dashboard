@@ -395,9 +395,16 @@ function extractRow(row, type) {
     indirectQty: n(17),
     newUsers: n(13),
     directSales: n(14),
+    indirectSales: n(15),
     spend: n(18),
     budget: n(9),
-    // daily campaign budget — used for utilization
+    // daily campaign budget — utilization
+    cpm: n(8),
+    // cost per mille
+    hoursLive: n(22),
+    // hours live that day
+    totalRoasRaw: n(20),
+    // total ROAS from sheet (direct + indirect)
     segment: TYPE_TO_SEG[s(36).toLowerCase()] || null,
     // col AK has full mappings
     brand: s(27),
@@ -622,6 +629,56 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     const totBudget = Object.values(budgetByDate).reduce((s, v) => s + v, 0);
     const utilization = totBudget > 0 ? totSpend / totBudget : null;
 
+    // Weighted avg CPM by impressions
+    const cpmRows = rows.filter(r => r.cpm > 0 && r.impressions > 0);
+    const cpmImp = cpmRows.reduce((s, r) => s + r.impressions, 0);
+    const avgCpm = cpmImp > 0 ? cpmRows.reduce((s, r) => s + r.cpm * r.impressions, 0) / cpmImp : null;
+
+    // Total ROAS (direct + indirect), weighted by impressions
+    const troasRows = rows.filter(r => r.totalRoasRaw > 0 && r.impressions > 0);
+    const troasImp = troasRows.reduce((s, r) => s + r.impressions, 0);
+    const avgTotalRoas = troasImp > 0 ? troasRows.reduce((s, r) => s + r.totalRoasRaw * r.impressions, 0) / troasImp : null;
+
+    // Indirect sales total
+    const totIS = rows.reduce((s, r) => s + (r.indirectSales || 0), 0);
+
+    // Hours live — unique per (date, campaign), so de-dupe by date
+    const hoursLiveByDate = {};
+    rows.forEach(r => {
+      if (r.date && r.hoursLive > 0) {
+        const dk = r.date.toDateString();
+        hoursLiveByDate[dk] = Math.max(hoursLiveByDate[dk] || 0, r.hoursLive);
+      }
+    });
+    const totHoursLive = Object.values(hoursLiveByDate).reduce((s, v) => s + v, 0);
+
+    // Last change detection for CPM and budget (track day-over-day changes)
+    const dailyMeta = {};
+    rows.forEach(r => {
+      const dk = r.date?.toDateString();
+      if (!dk) return;
+      if (!dailyMeta[dk]) dailyMeta[dk] = {
+        date: r.date,
+        cpm: 0,
+        budget: 0
+      };
+      dailyMeta[dk].cpm = Math.max(dailyMeta[dk].cpm, r.cpm || 0);
+      dailyMeta[dk].budget = Math.max(dailyMeta[dk].budget, r.budget || 0);
+    });
+    const dailyList = Object.values(dailyMeta).sort((a, b) => a.date - b.date);
+    let lastCpmChange = null,
+      lastBudgetChange = null;
+    let prevDayCpm = null,
+      prevDayBudget = null;
+    for (const day of dailyList) {
+      if (prevDayCpm !== null && day.cpm > 0 && Math.abs(day.cpm - prevDayCpm) > 0.5) lastCpmChange = day.date;
+      if (prevDayBudget !== null && day.budget > 0 && Math.abs(day.budget - prevDayBudget) > 1) lastBudgetChange = day.date;
+      if (day.cpm > 0) prevDayCpm = day.cpm;
+      if (day.budget > 0) prevDayBudget = day.budget;
+    }
+    const currentDailyBudget = dailyList.length > 0 ? dailyList[dailyList.length - 1].budget || null : null;
+    const lastChange = lastCpmChange || lastBudgetChange ? [lastCpmChange, lastBudgetChange].filter(Boolean).reduce((a, b) => a > b ? a : b) : null;
+
     // Daily run rate (DRR) — absolute metrics divided by period length
     const drr = {
       spend: totSpend / numDays,
@@ -669,6 +726,7 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       type: data.type,
       spend: totSpend,
       directSales: totDS,
+      indirectSales: totIS,
       impressions: totImp,
       newUsers: totNU,
       totalQty: totQty,
@@ -678,6 +736,13 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       drr,
       utilization,
       numDays,
+      avgCpm,
+      avgTotalRoas,
+      totHoursLive,
+      currentDailyBudget,
+      lastCpmChange,
+      lastBudgetChange,
+      lastChange,
       roas,
       nur,
       ltvCac,
@@ -696,6 +761,82 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     });
   });
   return campaigns.sort((a, b) => (b.spend || 0) - (a.spend || 0));
+}
+
+// ─── KEYWORD-LEVEL AGGREGATION ───────────────────────────────────────────────
+
+function aggregateKeywords(allRows, ltvMap, startDate, endDate, campaignIndexMap = {}) {
+  const numDays = Math.round((endDate - startDate) / 864e5) + 1;
+  const windowRows = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.keyword && r.type === 'Search');
+  const groups = {};
+  windowRows.forEach(r => {
+    const key = `${r.campaign.toLowerCase()}||${r.keyword.toLowerCase()}`;
+    if (!groups[key]) groups[key] = {
+      keyword: r.keyword,
+      campaign: r.campaign,
+      segment: r.segment,
+      brand: r.brand,
+      category: r.category,
+      rows: []
+    };
+    if (!groups[key].segment && r.segment) groups[key].segment = r.segment;
+    groups[key].rows.push(r);
+  });
+  const keywords = [];
+  Object.entries(groups).forEach(([key, data]) => {
+    const {
+      rows
+    } = data;
+    const segment = data.segment || campaignIndexMap[data.campaign.toLowerCase()] || 'Unindexed';
+    const totSpend = rows.reduce((s, r) => s + r.spend, 0);
+    const totDS = rows.reduce((s, r) => s + r.directSales, 0);
+    const totNU = rows.reduce((s, r) => s + r.newUsers, 0);
+    const totDQ = rows.reduce((s, r) => s + r.directQty, 0);
+    const totIQ = rows.reduce((s, r) => s + r.indirectQty, 0);
+    const totImp = rows.reduce((s, r) => s + r.impressions, 0);
+    const totQty = totDQ + totIQ;
+    const posRows = rows.filter(r => r.position > 0 && r.impressions > 0);
+    const posImp = posRows.reduce((s, r) => s + r.impressions, 0);
+    const avgPos = posImp > 0 ? posRows.reduce((s, r) => s + r.position * r.impressions, 0) / posImp : null;
+    const cpmRows = rows.filter(r => r.cpm > 0 && r.impressions > 0);
+    const cpmImp = cpmRows.reduce((s, r) => s + r.impressions, 0);
+    const avgCpm = cpmImp > 0 ? cpmRows.reduce((s, r) => s + r.cpm * r.impressions, 0) / cpmImp : null;
+    const roas = totSpend > 0 ? totDS / totSpend : null;
+    const nur = totQty > 0 ? totNU / totQty : null;
+    const ltv = ltvMap[(data.category || '').toLowerCase()] || null;
+    const cac = totNU > 0 ? totSpend / totNU : null;
+    const ltvCac = ltv && cac ? ltv / cac : null;
+    const drr = {
+      spend: totSpend / numDays,
+      directSales: totDS / numDays,
+      impressions: totImp / numDays,
+      totalQty: totQty / numDays,
+      newUsers: totNU / numDays
+    };
+    keywords.push({
+      keyword: data.keyword,
+      campaign: data.campaign,
+      brand: data.brand,
+      category: data.category,
+      segment,
+      spend: totSpend,
+      directSales: totDS,
+      impressions: totImp,
+      newUsers: totNU,
+      totalQty: totQty,
+      directQty: totDQ,
+      indirectQty: totIQ,
+      drr,
+      numDays,
+      roas,
+      nur,
+      ltvCac,
+      cac,
+      avgPos,
+      avgCpm
+    });
+  });
+  return keywords.sort((a, b) => (b.spend || 0) - (a.spend || 0));
 }
 function getDateBounds(allRows) {
   let min = new Date('2099-01-01'),
@@ -1208,6 +1349,7 @@ function HBarChart({
 
 function CampaignDetail({
   campaign,
+  prevCampaign,
   allRows,
   startDate,
   endDate
@@ -1215,6 +1357,7 @@ function CampaignDetail({
   const key = campaign.campaign.toLowerCase();
   const rows = allRows.filter(r => r.campaign.toLowerCase() === key && r.date >= startDate && r.date <= endDate);
   const bm = BENCHMARKS[campaign.segment] || null;
+  const numDays = campaign.numDays || 1;
 
   // Daily aggregation
   const dailyMap = {};
@@ -1228,7 +1371,8 @@ function CampaignDetail({
       newUsers: 0,
       directQty: 0,
       indirectQty: 0,
-      directAtc: 0
+      directAtc: 0,
+      budget: 0
     };
     const d = dailyMap[ds];
     d.spend += r.spend;
@@ -1238,10 +1382,11 @@ function CampaignDetail({
     d.directQty += r.directQty;
     d.indirectQty += r.indirectQty;
     d.directAtc += r.directAtc || 0;
+    d.budget = Math.max(d.budget, r.budget || 0);
   });
   const dailyData = Object.values(dailyMap).sort((a, b) => a.date - b.date);
 
-  // Keyword breakdown (Search/Reco)
+  // Keyword breakdown — per day
   const kwMap = {};
   rows.forEach(r => {
     if (!r.keyword) return;
@@ -1253,7 +1398,11 @@ function CampaignDetail({
       impressions: 0,
       newUsers: 0,
       directQty: 0,
-      indirectQty: 0
+      indirectQty: 0,
+      cpm: 0,
+      cpmImp: 0,
+      posSum: 0,
+      posImp: 0
     };
     const d = kwMap[k];
     d.spend += r.spend;
@@ -1262,10 +1411,18 @@ function CampaignDetail({
     d.newUsers += r.newUsers;
     d.directQty += r.directQty;
     d.indirectQty += r.indirectQty;
+    if (r.cpm > 0 && r.impressions > 0) {
+      d.cpm += r.cpm * r.impressions;
+      d.cpmImp += r.impressions;
+    }
+    if (r.position > 0 && r.impressions > 0) {
+      d.posSum += r.position * r.impressions;
+      d.posImp += r.impressions;
+    }
   });
   const kwData = Object.values(kwMap).sort((a, b) => b.spend - a.spend);
   const [detailTab, setDetailTab] = useState('overview');
-  const metricBox = (label, value, sub, accent) => /*#__PURE__*/React.createElement("div", {
+  const mBox = (label, value, sub, accent, prevVal) => /*#__PURE__*/React.createElement("div", {
     style: {
       background: '#111827',
       borderRadius: 8,
@@ -1282,30 +1439,215 @@ function CampaignDetail({
     }
   }, label), /*#__PURE__*/React.createElement("div", {
     style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
       color: '#f9fafb',
-      fontSize: 16,
+      fontSize: 15,
       fontWeight: 700
     }
-  }, value), sub && /*#__PURE__*/React.createElement("div", {
+  }, value), prevVal != null && /*#__PURE__*/React.createElement(PctChg, {
+    curr: typeof value === 'string' ? parseFloat(value.replace(/[^0-9.-]/g, '')) : value,
+    prev: prevVal
+  })), sub && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       marginTop: 2
     }
   }, sub));
+
+  // ROAS / NUR / LTV:CAC scoring breakdown
+  const ScoreDetail = () => {
+    if (!bm) return /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 11
+      }
+    }, "No benchmarks for segment: ", campaign.segment);
+    const items = [{
+      label: 'Direct ROAS',
+      val: campaign.roas,
+      prev: prevCampaign?.roas,
+      floor: bm.roasF,
+      healthy: bm.roasH,
+      strong: bm.roasS,
+      wt: bm.roasWt,
+      score: campaign.roasScore,
+      type: 'x'
+    }, {
+      label: 'NUR',
+      val: campaign.nur,
+      prev: prevCampaign?.nur,
+      floor: bm.nurF,
+      healthy: bm.nurH,
+      strong: bm.nurS,
+      wt: bm.nurWt,
+      score: campaign.nurScore,
+      type: '%'
+    }, {
+      label: 'LTV:CAC',
+      val: campaign.ltvCac,
+      prev: prevCampaign?.ltvCac,
+      floor: bm.ltvF,
+      healthy: bm.ltvH,
+      strong: bm.ltvS,
+      wt: bm.ltvWt,
+      score: campaign.ltvScore,
+      type: 'x'
+    }];
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10
+      }
+    }, items.map(it => {
+      const c = it.val != null ? mColor(it.val, it.floor, it.healthy, it.strong) : '#4b5563';
+      const pct = it.strong > 0 ? Math.min(100, (it.val || 0) / it.strong * 100) : 0;
+      return /*#__PURE__*/React.createElement("div", {
+        key: it.label,
+        style: {
+          background: '#111827',
+          borderRadius: 8,
+          padding: '10px 14px'
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          justifyContent: 'space-between',
+          marginBottom: 6
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#9ca3af',
+          fontSize: 10
+        }
+      }, it.label, " ", /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#4b5563',
+          fontSize: 9
+        }
+      }, "(wt ", (it.wt * 100).toFixed(0), "%)")), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center'
+        }
+      }, it.prev != null && /*#__PURE__*/React.createElement(PctChg, {
+        curr: it.val,
+        prev: it.prev
+      }), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: c,
+          fontWeight: 700,
+          fontSize: 13
+        }
+      }, it.val != null ? fmt(it.val, it.type) : '—'), it.score != null && /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#4b5563',
+          fontSize: 9
+        }
+      }, "score ", Math.round(it.score), "/100"))), /*#__PURE__*/React.createElement("div", {
+        style: {
+          height: 6,
+          background: '#1f2937',
+          borderRadius: 3,
+          position: 'relative'
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          width: `${pct}%`,
+          height: '100%',
+          background: c,
+          borderRadius: 3,
+          opacity: 0.7
+        }
+      }), /*#__PURE__*/React.createElement("div", {
+        style: {
+          position: 'absolute',
+          top: -2,
+          bottom: -2,
+          left: `${Math.min(100, it.floor / it.strong * 100)}%`,
+          width: 2,
+          background: '#ef444450'
+        },
+        title: `Floor: ${fmt(it.floor, it.type)}`
+      }), /*#__PURE__*/React.createElement("div", {
+        style: {
+          position: 'absolute',
+          top: -2,
+          bottom: -2,
+          left: `${Math.min(100, it.healthy / it.strong * 100)}%`,
+          width: 2,
+          background: '#3b82f650'
+        },
+        title: `Healthy: ${fmt(it.healthy, it.type)}`
+      })), /*#__PURE__*/React.createElement("div", {
+        style: {
+          display: 'flex',
+          gap: 8,
+          marginTop: 3,
+          fontSize: 8,
+          color: '#4b5563'
+        }
+      }, /*#__PURE__*/React.createElement("span", null, "Floor ", fmt(it.floor, it.type)), /*#__PURE__*/React.createElement("span", null, "Healthy ", fmt(it.healthy, it.type)), /*#__PURE__*/React.createElement("span", null, "Strong ", fmt(it.strong, it.type))));
+    }), campaign.score != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        textAlign: 'right',
+        color: '#9ca3af',
+        fontSize: 10
+      }
+    }, "Composite score: ", /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: '#f9fafb'
+      }
+    }, Math.round(campaign.score), "/100"), prevCampaign?.score != null && /*#__PURE__*/React.createElement(PctChg, {
+      curr: campaign.score,
+      prev: prevCampaign.score
+    }), '  ', "\u2192 ", /*#__PURE__*/React.createElement(VBadge, {
+      verdict: campaign.verdict,
+      sm: true
+    })));
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       background: '#0a0e14',
       borderTop: '1px solid #1f2937',
-      padding: '16px 20px'
+      padding: '14px 20px'
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, campaign.lastChange && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: 'rgba(245,158,11,0.08)',
+      border: '1px solid rgba(245,158,11,0.2)',
+      borderRadius: 6,
+      padding: '5px 12px',
+      marginBottom: 10,
+      fontSize: 10,
+      color: '#f59e0b',
+      display: 'flex',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "\u2691 Last change: ", campaign.lastChange.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  })), campaign.lastCpmChange && /*#__PURE__*/React.createElement("span", null, "CPM changed: ", campaign.lastCpmChange.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short'
+  })), campaign.lastBudgetChange && /*#__PURE__*/React.createElement("span", null, "Budget changed: ", campaign.lastBudgetChange.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short'
+  }))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 4,
-      marginBottom: 14
+      marginBottom: 12
     }
-  }, ['overview', 'daily', ...(kwData.length > 0 ? ['keywords'] : [])].map(t => /*#__PURE__*/React.createElement("button", {
+  }, ['overview', 'scoring', 'daily', 'keywords'].filter(t => t !== 'keywords' || kwData.length > 0).map(t => /*#__PURE__*/React.createElement("button", {
     key: t,
     onClick: () => setDetailTab(t),
     style: {
@@ -1323,13 +1665,14 @@ function CampaignDetail({
       display: 'grid',
       gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
       gap: 8,
-      marginBottom: 14
+      marginBottom: 12
     }
-  }, metricBox('Spend/day', fmt(campaign.drr?.spend, 'rsk'), `Total ${fmt(campaign.spend, 'rsk')} · ${campaign.numDays}d`), metricBox('Sales/day', fmt(campaign.drr?.directSales, 'rsk'), campaign.roas !== null ? `ROAS ${fmt(campaign.roas, 'x')}` : null, campaign.roas !== null && bm ? mColor(campaign.roas, bm.roasF, bm.roasH, bm.roasS) : null), metricBox('New Users/day', fmt(campaign.drr?.newUsers, 'int'), campaign.nur !== null ? `NUR ${fmt(campaign.nur, '%')}` : null, campaign.nur !== null && bm ? mColor(campaign.nur, bm.nurF, bm.nurH, bm.nurS) : null), metricBox('LTV:CAC', campaign.ltvCac !== null ? fmt(campaign.ltvCac, 'x') : '—', campaign.cac !== null ? `CAC ${fmt(campaign.cac, 'rs')}` : null, campaign.ltvCac !== null && bm ? mColor(campaign.ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null), metricBox('Impressions/day', fmt(campaign.drr?.impressions, 'int'), campaign.avgPos ? `Avg Pos ${campaign.avgPos.toFixed(1)}` : null), metricBox('Orders/day', fmt(campaign.drr?.totalQty, 'int'), `Direct ${fmt(campaign.drr?.spend && campaign.drr?.totalQty ? campaign.drr.directSales / campaign.drr.totalQty || 0 : 0, 'rs')}/order`), campaign.utilization !== null && metricBox('Utilization', `${(campaign.utilization * 100).toFixed(0)}%`, campaign.utilization >= 0.9 ? '⚠ Near/over budget' : campaign.utilization >= 0.7 ? '✓ Healthy utilization' : '↓ Under-utilizing budget', campaign.utilization >= 0.9 ? '#ef4444' : campaign.utilization >= 0.7 ? '#22c55e' : '#f59e0b'), metricBox('Score', campaign.score !== null ? Math.round(campaign.score) : '—', `${campaign.daysLive} total days live`), metricBox('Type', campaign.type, SEG_SHORT[campaign.segment] || campaign.segment)), dailyData.length >= 2 && /*#__PURE__*/React.createElement("div", {
+  }, mBox('Spend/day', fmt(campaign.drr?.spend, 'rsk'), `Total ${fmt(campaign.spend, 'rsk')} · ${numDays}d`, null, prevCampaign?.drr?.spend), mBox('Sales/day', fmt(campaign.drr?.directSales, 'rsk'), campaign.roas != null ? `D.ROAS ${fmt(campaign.roas, 'x')}` : null, campaign.roas != null && bm ? mColor(campaign.roas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.drr?.directSales), mBox('Total ROAS', campaign.avgTotalRoas != null ? `${campaign.avgTotalRoas.toFixed(2)}x` : '—', 'Direct+Indirect', campaign.avgTotalRoas != null && bm ? mColor(campaign.avgTotalRoas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.avgTotalRoas), mBox('New Users/day', fmt(campaign.drr?.newUsers, 'int'), campaign.nur != null ? `NUR ${fmt(campaign.nur, '%')}` : null, campaign.nur != null && bm ? mColor(campaign.nur, bm.nurF, bm.nurH, bm.nurS) : null, prevCampaign?.drr?.newUsers), mBox('LTV:CAC', campaign.ltvCac != null ? fmt(campaign.ltvCac, 'x') : '—', campaign.cac != null ? `CAC ${fmt(campaign.cac, 'rs')}` : null, campaign.ltvCac != null && bm ? mColor(campaign.ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null, prevCampaign?.ltvCac), mBox('Impressions/day', fmt(campaign.drr?.impressions, 'int'), campaign.avgPos ? `Rank ${campaign.avgPos.toFixed(1)}` : null, null, prevCampaign?.drr?.impressions), mBox('Orders/day', fmt(campaign.drr?.totalQty, 'int'), `Dir ${fmt(campaign.drr?.directSales && campaign.drr?.totalQty ? campaign.directSales / (campaign.totalQty || 1) : 0, 'rs')}/order`, null, prevCampaign?.drr?.totalQty), campaign.avgCpm != null && mBox('Avg CPM', fmt(campaign.avgCpm, 'rs'), null, null, prevCampaign?.avgCpm), campaign.utilization != null && mBox('Utilization', `${(campaign.utilization * 100).toFixed(0)}%`, campaign.utilization >= 0.9 ? '⚠ Near/over budget' : campaign.utilization >= 0.7 ? '✓ Healthy' : '↓ Under-utilizing', campaign.utilization >= 0.9 ? '#ef4444' : campaign.utilization >= 0.7 ? '#22c55e' : '#f59e0b', prevCampaign?.utilization), mBox('Score', campaign.score != null ? Math.round(campaign.score) : '—', `${campaign.daysLive} days live`, null, prevCampaign?.score)), dailyData.length >= 2 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 20,
-      marginTop: 8
+      marginTop: 8,
+      flexWrap: 'wrap'
     }
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: {
@@ -1337,7 +1680,7 @@ function CampaignDetail({
       fontSize: 9,
       textTransform: 'uppercase'
     }
-  }, "Spend trend"), /*#__PURE__*/React.createElement(Sparkline, {
+  }, "Spend/d"), /*#__PURE__*/React.createElement(Sparkline, {
     data: dailyData.map(d => d.spend),
     color: "#3b82f6"
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
@@ -1346,7 +1689,7 @@ function CampaignDetail({
       fontSize: 9,
       textTransform: 'uppercase'
     }
-  }, "Sales trend"), /*#__PURE__*/React.createElement(Sparkline, {
+  }, "Sales/d"), /*#__PURE__*/React.createElement(Sparkline, {
     data: dailyData.map(d => d.directSales),
     color: "#22c55e"
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
@@ -1355,10 +1698,19 @@ function CampaignDetail({
       fontSize: 9,
       textTransform: 'uppercase'
     }
-  }, "Impressions"), /*#__PURE__*/React.createElement(Sparkline, {
+  }, "Impr/d"), /*#__PURE__*/React.createElement(Sparkline, {
     data: dailyData.map(d => d.impressions),
     color: "#f59e0b"
-  })))), detailTab === 'daily' && /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6b7280',
+      fontSize: 9,
+      textTransform: 'uppercase'
+    }
+  }, "NU/d"), /*#__PURE__*/React.createElement(Sparkline, {
+    data: dailyData.map(d => d.newUsers),
+    color: "#8b5cf6"
+  })))), detailTab === 'scoring' && /*#__PURE__*/React.createElement(ScoreDetail, null), detailTab === 'daily' && /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       maxHeight: 280,
@@ -1377,20 +1729,22 @@ function CampaignDetail({
       top: 0,
       background: '#0a0e14'
     }
-  }, ['Date', 'Impressions', 'Spend', 'Direct Sales', 'ROAS', 'New Users', 'Dir Qty', 'Indir Qty', 'NUR'].map(h => /*#__PURE__*/React.createElement("th", {
+  }, ['Date', 'Impr', 'Spend/d', 'Sales/d', 'D.ROAS', 'NU/d', 'DQty/d', 'IQty/d', 'NUR', 'Budget', 'Util%'].map(h => /*#__PURE__*/React.createElement("th", {
     key: h,
     style: {
       padding: '5px 8px',
-      textAlign: 'right',
+      textAlign: h === 'Date' ? 'left' : 'right',
       color: '#6b7280',
       fontSize: 9,
       fontWeight: 600,
-      textTransform: 'uppercase'
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap'
     }
   }, h)))), /*#__PURE__*/React.createElement("tbody", null, dailyData.map((d, i) => {
     const qty = d.directQty + d.indirectQty;
     const roas = d.spend > 0 ? d.directSales / d.spend : null;
     const nur = qty > 0 ? d.newUsers / qty : null;
+    const util = d.budget > 0 ? d.spend / d.budget : null;
     return /*#__PURE__*/React.createElement("tr", {
       key: i,
       style: {
@@ -1408,7 +1762,7 @@ function CampaignDetail({
     })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '4px 8px',
-        color: '#d1d5db',
+        color: '#6b7280',
         textAlign: 'right'
       }
     }, fmt(d.impressions, 'int')), /*#__PURE__*/React.createElement("td", {
@@ -1450,7 +1804,7 @@ function CampaignDetail({
     }, d.directQty), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '4px 8px',
-        color: '#d1d5db',
+        color: '#6b7280',
         textAlign: 'right'
       }
     }, d.indirectQty), /*#__PURE__*/React.createElement("td", {
@@ -1464,11 +1818,25 @@ function CampaignDetail({
       healthy: bm?.nurH,
       strong: bm?.nurS,
       type: "%"
-    })));
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: '#6b7280',
+        textAlign: 'right'
+      }
+    }, d.budget > 0 ? fmt(d.budget, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        textAlign: 'right',
+        fontSize: 9,
+        fontWeight: 600,
+        color: util != null ? util >= 0.9 ? '#ef4444' : util >= 0.7 ? '#22c55e' : '#f59e0b' : '#374151'
+      }
+    }, util != null ? `${(util * 100).toFixed(0)}%` : '—'));
   })))), detailTab === 'keywords' && kwData.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
-      maxHeight: 280,
+      maxHeight: 300,
       overflowY: 'auto'
     }
   }, /*#__PURE__*/React.createElement("table", {
@@ -1484,7 +1852,7 @@ function CampaignDetail({
       top: 0,
       background: '#0a0e14'
     }
-  }, ['Keyword', 'Impressions', 'Spend', 'Direct Sales', 'ROAS', 'New Users', 'Dir Qty', 'NUR'].map(h => /*#__PURE__*/React.createElement("th", {
+  }, ['Keyword', 'Impr/d', 'Spend/d', 'Sales/d', 'D.ROAS', 'NU/d', 'DQty/d', 'NUR', 'Rank', 'CPM'].map(h => /*#__PURE__*/React.createElement("th", {
     key: h,
     style: {
       padding: '5px 8px',
@@ -1492,12 +1860,15 @@ function CampaignDetail({
       color: '#6b7280',
       fontSize: 9,
       fontWeight: 600,
-      textTransform: 'uppercase'
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap'
     }
-  }, h)))), /*#__PURE__*/React.createElement("tbody", null, kwData.slice(0, 50).map((d, i) => {
-    const roas = d.spend > 0 ? d.directSales / d.spend : null;
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, kwData.slice(0, 60).map((d, i) => {
     const qty = d.directQty + d.indirectQty;
+    const roas = d.spend > 0 ? d.directSales / d.spend : null;
     const nur = qty > 0 ? d.newUsers / qty : null;
+    const avgPos = d.posImp > 0 ? d.posSum / d.posImp : null;
+    const avgCpm = d.cpmImp > 0 ? d.cpm / d.cpmImp : null;
     return /*#__PURE__*/React.createElement("tr", {
       key: i,
       style: {
@@ -1507,7 +1878,7 @@ function CampaignDetail({
       style: {
         padding: '4px 8px',
         color: '#d1d5db',
-        maxWidth: 200,
+        maxWidth: 180,
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap'
@@ -1516,23 +1887,23 @@ function CampaignDetail({
     }, d.keyword), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '4px 8px',
-        color: '#9ca3af',
+        color: '#6b7280',
         textAlign: 'right'
       }
-    }, fmt(d.impressions, 'int')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(d.impressions / numDays, 'int')), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '4px 8px',
         color: '#d1d5db',
         textAlign: 'right',
         fontWeight: 600
       }
-    }, fmt(d.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(d.spend / numDays, 'rsk')), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '4px 8px',
         color: '#d1d5db',
         textAlign: 'right'
       }
-    }, fmt(d.directSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(d.directSales / numDays, 'rsk')), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '4px 8px',
         textAlign: 'right'
@@ -1549,13 +1920,13 @@ function CampaignDetail({
         color: '#d1d5db',
         textAlign: 'right'
       }
-    }, d.newUsers), /*#__PURE__*/React.createElement("td", {
+    }, (d.newUsers / numDays).toFixed(1)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '4px 8px',
         color: '#d1d5db',
         textAlign: 'right'
       }
-    }, d.directQty), /*#__PURE__*/React.createElement("td", {
+    }, (d.directQty / numDays).toFixed(1)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '4px 8px',
         textAlign: 'right'
@@ -1566,7 +1937,19 @@ function CampaignDetail({
       healthy: bm?.nurH,
       strong: bm?.nurS,
       type: "%"
-    })));
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: '#9ca3af',
+        textAlign: 'right'
+      }
+    }, avgPos != null ? avgPos.toFixed(1) : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: '#9ca3af',
+        textAlign: 'right'
+      }
+    }, avgCpm != null ? fmt(avgCpm, 'rs') : '—'));
   })))));
 }
 
@@ -1796,8 +2179,25 @@ function PortfolioView({
 
 // ─── SCORECARD VIEW ──────────────────────────────────────────────────────────
 
+function PctChg({
+  curr,
+  prev,
+  invert = false
+}) {
+  if (curr == null || prev == null || prev === 0) return null;
+  const d = (curr - prev) / Math.abs(prev) * 100;
+  const good = invert ? d <= 0 : d >= 0;
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: good ? '#22c55e' : '#ef4444',
+      fontSize: 8,
+      marginLeft: 3
+    }
+  }, d >= 0 ? '▲' : '▼', Math.abs(d).toFixed(0), "%");
+}
 function ScorecardView({
   campaigns,
+  prevCampaigns,
   allRows,
   startDate,
   endDate
@@ -1807,16 +2207,26 @@ function ScorecardView({
   const [cat, setCat] = useState('');
   const [seg, setSeg] = useState('');
   const [verdict, setVerdict] = useState('');
+  const [kw, setKw] = useState('');
   const [sort, setSort] = useState({
     col: 'spend',
     dir: -1
   });
-  const [expanded, setExpanded] = useState(null); // campaign name
-
+  const [expanded, setExpanded] = useState(null);
   const brands = [...new Set(campaigns.map(c => c.brand).filter(Boolean))].sort();
   const cats = [...new Set(campaigns.map(c => c.category).filter(Boolean))].sort();
   const segs = [...new Set(campaigns.map(c => c.segment).filter(Boolean))].sort();
   const verdicts = VERDICT_ORDER.filter(v => campaigns.some(c => c.verdict === v));
+
+  // prevCampaigns lookup map
+  const prevMap = useMemo(() => {
+    if (!prevCampaigns) return {};
+    const m = {};
+    prevCampaigns.forEach(c => {
+      m[c.campaign.toLowerCase()] = c;
+    });
+    return m;
+  }, [prevCampaigns]);
   const filtered = useMemo(() => {
     let out = campaigns;
     if (search) out = out.filter(c => c.campaign.toLowerCase().includes(search.toLowerCase()));
@@ -1824,14 +2234,15 @@ function ScorecardView({
     if (cat) out = out.filter(c => c.category === cat);
     if (seg) out = out.filter(c => c.segment === seg);
     if (verdict) out = out.filter(c => c.verdict === verdict);
+    if (kw) out = out.filter(c => allRows.some(r => r.campaign.toLowerCase() === c.campaign.toLowerCase() && r.keyword && r.keyword.toLowerCase().includes(kw.toLowerCase())));
     return [...out].sort((a, b) => {
-      const av = a[sort.col],
-        bv = b[sort.col];
+      const av = a[sort.col] ?? a.drr?.[sort.col] ?? null;
+      const bv = b[sort.col] ?? b.drr?.[sort.col] ?? null;
       if (av === null || av === undefined) return 1;
       if (bv === null || bv === undefined) return -1;
       return sort.dir * (av > bv ? 1 : av < bv ? -1 : 0);
     });
-  }, [campaigns, search, brand, cat, seg, verdict, sort]);
+  }, [campaigns, search, brand, cat, seg, verdict, kw, sort, allRows]);
   const toggleSort = col => setSort(s => ({
     col,
     dir: s.col === col ? -s.dir : -1
@@ -1859,7 +2270,12 @@ function ScorecardView({
       zIndex: 2,
       backdropFilter: 'blur(8px)'
     }
-  }, children, " ", sort.col === col ? sort.dir > 0 ? '↑' : '↓' : '');
+  }, children, sort.col === col ? sort.dir > 0 ? ' ↑' : ' ↓' : '');
+  const utilColor = u => u >= 0.9 ? '#ef4444' : u >= 0.7 ? '#22c55e' : '#f59e0b';
+  const lastChgFmt = d => d ? d.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short'
+  }) : '—';
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -1885,7 +2301,21 @@ function ScorecardView({
       fontSize: 11,
       padding: '5px 10px',
       outline: 'none',
-      width: 200
+      width: 180
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: kw,
+    onChange: e => setKw(e.target.value),
+    placeholder: "Keyword filter\u2026",
+    style: {
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: '#d1d5db',
+      borderRadius: 6,
+      fontSize: 11,
+      padding: '5px 10px',
+      outline: 'none',
+      width: 150
     }
   }), /*#__PURE__*/React.createElement(Select, {
     value: brand,
@@ -1907,9 +2337,10 @@ function ScorecardView({
     onChange: setVerdict,
     options: verdicts,
     placeholder: "All Verdicts"
-  }), (search || brand || cat || seg || verdict) && /*#__PURE__*/React.createElement("button", {
+  }), (search || kw || brand || cat || seg || verdict) && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setSearch('');
+      setKw('');
       setBrand('');
       setCat('');
       setSeg('');
@@ -1944,8 +2375,7 @@ function ScorecardView({
     }
   }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
     style: {
-      borderBottom: '1px solid #1f2937',
-      background: '#0d1117'
+      borderBottom: '1px solid #1f2937'
     }
   }, /*#__PURE__*/React.createElement(Th, {
     col: "campaign"
@@ -1953,36 +2383,58 @@ function ScorecardView({
     col: "brand"
   }, "Brand"), /*#__PURE__*/React.createElement(Th, {
     col: "segment"
-  }, "Segment"), /*#__PURE__*/React.createElement(Th, {
+  }, "Seg"), /*#__PURE__*/React.createElement(Th, {
     col: "spend",
     align: "right"
-  }, "Spend/day"), /*#__PURE__*/React.createElement(Th, {
+  }, "Spend/d"), /*#__PURE__*/React.createElement(Th, {
     col: "directSales",
     align: "right"
-  }, "Sales/day"), /*#__PURE__*/React.createElement(Th, {
+  }, "Sales/d"), /*#__PURE__*/React.createElement(Th, {
     col: "roas",
     align: "right"
-  }, "ROAS"), /*#__PURE__*/React.createElement(Th, {
+  }, "D.ROAS"), /*#__PURE__*/React.createElement(Th, {
+    col: "avgTotalRoas",
+    align: "right"
+  }, "T.ROAS"), /*#__PURE__*/React.createElement(Th, {
     col: "nur",
     align: "right"
   }, "NUR"), /*#__PURE__*/React.createElement(Th, {
     col: "ltvCac",
     align: "right"
   }, "LTV:CAC"), /*#__PURE__*/React.createElement(Th, {
+    col: "cac",
+    align: "right"
+  }, "CAC"), /*#__PURE__*/React.createElement(Th, {
+    col: "avgPos",
+    align: "right"
+  }, "Rank"), /*#__PURE__*/React.createElement(Th, {
+    col: "avgCpm",
+    align: "right"
+  }, "CPM"), /*#__PURE__*/React.createElement(Th, {
+    col: "totHoursLive",
+    align: "right"
+  }, "Hrs"), /*#__PURE__*/React.createElement(Th, {
+    col: "newUsers",
+    align: "right"
+  }, "NU/d"), /*#__PURE__*/React.createElement(Th, {
+    col: "directQty",
+    align: "right"
+  }, "DQty/d"), /*#__PURE__*/React.createElement(Th, {
+    col: "currentDailyBudget",
+    align: "right"
+  }, "Budget/d"), /*#__PURE__*/React.createElement(Th, {
     col: "utilization",
     align: "right"
   }, "Util%"), /*#__PURE__*/React.createElement(Th, {
-    col: "impressions",
+    col: "lastChange",
     align: "right"
-  }, "Impr/day"), /*#__PURE__*/React.createElement(Th, {
-    col: "newUsers",
-    align: "right"
-  }, "NU/day"), /*#__PURE__*/React.createElement(Th, {
+  }, "Last Chg"), /*#__PURE__*/React.createElement(Th, {
     col: "score"
   }, "Score"), /*#__PURE__*/React.createElement(Th, {
     col: "verdict"
   }, "Verdict"))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((c, i) => {
     const bm = BENCHMARKS[c.segment] || null;
+    const pv = prevMap[c.campaign.toLowerCase()];
     const isExp = expanded === c.campaign;
     return /*#__PURE__*/React.createElement(React.Fragment, {
       key: i
@@ -1998,7 +2450,7 @@ function ScorecardView({
       style: {
         padding: '6px 8px',
         color: '#e5e7eb',
-        maxWidth: 200,
+        maxWidth: 180,
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap'
@@ -2024,23 +2476,32 @@ function ScorecardView({
         whiteSpace: 'nowrap',
         fontSize: 10
       }
-    }, SEG_SHORT[c.segment] || c.segment), /*#__PURE__*/React.createElement("td", {
+    }, SEG_SHORT[c.segment] || c.segment || '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         color: '#d1d5db',
         fontWeight: 600,
-        textAlign: 'right'
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
       }
-    }, fmt(c.drr?.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(c.drr?.spend, 'rsk'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.drr?.spend,
+      prev: pv?.drr?.spend
+    })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         color: '#d1d5db',
-        textAlign: 'right'
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
       }
-    }, fmt(c.drr?.directSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(c.drr?.directSales, 'rsk'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.drr?.directSales,
+      prev: pv?.drr?.directSales
+    })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
-        textAlign: 'right'
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
       }
     }, /*#__PURE__*/React.createElement(MCell, {
       val: c.roas,
@@ -2048,10 +2509,32 @@ function ScorecardView({
       healthy: bm?.roasH,
       strong: bm?.roasS,
       type: "x"
+    }), /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.roas,
+      prev: pv?.roas
     })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
-        textAlign: 'right'
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, c.avgTotalRoas != null ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#a78bfa',
+        fontSize: 10
+      }
+    }, c.avgTotalRoas.toFixed(2), "x") : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#374151'
+      }
+    }, "\u2014"), /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.avgTotalRoas,
+      prev: pv?.avgTotalRoas
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 8px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
       }
     }, /*#__PURE__*/React.createElement(MCell, {
       val: c.nur,
@@ -2059,10 +2542,14 @@ function ScorecardView({
       healthy: bm?.nurH,
       strong: bm?.nurS,
       type: "%"
+    }), /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.nur,
+      prev: pv?.nur
     })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
-        textAlign: 'right'
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
       }
     }, /*#__PURE__*/React.createElement(MCell, {
       val: c.ltvCac,
@@ -2070,29 +2557,86 @@ function ScorecardView({
       healthy: bm?.ltvH,
       strong: bm?.ltvS,
       type: "x"
+    }), /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.ltvCac,
+      prev: pv?.ltvCac
     })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
-        color: c.utilization !== null ? c.utilization >= 0.9 ? '#ef4444' : c.utilization >= 0.7 ? '#22c55e' : '#f59e0b' : '#374151',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, c.cac != null ? fmt(c.cac, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, c.avgPos != null ? c.avgPos.toFixed(1) : '—', /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.avgPos,
+      prev: pv?.avgPos,
+      invert: true
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, c.avgCpm != null ? fmt(c.avgCpm, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 8px',
+        color: '#6b7280',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, c.totHoursLive > 0 ? Math.round(c.totHoursLive) : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 8px',
+        color: '#9ca3af',
         textAlign: 'right',
         fontSize: 10,
-        fontWeight: 600
+        whiteSpace: 'nowrap'
       }
-    }, c.utilization !== null ? `${(c.utilization * 100).toFixed(0)}%` : '—'), /*#__PURE__*/React.createElement("td", {
+    }, fmt(c.drr?.newUsers, 'int'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.drr?.newUsers,
+      prev: pv?.drr?.newUsers
+    })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         color: '#9ca3af',
         textAlign: 'right',
-        fontSize: 10
+        fontSize: 10,
+        whiteSpace: 'nowrap'
       }
-    }, fmt(c.drr?.impressions, 'int')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(c.drr?.totalQty, 'int'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.drr?.totalQty,
+      prev: pv?.drr?.totalQty
+    })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
-        color: '#9ca3af',
+        color: '#d1d5db',
         textAlign: 'right',
         fontSize: 10
       }
-    }, fmt(c.drr?.newUsers, 'int')), /*#__PURE__*/React.createElement("td", {
+    }, c.currentDailyBudget != null ? fmt(c.currentDailyBudget, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 8px',
+        textAlign: 'right',
+        fontSize: 10,
+        fontWeight: 600,
+        color: c.utilization != null ? utilColor(c.utilization) : '#374151'
+      }
+    }, c.utilization != null ? `${(c.utilization * 100).toFixed(0)}%` : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 8px',
+        textAlign: 'right',
+        fontSize: 9,
+        color: c.lastChange ? '#f59e0b' : '#374151'
+      }
+    }, lastChgFmt(c.lastChange)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px'
       }
@@ -2106,12 +2650,13 @@ function ScorecardView({
       verdict: c.verdict,
       sm: true
     }))), isExp && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
-      colSpan: 12,
+      colSpan: 20,
       style: {
         padding: 0
       }
     }, /*#__PURE__*/React.createElement(CampaignDetail, {
       campaign: c,
+      prevCampaign: pv,
       allRows: allRows,
       startDate: startDate,
       endDate: endDate
@@ -2135,8 +2680,9 @@ function SegmentHealthView({
     const bm = BENCHMARKS[seg];
     const cs = campaigns.filter(c => c.segment === seg && c.verdict !== 'Inactive' && c.verdict !== 'Unindexed');
     if (!bm || cs.length === 0) return null;
-    const totSpend = cs.reduce((s, c) => s + (c.spend || 0), 0);
-    const totSales = cs.reduce((s, c) => s + (c.directSales || 0), 0);
+    const numDays = cs.length > 0 ? cs[0].numDays || 1 : 1;
+    const totSpend = cs.reduce((s, c) => s + (c.drr?.spend || 0), 0);
+    const totSales = cs.reduce((s, c) => s + (c.drr?.directSales || 0), 0);
     const wtRoas = cs.filter(c => c.roas !== null && c.spend > 0).reduce((s, c) => s + c.roas * c.spend, 0) / (totSpend || 1);
     const wtNur = cs.filter(c => c.nur !== null && c.spend > 0).reduce((s, c) => s + c.nur * c.spend, 0) / (totSpend || 1);
     const wtLtv = cs.filter(c => c.ltvCac !== null && c.spend > 0).reduce((s, c) => s + c.ltvCac * c.spend, 0) / (totSpend || 1);
@@ -2243,7 +2789,7 @@ function SegmentHealthView({
         fontSize: 10,
         marginLeft: 8
       }
-    }, cs.length, " campaigns \xB7 ", fmt(totSpend, 'rsk'), " spend \xB7 ", fmt(totSales, 'rsk'), " sales")), /*#__PURE__*/React.createElement("div", {
+    }, cs.length, " campaigns \xB7 ", fmt(totSpend, 'rsk'), "/d spend \xB7 ", fmt(totSales, 'rsk'), "/d sales")), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
         gap: 4
@@ -2491,6 +3037,359 @@ function ActionQueueView({
   }, "No action items found."));
 }
 
+// ─── KEYWORD SCORECARD VIEW ──────────────────────────────────────────────────
+
+function KeywordScorecardView({
+  kwCurrent,
+  kwPrev
+}) {
+  const [search, setSearch] = useState('');
+  const [brand, setBrand] = useState('');
+  const [cat, setCat] = useState('');
+  const [seg, setSeg] = useState('');
+  const [camp, setCamp] = useState('');
+  const [sort, setSort] = useState({
+    col: 'spend',
+    dir: -1
+  });
+  const brands = [...new Set(kwCurrent.map(k => k.brand).filter(Boolean))].sort();
+  const cats = [...new Set(kwCurrent.map(k => k.category).filter(Boolean))].sort();
+  const segs = [...new Set(kwCurrent.map(k => k.segment).filter(Boolean))].sort();
+  const camps = [...new Set(kwCurrent.map(k => k.campaign).filter(Boolean))].sort();
+  const prevMap = useMemo(() => {
+    if (!kwPrev) return {};
+    const m = {};
+    kwPrev.forEach(k => {
+      m[`${k.campaign.toLowerCase()}||${k.keyword.toLowerCase()}`] = k;
+    });
+    return m;
+  }, [kwPrev]);
+  const filtered = useMemo(() => {
+    let out = kwCurrent;
+    if (search) out = out.filter(k => k.keyword.toLowerCase().includes(search.toLowerCase()));
+    if (brand) out = out.filter(k => k.brand === brand);
+    if (cat) out = out.filter(k => k.category === cat);
+    if (seg) out = out.filter(k => k.segment === seg);
+    if (camp) out = out.filter(k => k.campaign === camp);
+    return [...out].sort((a, b) => {
+      const av = a[sort.col] ?? a.drr?.[sort.col] ?? null;
+      const bv = b[sort.col] ?? b.drr?.[sort.col] ?? null;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return sort.dir * (av > bv ? 1 : av < bv ? -1 : 0);
+    });
+  }, [kwCurrent, search, brand, cat, seg, camp, sort]);
+  const toggleSort = col => setSort(s => ({
+    col,
+    dir: s.col === col ? -s.dir : -1
+  }));
+  const Th = ({
+    col,
+    children,
+    align
+  }) => /*#__PURE__*/React.createElement("th", {
+    onClick: () => toggleSort(col),
+    style: {
+      padding: '7px 8px',
+      textAlign: align || 'left',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      cursor: 'pointer',
+      whiteSpace: 'nowrap',
+      userSelect: 'none',
+      background: sort.col === col ? 'rgba(59,130,246,0.05)' : 'transparent',
+      position: 'sticky',
+      top: 0,
+      zIndex: 2,
+      backdropFilter: 'blur(8px)'
+    }
+  }, children, sort.col === col ? sort.dir > 0 ? ' ↑' : ' ↓' : '');
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 6,
+      flexWrap: 'wrap',
+      alignItems: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: search,
+    onChange: e => setSearch(e.target.value),
+    placeholder: "Search keyword\u2026",
+    style: {
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: '#d1d5db',
+      borderRadius: 6,
+      fontSize: 11,
+      padding: '5px 10px',
+      outline: 'none',
+      width: 160
+    }
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: camp,
+    onChange: setCamp,
+    options: camps,
+    placeholder: "All Campaigns"
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: brand,
+    onChange: setBrand,
+    options: brands,
+    placeholder: "All Brands"
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: cat,
+    onChange: setCat,
+    options: cats,
+    placeholder: "All Categories"
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: seg,
+    onChange: setSeg,
+    options: segs,
+    placeholder: "All Segments"
+  }), (search || camp || brand || cat || seg) && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setSearch('');
+      setCamp('');
+      setBrand('');
+      setCat('');
+      setSeg('');
+    },
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      background: 'transparent',
+      border: 'none',
+      cursor: 'pointer'
+    }
+  }, "\u2715 Clear"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 10,
+      marginLeft: 'auto'
+    }
+  }, filtered.length, " keywords")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto',
+      borderRadius: 10,
+      border: '1px solid #1f2937',
+      maxHeight: '75vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      borderBottom: '1px solid #1f2937'
+    }
+  }, /*#__PURE__*/React.createElement(Th, {
+    col: "keyword"
+  }, "Keyword"), /*#__PURE__*/React.createElement(Th, {
+    col: "campaign"
+  }, "Campaign"), /*#__PURE__*/React.createElement(Th, {
+    col: "brand"
+  }, "Brand"), /*#__PURE__*/React.createElement(Th, {
+    col: "segment"
+  }, "Seg"), /*#__PURE__*/React.createElement(Th, {
+    col: "spend",
+    align: "right"
+  }, "Spend/d"), /*#__PURE__*/React.createElement(Th, {
+    col: "directSales",
+    align: "right"
+  }, "Sales/d"), /*#__PURE__*/React.createElement(Th, {
+    col: "roas",
+    align: "right"
+  }, "ROAS"), /*#__PURE__*/React.createElement(Th, {
+    col: "nur",
+    align: "right"
+  }, "NUR"), /*#__PURE__*/React.createElement(Th, {
+    col: "avgPos",
+    align: "right"
+  }, "Rank"), /*#__PURE__*/React.createElement(Th, {
+    col: "avgCpm",
+    align: "right"
+  }, "CPM"), /*#__PURE__*/React.createElement(Th, {
+    col: "impressions",
+    align: "right"
+  }, "Impr/d"), /*#__PURE__*/React.createElement(Th, {
+    col: "newUsers",
+    align: "right"
+  }, "NU/d"), /*#__PURE__*/React.createElement(Th, {
+    col: "directQty",
+    align: "right"
+  }, "DQty/d"), /*#__PURE__*/React.createElement(Th, {
+    col: "ltvCac",
+    align: "right"
+  }, "LTV:CAC"))), /*#__PURE__*/React.createElement("tbody", null, filtered.slice(0, 300).map((k, i) => {
+    const pk = prevMap[`${k.campaign.toLowerCase()}||${k.keyword.toLowerCase()}`];
+    const bm = BENCHMARKS[k.segment] || null;
+    return /*#__PURE__*/React.createElement("tr", {
+      key: i,
+      style: {
+        borderBottom: '1px solid #111827',
+        background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)'
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#e5e7eb',
+        maxWidth: 180,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      },
+      title: k.keyword
+    }, k.keyword), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#4b5563',
+        fontSize: 9,
+        maxWidth: 140,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap'
+      },
+      title: k.campaign
+    }, k.campaign), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: BRAND_COLORS[k.brand] || '#6b7280',
+        fontWeight: 600,
+        fontSize: 10
+      }
+    }, k.brand || '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#6b7280',
+        fontSize: 9,
+        whiteSpace: 'nowrap'
+      }
+    }, SEG_SHORT[k.segment] || k.segment || '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#d1d5db',
+        fontWeight: 600,
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, fmt(k.drr?.spend, 'rsk'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: k.drr?.spend,
+      prev: pk?.drr?.spend
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#d1d5db',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, fmt(k.drr?.directSales, 'rsk'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: k.drr?.directSales,
+      prev: pk?.drr?.directSales
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement(MCell, {
+      val: k.roas,
+      floor: bm?.roasF,
+      healthy: bm?.roasH,
+      strong: bm?.roasS,
+      type: "x"
+    }), /*#__PURE__*/React.createElement(PctChg, {
+      curr: k.roas,
+      prev: pk?.roas
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement(MCell, {
+      val: k.nur,
+      floor: bm?.nurF,
+      healthy: bm?.nurH,
+      strong: bm?.nurS,
+      type: "%"
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10,
+        whiteSpace: 'nowrap'
+      }
+    }, k.avgPos != null ? k.avgPos.toFixed(1) : '—', /*#__PURE__*/React.createElement(PctChg, {
+      curr: k.avgPos,
+      prev: pk?.avgPos,
+      invert: true
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, k.avgCpm != null ? fmt(k.avgCpm, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#6b7280',
+        textAlign: 'right',
+        fontSize: 10,
+        whiteSpace: 'nowrap'
+      }
+    }, fmt(k.drr?.impressions, 'int'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: k.drr?.impressions,
+      prev: pk?.drr?.impressions
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10,
+        whiteSpace: 'nowrap'
+      }
+    }, fmt(k.drr?.newUsers, 'int'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: k.drr?.newUsers,
+      prev: pk?.drr?.newUsers
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10,
+        whiteSpace: 'nowrap'
+      }
+    }, fmt(k.drr?.totalQty, 'int'), /*#__PURE__*/React.createElement(PctChg, {
+      curr: k.drr?.totalQty,
+      prev: pk?.drr?.totalQty
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        textAlign: 'right'
+      }
+    }, /*#__PURE__*/React.createElement(MCell, {
+      val: k.ltvCac,
+      floor: bm?.ltvF,
+      healthy: bm?.ltvH,
+      strong: bm?.ltvS,
+      type: "x"
+    })));
+  })))));
+}
+
 // ─── LOADING SCREEN ──────────────────────────────────────────────────────────
 
 function LoadingScreen({
@@ -2662,15 +3561,19 @@ function App() {
   }) => {
     const bounds = getDateBounds(allRows);
     const endDate = bounds.max;
-    const s = new Date(endDate.getTime() - 6 * 864e5);
-    const startDate = s < bounds.min ? bounds.min : s;
+    // Default: MTD
+    const startDate = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
     setAppState({
       allRows,
       ltvMap,
       campaignIndexMap: campaignIndexMap || {},
       bounds,
-      startDate,
-      endDate
+      startDate: startDate < bounds.min ? bounds.min : startDate,
+      endDate,
+      compareMode: 'lastMonthMTD',
+      // default comparison
+      compareStart: null,
+      compareEnd: null // only used in 'custom' mode
     });
   }, []);
   const onDateChange = useCallback((s, e) => {
@@ -2678,6 +3581,19 @@ function App() {
       ...prev,
       startDate: s,
       endDate: e
+    } : prev);
+  }, []);
+  const onCompareModeChange = useCallback(mode => {
+    setAppState(prev => prev ? {
+      ...prev,
+      compareMode: mode
+    } : prev);
+  }, []);
+  const onCompareRangeChange = useCallback((cs, ce) => {
+    setAppState(prev => prev ? {
+      ...prev,
+      compareStart: cs,
+      compareEnd: ce
     } : prev);
   }, []);
 
@@ -2701,16 +3617,72 @@ function App() {
       campaignIndexMap,
       bounds,
       startDate,
-      endDate
+      endDate,
+      compareMode,
+      compareStart,
+      compareEnd
     } = appState;
     const startTs = startDate.getTime();
     const endTs = endDate.getTime();
     const periodLen = Math.round((endTs - startTs) / 864e5) + 1;
-    const pEnd = new Date(startTs - 864e5);
-    const pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
+    let pStart, pEnd;
+    if (compareMode === 'lastMonthMTD') {
+      // Same day-of-month range in previous month
+      pStart = new Date(startDate.getFullYear(), startDate.getMonth() - 1, 1);
+      pEnd = new Date(endDate.getFullYear(), endDate.getMonth() - 1, endDate.getDate());
+    } else if (compareMode === 'custom' && compareStart && compareEnd) {
+      pStart = compareStart;
+      pEnd = compareEnd;
+    } else {
+      // prevPeriod: same-length window immediately before
+      pEnd = new Date(startTs - 864e5);
+      pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
+    }
     if (pStart < bounds.min) return null;
     return aggregateCampaigns(allRows, ltvMap, pStart, pEnd, campaignIndexMap);
   }, [appState]);
+
+  // Keyword aggregations (current + comparison)
+  const kwCurrent = useMemo(() => {
+    if (!appState) return [];
+    const {
+      allRows,
+      ltvMap,
+      campaignIndexMap,
+      startDate,
+      endDate
+    } = appState;
+    return aggregateKeywords(allRows, ltvMap, startDate, endDate, campaignIndexMap);
+  }, [appState]);
+  const kwPrev = useMemo(() => {
+    if (!appState || !prevCampaigns) return null;
+    const {
+      allRows,
+      ltvMap,
+      campaignIndexMap,
+      bounds,
+      startDate,
+      endDate,
+      compareMode,
+      compareStart,
+      compareEnd
+    } = appState;
+    const startTs = startDate.getTime();
+    const periodLen = Math.round((endDate.getTime() - startTs) / 864e5) + 1;
+    let pStart, pEnd;
+    if (compareMode === 'lastMonthMTD') {
+      pStart = new Date(startDate.getFullYear(), startDate.getMonth() - 1, 1);
+      pEnd = new Date(endDate.getFullYear(), endDate.getMonth() - 1, endDate.getDate());
+    } else if (compareMode === 'custom' && compareStart && compareEnd) {
+      pStart = compareStart;
+      pEnd = compareEnd;
+    } else {
+      pEnd = new Date(startTs - 864e5);
+      pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
+    }
+    if (pStart < bounds.min) return null;
+    return aggregateKeywords(allRows, ltvMap, pStart, pEnd, campaignIndexMap);
+  }, [appState, prevCampaigns]);
   // ─────────────────────────────────────────────────────────────────────────
 
   // Conditional return only AFTER all hooks are declared
@@ -2721,16 +3693,36 @@ function App() {
     allRows,
     bounds,
     startDate,
-    endDate
+    endDate,
+    compareMode,
+    compareStart,
+    compareEnd
   } = appState;
   const startTs = startDate.getTime();
   const endTs = endDate.getTime();
+
+  // Derive comparison range for display label
+  const periodLen = Math.round((endTs - startTs) / 864e5) + 1;
+  let cmpStart, cmpEnd;
+  if (compareMode === 'lastMonthMTD') {
+    cmpStart = new Date(startDate.getFullYear(), startDate.getMonth() - 1, 1);
+    cmpEnd = new Date(endDate.getFullYear(), endDate.getMonth() - 1, endDate.getDate());
+  } else if (compareMode === 'custom' && compareStart && compareEnd) {
+    cmpStart = compareStart;
+    cmpEnd = compareEnd;
+  } else {
+    cmpEnd = new Date(startTs - 864e5);
+    cmpStart = new Date(cmpEnd.getTime() - (periodLen - 1) * 864e5);
+  }
   const tabs = [{
     id: 'portfolio',
     label: 'Portfolio'
   }, {
     id: 'scorecard',
     label: 'Scorecard'
+  }, {
+    id: 'keywords',
+    label: 'Keywords'
   }, {
     id: 'segment',
     label: 'Segment Health'
@@ -2827,8 +3819,15 @@ function App() {
       borderBottom: '1px solid #1f2937',
       padding: '8px 24px',
       display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
       alignItems: 'center',
-      gap: 12
+      gap: 12,
+      flexWrap: 'wrap'
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
@@ -2850,7 +3849,87 @@ function App() {
       fontSize: 10,
       marginLeft: 'auto'
     }
-  }, Math.round((endTs - startTs) / 864e5) + 1, " days \xB7 Data ", toISODate(bounds.min), " to ", toISODate(bounds.max))), /*#__PURE__*/React.createElement("div", {
+  }, periodLen, " days \xB7 Data ", toISODate(bounds.min), " \u2192 ", toISODate(bounds.max))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 10,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.05em'
+    }
+  }, "vs"), [{
+    label: 'Prev Period',
+    mode: 'prevPeriod'
+  }, {
+    label: 'Last Month MTD',
+    mode: 'lastMonthMTD'
+  }, {
+    label: 'Custom',
+    mode: 'custom'
+  }].map(opt => /*#__PURE__*/React.createElement("button", {
+    key: opt.mode,
+    onClick: () => onCompareModeChange(opt.mode),
+    style: {
+      background: compareMode === opt.mode ? '#1e3a5f' : '#111827',
+      color: compareMode === opt.mode ? '#93c5fd' : '#4b5563',
+      border: `1px solid ${compareMode === opt.mode ? '#2563eb' : '#1f2937'}`,
+      borderRadius: 4,
+      padding: '2px 8px',
+      fontSize: 9,
+      cursor: 'pointer',
+      fontWeight: compareMode === opt.mode ? 600 : 400
+    }
+  }, opt.label)), compareMode === 'custom' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: compareStart ? toISODate(compareStart) : '',
+    onChange: e => {
+      const d = new Date(e.target.value);
+      if (!isNaN(d)) onCompareRangeChange(d, compareEnd || endDate);
+    },
+    style: {
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: '#d1d5db',
+      borderRadius: 4,
+      fontSize: 9,
+      padding: '2px 6px',
+      outline: 'none'
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9
+    }
+  }, "to"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: compareEnd ? toISODate(compareEnd) : '',
+    onChange: e => {
+      const d = new Date(e.target.value);
+      if (!isNaN(d)) onCompareRangeChange(compareStart || startDate, d);
+    },
+    style: {
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: '#d1d5db',
+      borderRadius: 4,
+      fontSize: 9,
+      padding: '2px 6px',
+      outline: 'none'
+    }
+  })), cmpStart && cmpEnd && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontSize: 9,
+      marginLeft: 4
+    }
+  }, toISODate(cmpStart), " \u2192 ", toISODate(cmpEnd)))), /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '16px 24px',
       maxWidth: 1440,
@@ -2863,9 +3942,13 @@ function App() {
     prevCampaigns: prevCampaigns
   }), tab === 'scorecard' && /*#__PURE__*/React.createElement(ScorecardView, {
     campaigns: campaigns,
+    prevCampaigns: prevCampaigns,
     allRows: allRows,
     startDate: startDate,
     endDate: endDate
+  }), tab === 'keywords' && /*#__PURE__*/React.createElement(KeywordScorecardView, {
+    kwCurrent: kwCurrent,
+    kwPrev: kwPrev
   }), tab === 'segment' && /*#__PURE__*/React.createElement(SegmentHealthView, {
     campaigns: campaigns
   }), tab === 'actions' && /*#__PURE__*/React.createElement(ActionQueueView, {
