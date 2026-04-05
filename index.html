@@ -396,7 +396,7 @@ function extractRow(row, type) {
     newUsers: n(13),
     directSales: n(14),
     spend: n(18),
-    segment: TYPE_TO_SEG[s(26).toLowerCase()] || s(26) || null,
+    segment: TYPE_TO_SEG[s(26).toLowerCase()] || null,
     brand: s(27),
     category: s(28),
     hasMetrics: true
@@ -505,15 +505,19 @@ async function fetchAllDataFromSheets() {
   }
 
   // Parse campaign-level segment index from Rough Analysis sheet
-  // Col A = campaign name, Col B = Generic Head / Generic Tail / Comp
+  // Three column groups: A/B (cols 0/1), J/K (cols 9/10)
+  // Col with campaign name paired with Generic Head / Generic Tail / Comp
   const VALID_SEGS = new Set(['Generic Head', 'Generic Tail', 'Comp']);
   const campaignIndexMap = {};
   const idxRows = parseCSV(idxText);
+  const INDEX_COL_PAIRS = [[0, 1], [9, 10]]; // [nameCol, typeCol]
   for (const row of idxRows) {
-    const name = String(row[0] || '').trim();
-    const seg = String(row[1] || '').trim();
-    if (name && VALID_SEGS.has(seg)) {
-      campaignIndexMap[name.toLowerCase()] = seg;
+    for (const [nc, tc] of INDEX_COL_PAIRS) {
+      const name = String(row[nc] || '').trim();
+      const seg = String(row[tc] || '').trim();
+      if (name && VALID_SEGS.has(seg)) {
+        campaignIndexMap[name.toLowerCase()] = seg;
+      }
     }
   }
   return {
