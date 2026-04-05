@@ -387,7 +387,7 @@ function extractRow(row, type) {
     type,
     date: d(1),
     campaign: s(3),
-    keyword: s(2),
+    keyword: s(4),
     impressions: n(10),
     position: n(5) || null,
     directAtc: n(11),
@@ -396,7 +396,10 @@ function extractRow(row, type) {
     newUsers: n(13),
     directSales: n(14),
     spend: n(18),
-    segment: TYPE_TO_SEG[s(26).toLowerCase()] || null,
+    budget: n(9),
+    // daily campaign budget — used for utilization
+    segment: TYPE_TO_SEG[s(36).toLowerCase()] || null,
+    // col AK has full mappings
     brand: s(27),
     category: s(28),
     hasMetrics: true
@@ -414,6 +417,7 @@ function extractRow(row, type) {
     newUsers: n(11),
     directSales: n(12),
     spend: n(14),
+    budget: 0,
     segment: ASSET_TO_SEG[s(4).toLowerCase()] || s(4) || null,
     brand: s(22),
     category: s(23),
@@ -432,6 +436,7 @@ function extractRow(row, type) {
     newUsers: n(14),
     directSales: n(15),
     spend: n(21),
+    budget: 0,
     segment: LAYOUT_TO_SEG[s(5).toLowerCase()] || null,
     brand: s(23),
     category: s(24),
@@ -450,6 +455,7 @@ function extractRow(row, type) {
     newUsers: n(12),
     directSales: n(13),
     spend: n(17),
+    budget: 0,
     segment: 'Category Display Direct shelf',
     brand: s(23),
     category: s(24),
@@ -468,6 +474,7 @@ function extractRow(row, type) {
     newUsers: 0,
     directSales: 0,
     spend: n(13),
+    budget: 0,
     segment: null,
     brand: s(15),
     category: s(16),
@@ -550,6 +557,7 @@ function parseAllRows(rawTexts) {
 // ─── AGGREGATE CAMPAIGNS ─────────────────────────────────────────────────────
 
 function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMap = {}) {
+  const numDays = Math.round((endDate - startDate) / 864e5) + 1; // period length for DRR
   const windowRows = allRows.filter(r => r.date >= startDate && r.date <= endDate);
 
   // Group by campaign (lowercased key)
@@ -602,6 +610,27 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     const totIQ = rows.reduce((s, r) => s + r.indirectQty, 0);
     const totImp = rows.reduce((s, r) => s + r.impressions, 0);
     const totAtc = rows.reduce((s, r) => s + (r.directAtc || 0), 0);
+
+    // Budget utilization: de-dupe by date (budget is campaign-level, repeated per keyword row)
+    const budgetByDate = {};
+    rows.forEach(r => {
+      if (r.date && r.budget > 0) {
+        const dk = r.date.toDateString();
+        budgetByDate[dk] = Math.max(budgetByDate[dk] || 0, r.budget);
+      }
+    });
+    const totBudget = Object.values(budgetByDate).reduce((s, v) => s + v, 0);
+    const utilization = totBudget > 0 ? totSpend / totBudget : null;
+
+    // Daily run rate (DRR) — absolute metrics divided by period length
+    const drr = {
+      spend: totSpend / numDays,
+      directSales: totDS / numDays,
+      impressions: totImp / numDays,
+      totalQty: (totDQ + totIQ) / numDays,
+      newUsers: totNU / numDays,
+      directAtc: totAtc / numDays
+    };
     let avgPos = null;
     const posRows = rows.filter(r => r.position && r.position > 0 && r.impressions > 0);
     if (posRows.length > 0) {
@@ -646,6 +675,9 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       directQty: totDQ,
       indirectQty: totIQ,
       directAtc: totAtc,
+      drr,
+      utilization,
+      numDays,
       roas,
       nur,
       ltvCac,
@@ -1293,7 +1325,7 @@ function CampaignDetail({
       gap: 8,
       marginBottom: 14
     }
-  }, metricBox('Spend', fmt(campaign.spend, 'rsk'), `${campaign.windowDays} days in window`), metricBox('Direct Sales', fmt(campaign.directSales, 'rsk'), campaign.roas !== null ? `ROAS ${fmt(campaign.roas, 'x')}` : null, campaign.roas !== null && bm ? mColor(campaign.roas, bm.roasF, bm.roasH, bm.roasS) : null), metricBox('New Users', fmt(campaign.newUsers, 'int'), campaign.nur !== null ? `NUR ${fmt(campaign.nur, '%')}` : null, campaign.nur !== null && bm ? mColor(campaign.nur, bm.nurF, bm.nurH, bm.nurS) : null), metricBox('LTV:CAC', campaign.ltvCac !== null ? fmt(campaign.ltvCac, 'x') : '—', campaign.cac !== null ? `CAC ${fmt(campaign.cac, 'rs')}` : null, campaign.ltvCac !== null && bm ? mColor(campaign.ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null), metricBox('Impressions', fmt(campaign.impressions, 'int'), campaign.avgPos ? `Avg Pos ${campaign.avgPos.toFixed(1)}` : null), metricBox('Direct Qty', fmt(campaign.directQty, 'int'), `Indirect: ${fmt(campaign.indirectQty, 'int')}`), metricBox('Score', campaign.score !== null ? Math.round(campaign.score) : '—', `${campaign.daysLive} total days live`), metricBox('Type', campaign.type, SEG_SHORT[campaign.segment] || campaign.segment)), dailyData.length >= 2 && /*#__PURE__*/React.createElement("div", {
+  }, metricBox('Spend/day', fmt(campaign.drr?.spend, 'rsk'), `Total ${fmt(campaign.spend, 'rsk')} · ${campaign.numDays}d`), metricBox('Sales/day', fmt(campaign.drr?.directSales, 'rsk'), campaign.roas !== null ? `ROAS ${fmt(campaign.roas, 'x')}` : null, campaign.roas !== null && bm ? mColor(campaign.roas, bm.roasF, bm.roasH, bm.roasS) : null), metricBox('New Users/day', fmt(campaign.drr?.newUsers, 'int'), campaign.nur !== null ? `NUR ${fmt(campaign.nur, '%')}` : null, campaign.nur !== null && bm ? mColor(campaign.nur, bm.nurF, bm.nurH, bm.nurS) : null), metricBox('LTV:CAC', campaign.ltvCac !== null ? fmt(campaign.ltvCac, 'x') : '—', campaign.cac !== null ? `CAC ${fmt(campaign.cac, 'rs')}` : null, campaign.ltvCac !== null && bm ? mColor(campaign.ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null), metricBox('Impressions/day', fmt(campaign.drr?.impressions, 'int'), campaign.avgPos ? `Avg Pos ${campaign.avgPos.toFixed(1)}` : null), metricBox('Orders/day', fmt(campaign.drr?.totalQty, 'int'), `Direct ${fmt(campaign.drr?.spend && campaign.drr?.totalQty ? campaign.drr.directSales / campaign.drr.totalQty || 0 : 0, 'rs')}/order`), campaign.utilization !== null && metricBox('Utilization', `${(campaign.utilization * 100).toFixed(0)}%`, campaign.utilization >= 0.9 ? '⚠ Near/over budget' : campaign.utilization >= 0.7 ? '✓ Healthy utilization' : '↓ Under-utilizing budget', campaign.utilization >= 0.9 ? '#ef4444' : campaign.utilization >= 0.7 ? '#22c55e' : '#f59e0b'), metricBox('Score', campaign.score !== null ? Math.round(campaign.score) : '—', `${campaign.daysLive} total days live`), metricBox('Type', campaign.type, SEG_SHORT[campaign.segment] || campaign.segment)), dailyData.length >= 2 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 20,
@@ -1553,7 +1585,23 @@ function PortfolioView({
   const totalQty = campaigns.reduce((s, c) => s + (c.totalQty || 0), 0);
   const avgNur = totalQty > 0 ? totalNU / totalQty : null;
 
-  // Previous period for MoM
+  // DRR — use first campaign's numDays (all same period)
+  const numDays = campaigns.length > 0 ? campaigns[0].numDays || 1 : 1;
+  const drrSpend = totalSpend / numDays;
+  const drrSales = totalSales / numDays;
+  const drrImp = totalImp / numDays;
+  const drrNU = totalNU / numDays;
+
+  // Portfolio utilization (Search campaigns only — those with budget data)
+  const utilCamps = campaigns.filter(c => c.utilization !== null);
+  const avgUtil = utilCamps.length > 0 ? utilCamps.reduce((s, c) => s + c.utilization, 0) / utilCamps.length : null;
+
+  // Previous period for MoM — also DRR
+  const pDrrSpend = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.spend || 0), 0) : 0;
+  const pDrrSales = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.directSales || 0), 0) : 0;
+  const pDrrImp = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.impressions || 0), 0) : 0;
+  const pDrrNU = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.newUsers || 0), 0) : 0;
+  // keep legacy pSpend etc for chart comparisons
   const pSpend = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.spend || 0), 0) : 0;
   const pSales = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.directSales || 0), 0) : 0;
   const pImp = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.impressions || 0), 0) : 0;
@@ -1621,7 +1669,7 @@ function PortfolioView({
       gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))',
       gap: 10
     }
-  }, statBox('Total Spend', fmt(totalSpend, 'rsk'), `${campaigns.length} campaigns`, pSpend, '#3b82f6'), statBox('Direct Sales', fmt(totalSales, 'rsk'), avgRoas ? `ROAS ${avgRoas.toFixed(2)}x` : '—', pSales, '#22c55e'), statBox('New Users', fmt(totalNU, 'int'), avgNur ? `NUR ${fmt(avgNur, '%')}` : '—', pNU, '#8b5cf6'), statBox('Impressions', fmt(totalImp, 'int'), `${active.length} active`, pImp, '#f59e0b'), statBox('Scaling', campaigns.filter(c => c.verdict === 'Scale').length, `${campaigns.filter(c => c.verdict === 'Cut').length} to cut`, null, '#22c55e')), /*#__PURE__*/React.createElement("div", {
+  }, statBox('Avg Daily Spend', fmt(drrSpend, 'rsk'), `${campaigns.length} campaigns · ${numDays}d`, pDrrSpend, '#3b82f6'), statBox('Avg Daily Sales', fmt(drrSales, 'rsk'), avgRoas ? `ROAS ${avgRoas.toFixed(2)}x` : '—', pDrrSales, '#22c55e'), statBox('Avg Daily New Users', fmt(drrNU, 'int'), avgNur ? `NUR ${fmt(avgNur, '%')}` : '—', pDrrNU, '#8b5cf6'), statBox('Avg Daily Impressions', fmt(drrImp, 'int'), `${active.length} active`, pDrrImp, '#f59e0b'), avgUtil !== null && statBox('Avg Utilization', `${(avgUtil * 100).toFixed(0)}%`, `${utilCamps.length} campaigns`, null, avgUtil >= 0.9 ? '#ef4444' : avgUtil >= 0.7 ? '#22c55e' : '#f59e0b'), statBox('Scaling', campaigns.filter(c => c.verdict === 'Scale').length, `${campaigns.filter(c => c.verdict === 'Cut').length} to cut`, null, '#22c55e')), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
       gridTemplateColumns: '1fr 1fr',
@@ -1908,10 +1956,10 @@ function ScorecardView({
   }, "Segment"), /*#__PURE__*/React.createElement(Th, {
     col: "spend",
     align: "right"
-  }, "Spend"), /*#__PURE__*/React.createElement(Th, {
+  }, "Spend/day"), /*#__PURE__*/React.createElement(Th, {
     col: "directSales",
     align: "right"
-  }, "Sales"), /*#__PURE__*/React.createElement(Th, {
+  }, "Sales/day"), /*#__PURE__*/React.createElement(Th, {
     col: "roas",
     align: "right"
   }, "ROAS"), /*#__PURE__*/React.createElement(Th, {
@@ -1921,12 +1969,15 @@ function ScorecardView({
     col: "ltvCac",
     align: "right"
   }, "LTV:CAC"), /*#__PURE__*/React.createElement(Th, {
+    col: "utilization",
+    align: "right"
+  }, "Util%"), /*#__PURE__*/React.createElement(Th, {
     col: "impressions",
     align: "right"
-  }, "Impr"), /*#__PURE__*/React.createElement(Th, {
+  }, "Impr/day"), /*#__PURE__*/React.createElement(Th, {
     col: "newUsers",
     align: "right"
-  }, "New U"), /*#__PURE__*/React.createElement(Th, {
+  }, "NU/day"), /*#__PURE__*/React.createElement(Th, {
     col: "score"
   }, "Score"), /*#__PURE__*/React.createElement(Th, {
     col: "verdict"
@@ -1980,13 +2031,13 @@ function ScorecardView({
         fontWeight: 600,
         textAlign: 'right'
       }
-    }, fmt(c.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(c.drr?.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         color: '#d1d5db',
         textAlign: 'right'
       }
-    }, fmt(c.directSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(c.drr?.directSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         textAlign: 'right'
@@ -2022,18 +2073,26 @@ function ScorecardView({
     })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
-        color: '#9ca3af',
+        color: c.utilization !== null ? c.utilization >= 0.9 ? '#ef4444' : c.utilization >= 0.7 ? '#22c55e' : '#f59e0b' : '#374151',
         textAlign: 'right',
-        fontSize: 10
+        fontSize: 10,
+        fontWeight: 600
       }
-    }, fmt(c.impressions, 'int')), /*#__PURE__*/React.createElement("td", {
+    }, c.utilization !== null ? `${(c.utilization * 100).toFixed(0)}%` : '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         color: '#9ca3af',
         textAlign: 'right',
         fontSize: 10
       }
-    }, fmt(c.newUsers, 'int')), /*#__PURE__*/React.createElement("td", {
+    }, fmt(c.drr?.impressions, 'int')), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, fmt(c.drr?.newUsers, 'int')), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px'
       }
