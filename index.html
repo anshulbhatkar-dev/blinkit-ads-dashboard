@@ -2570,7 +2570,6 @@ function LoadingScreen({
 // ─── APP ─────────────────────────────────────────────────────────────────────
 
 function App() {
-  // ONE state object — single atomic update prevents partial renders / re-render loop
   const [appState, setAppState] = useState(null);
   const [tab, setTab] = useState('portfolio');
   const handleLoad = useCallback(({
@@ -2587,7 +2586,7 @@ function App() {
       bounds,
       startDate,
       endDate
-    }); // single setState
+    });
   }, []);
   const onDateChange = useCallback((s, e) => {
     setAppState(prev => prev ? {
@@ -2596,26 +2595,48 @@ function App() {
       endDate: e
     } : prev);
   }, []);
+
+  // ── ALL useMemo hooks BEFORE any conditional return (Rules of Hooks) ──────
+  const campaigns = useMemo(() => {
+    if (!appState) return [];
+    const {
+      allRows,
+      ltvMap,
+      startDate,
+      endDate
+    } = appState;
+    return aggregateCampaigns(allRows, ltvMap, startDate, endDate);
+  }, [appState]);
+  const prevCampaigns = useMemo(() => {
+    if (!appState) return null;
+    const {
+      allRows,
+      ltvMap,
+      bounds,
+      startDate,
+      endDate
+    } = appState;
+    const startTs = startDate.getTime();
+    const endTs = endDate.getTime();
+    const periodLen = Math.round((endTs - startTs) / 864e5) + 1;
+    const pEnd = new Date(startTs - 864e5);
+    const pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
+    if (pStart < bounds.min) return null;
+    return aggregateCampaigns(allRows, ltvMap, pStart, pEnd);
+  }, [appState]);
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Conditional return only AFTER all hooks are declared
   if (!appState) return /*#__PURE__*/React.createElement(LoadingScreen, {
     onLoad: handleLoad
   });
   const {
-    allRows,
-    ltvMap,
     bounds,
     startDate,
     endDate
   } = appState;
   const startTs = startDate.getTime();
   const endTs = endDate.getTime();
-  const campaigns = useMemo(() => aggregateCampaigns(allRows, ltvMap, startDate, endDate), [allRows, ltvMap, startTs, endTs]);
-  const prevCampaigns = useMemo(() => {
-    const periodLen = Math.round((endTs - startTs) / 864e5) + 1;
-    const pEnd = new Date(startTs - 864e5);
-    const pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
-    if (pStart < bounds.min) return null;
-    return aggregateCampaigns(allRows, ltvMap, pStart, pEnd);
-  }, [allRows, ltvMap, startTs, endTs, bounds]);
   const tabs = [{
     id: 'portfolio',
     label: 'Portfolio'
