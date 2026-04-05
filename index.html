@@ -1,42 +1,22 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<html lang="en"><head>
+  <meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Blinkit Ads Dashboard — Mosaic Wellness</title>
-  <script>
-    window.onerror = function(msg, src, line, col, err) {
-      var r = document.getElementById('root');
-      if (r) r.innerHTML = '<div style="padding:48px;text-align:center;font-family:monospace">'
-        + '<div style="font-size:28px;margin-bottom:16px">⚠️</div>'
-        + '<h2 style="color:#ef4444;margin:0 0 12px">Error</h2>'
-        + '<p style="color:#f9fafb;font-size:14px">' + msg + '</p>'
-        + '<p style="color:#9ca3af;font-size:12px;margin-top:8px">Line ' + line + '</p>'
-        + '</div>';
-      return false;
-    };
-  </script>
   <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
   <style>
     body{background:#070711;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#f9fafb;margin:0;}
     *{box-sizing:border-box;}
-    ::-webkit-scrollbar{width:5px;height:5px;}
-    ::-webkit-scrollbar-track{background:#111827;}
+    ::-webkit-scrollbar{width:5px;height:5px;}::-webkit-scrollbar-track{background:#111827;}
     ::-webkit-scrollbar-thumb{background:#374151;border-radius:4px;}
-    ::-webkit-scrollbar-thumb:hover{background:#4b5563;}
-    .fade-in{animation:fadeIn 0.2s ease;}
-    @keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
-    input::placeholder{color:#374151;}
-    select option{background:#111827;}
-    input[type=date]::-webkit-calendar-picker-indicator{filter:invert(0.5);}
-    table th{background:#0d1117;}
+    .fade-in{animation:fadeIn 0.2s ease;}@keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
+    input::placeholder{color:#374151;}select option{background:#111827;}
+    input[type=date]::-webkit-calendar-picker-indicator{filter:invert(0.5);}table th{background:#0d1117;}
   </style>
-</head>
-<body>
+</head><body>
 <div id="root"></div>
 <script>
-if (typeof React === 'undefined') throw new Error('React failed to load from CDN.');
+if (typeof React === 'undefined') throw new Error('React failed to load.');
 if (typeof ReactDOM === 'undefined') throw new Error('ReactDOM failed to load.');
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
@@ -2784,8 +2764,44 @@ function App() {
     campaigns: campaigns
   }))));
 }
-ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(App, null));
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      err: null,
+      stack: null
+    };
+  }
+  componentDidCatch(err, info) {
+    this.setState({
+      err,
+      stack: info && info.componentStack
+    });
+  }
+  render() {
+    if (this.state.err) return /*#__PURE__*/React.createElement("div", {
+      style: {
+        padding: 32,
+        fontFamily: 'monospace',
+        color: '#f9fafb',
+        background: '#0d1117',
+        minHeight: '100vh'
+      }
+    }, /*#__PURE__*/React.createElement("h2", {
+      style: {
+        color: '#ef4444'
+      }
+    }, "React Error: ", this.state.err.message), /*#__PURE__*/React.createElement("pre", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 11,
+        whiteSpace: 'pre-wrap',
+        marginTop: 16
+      }
+    }, this.state.stack));
+    return this.props.children;
+  }
+}
+ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
 
-</script>
-</body>
-</html>
+</script></body></html>
