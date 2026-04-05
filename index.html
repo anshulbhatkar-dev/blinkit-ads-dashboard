@@ -8,7 +8,7 @@
     body{background:#070711;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#f9fafb;margin:0;}
     *{box-sizing:border-box;}
     ::-webkit-scrollbar{width:5px;height:5px;}::-webkit-scrollbar-track{background:#111827;}
-    ::-webkit-scrollbar-thumb{background:#374151;border-radius:4px;}
+    ::-webkit-scrollbar-thumb{background:#374151;border-radius:4px;}::-webkit-scrollbar-thumb:hover{background:#4b5563;}
     .fade-in{animation:fadeIn 0.2s ease;}@keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
     input::placeholder{color:#374151;}select option{background:#111827;}
     input[type=date]::-webkit-calendar-picker-indicator{filter:invert(0.5);}table th{background:#0d1117;}
@@ -2570,53 +2570,52 @@ function LoadingScreen({
 // ─── APP ─────────────────────────────────────────────────────────────────────
 
 function App() {
-  const [data, setData] = useState(null); // {allRows, ltvMap, bounds}
+  // ONE state object — single atomic update prevents partial renders / re-render loop
+  const [appState, setAppState] = useState(null);
   const [tab, setTab] = useState('portfolio');
-  const [startDate, setStartDate] = useState(null);
-  const [endDate, setEndDate] = useState(null);
   const handleLoad = useCallback(({
     allRows,
     ltvMap
   }) => {
     const bounds = getDateBounds(allRows);
-    const end = bounds.max;
-    const start = new Date(end.getTime() - 6 * 864e5);
-    setStartDate(start < bounds.min ? bounds.min : start);
-    setEndDate(end);
-    setData({
+    const endDate = bounds.max;
+    const s = new Date(endDate.getTime() - 6 * 864e5);
+    const startDate = s < bounds.min ? bounds.min : s;
+    setAppState({
       allRows,
       ltvMap,
-      bounds
-    });
+      bounds,
+      startDate,
+      endDate
+    }); // single setState
   }, []);
-
-  // Guard: show loading until ALL state is ready
-  if (!data || !startDate || !endDate) return /*#__PURE__*/React.createElement(LoadingScreen, {
+  const onDateChange = useCallback((s, e) => {
+    setAppState(prev => prev ? {
+      ...prev,
+      startDate: s,
+      endDate: e
+    } : prev);
+  }, []);
+  if (!appState) return /*#__PURE__*/React.createElement(LoadingScreen, {
     onLoad: handleLoad
   });
   const {
     allRows,
     ltvMap,
-    bounds
-  } = data;
-
-  // Memoize start/end timestamps to stabilise downstream useMemo deps
+    bounds,
+    startDate,
+    endDate
+  } = appState;
   const startTs = startDate.getTime();
   const endTs = endDate.getTime();
   const campaigns = useMemo(() => aggregateCampaigns(allRows, ltvMap, startDate, endDate), [allRows, ltvMap, startTs, endTs]);
-
-  // Previous period for MoM comparison (memoised with stable deps)
   const prevCampaigns = useMemo(() => {
     const periodLen = Math.round((endTs - startTs) / 864e5) + 1;
     const pEnd = new Date(startTs - 864e5);
     const pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
     if (pStart < bounds.min) return null;
     return aggregateCampaigns(allRows, ltvMap, pStart, pEnd);
-  }, [allRows, ltvMap, startTs, endTs, bounds.min]);
-  const onDateChange = useCallback((s, e) => {
-    setStartDate(s);
-    setEndDate(e);
-  }, []);
+  }, [allRows, ltvMap, startTs, endTs, bounds]);
   const tabs = [{
     id: 'portfolio',
     label: 'Portfolio'
@@ -2702,7 +2701,7 @@ function App() {
       fontSize: 10
     }
   }, campaigns.length, " campaigns"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setData(null),
+    onClick: () => setAppState(null),
     title: "Re-fetch from Google Sheets",
     style: {
       color: '#6b7280',
