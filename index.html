@@ -404,8 +404,8 @@ function extractRow(row, type) {
     // hours live that day
     totalRoasRaw: n(20),
     // total ROAS from sheet (direct + indirect)
-    segment: TYPE_TO_SEG[s(36).toLowerCase()] || null,
-    // col AK has full mappings
+    segment: s(36) || null,
+    // col AK (Final Head/Not head): Generic Head, Generic Tail, Comp, Brand, Add to Index
     brand: s(27),
     category: s(28),
     hasMetrics: true
@@ -863,6 +863,8 @@ function computeMetrics(rows, numDays) {
 function aggregateByCategory(allRows, startDate, endDate) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
   const window = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.hasMetrics);
+
+  // Structure: brand||category → segment → keyword → campaign → rows[]
   const groups = {};
   window.forEach(r => {
     if (!r.category) return;
@@ -873,12 +875,12 @@ function aggregateByCategory(allRows, startDate, endDate) {
       data: {}
     };
     const seg = r.segment || 'Other';
-    const camp = r.campaign || '(no campaign)';
     const kw = r.keyword || '(no keyword)';
+    const camp = r.campaign || '(no campaign)';
     if (!groups[ck].data[seg]) groups[ck].data[seg] = {};
-    if (!groups[ck].data[seg][camp]) groups[ck].data[seg][camp] = {};
-    if (!groups[ck].data[seg][camp][kw]) groups[ck].data[seg][camp][kw] = [];
-    groups[ck].data[seg][camp][kw].push(r);
+    if (!groups[ck].data[seg][kw]) groups[ck].data[seg][kw] = {};
+    if (!groups[ck].data[seg][kw][camp]) groups[ck].data[seg][kw][camp] = [];
+    groups[ck].data[seg][kw][camp].push(r);
   });
   return Object.values(groups).map(({
     brand,
@@ -887,25 +889,25 @@ function aggregateByCategory(allRows, startDate, endDate) {
   }) => {
     const segs = {};
     const allCatRows = [];
-    Object.entries(data).forEach(([seg, campMap]) => {
-      const campaigns = {};
+    Object.entries(data).forEach(([seg, kwMap]) => {
+      const keywords = {};
       const allSegRows = [];
-      Object.entries(campMap).forEach(([camp, kwMap]) => {
-        const keywords = {};
-        const allCampRows = [];
-        Object.entries(kwMap).forEach(([kw, rows]) => {
-          keywords[kw] = computeMetrics(rows, numDays);
-          allCampRows.push(...rows);
+      Object.entries(kwMap).forEach(([kw, campMap]) => {
+        const campaigns = {};
+        const allKwRows = [];
+        Object.entries(campMap).forEach(([camp, rows]) => {
+          campaigns[camp] = computeMetrics(rows, numDays);
+          allKwRows.push(...rows);
         });
-        campaigns[camp] = {
-          ...computeMetrics(allCampRows, numDays),
-          keywords
+        keywords[kw] = {
+          ...computeMetrics(allKwRows, numDays),
+          campaigns
         };
-        allSegRows.push(...allCampRows);
+        allSegRows.push(...allKwRows);
       });
       segs[seg] = {
         ...computeMetrics(allSegRows, numDays),
-        campaigns
+        keywords
       };
       allCatRows.push(...allSegRows);
     });
@@ -3488,9 +3490,20 @@ function CategorySalesView({
   });
   const [expanded, setExp] = useState(new Set());
   const [brandF, setBrandF] = useState('');
+  const [catF, setCatF] = useState('');
+  const [segF, setSegF] = useState('');
   const brands = useMemo(() => [...new Set(catCurr.map(c => c.brand).filter(Boolean))].sort(), [catCurr]);
+  const cats = useMemo(() => {
+    const src = brandF ? catCurr.filter(c => c.brand === brandF) : catCurr;
+    return [...new Set(src.map(c => c.category).filter(Boolean))].sort();
+  }, [catCurr, brandF]);
+  const segs = useMemo(() => {
+    const s = new Set();
+    catCurr.forEach(c => Object.keys(c.segs || {}).forEach(sg => s.add(sg)));
+    return [...s].sort();
+  }, [catCurr]);
 
-  // Flat lookup map for prev period data keyed by hierarchy path
+  // Flat lookup map for prev period data — structure: cat → seg → kw → camp
   const prevMap = useMemo(() => {
     const m = {};
     if (!catPrev) return m;
@@ -3499,10 +3512,10 @@ function CategorySalesView({
       m[ck] = c;
       Object.entries(c.segs || {}).forEach(([seg, sd]) => {
         m[`${ck}||${seg}`] = sd;
-        Object.entries(sd.campaigns || {}).forEach(([camp, cd]) => {
-          m[`${ck}||${seg}||${camp}`] = cd;
-          Object.entries(cd.keywords || {}).forEach(([kw, kd]) => {
-            m[`${ck}||${seg}||${camp}||${kw}`] = kd;
+        Object.entries(sd.keywords || {}).forEach(([kw, kd]) => {
+          m[`${ck}||${seg}||${kw}`] = kd;
+          Object.entries(kd.campaigns || {}).forEach(([camp, cd]) => {
+            m[`${ck}||${seg}||${kw}||${camp}`] = cd;
           });
         });
       });
@@ -3551,8 +3564,13 @@ function CategorySalesView({
   const filtered = useMemo(() => {
     let out = catCurr;
     if (brandF) out = out.filter(c => c.brand === brandF);
+    if (catF) out = out.filter(c => c.category === catF);
+    if (segF) out = out.filter(c => Object.keys(c.segs || {}).some(s => s === segF));
     return sortItems(out);
-  }, [catCurr, brandF, sort]);
+  }, [catCurr, brandF, catF, segF, sort]);
+
+  // Total DQty/d across all filtered categories (for % contribution)
+  const totalDrrDQ = useMemo(() => filtered.reduce((s, c) => s + (c.drrDQ || 0), 0), [filtered]);
 
   // pct delta helper
   const pct = (c, p) => !p || p === 0 || c == null ? null : (c - p) / Math.abs(p) * 100;
@@ -3635,7 +3653,8 @@ function CategorySalesView({
     labelColor,
     curr,
     prevKey,
-    hasChildren
+    hasChildren,
+    pctOfParent
   }) => {
     const isExp = expanded.has(key);
     const prev = prevMap[prevKey] || null;
@@ -3696,6 +3715,39 @@ function CategorySalesView({
         fontSize: 8
       }
     }, labelSub)))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, pctOfParent != null ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'flex-end',
+        gap: 1
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 48,
+        height: 4,
+        background: '#1f2937',
+        borderRadius: 2,
+        overflow: 'hidden'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: `${Math.min(100, pctOfParent)}%`,
+        height: '100%',
+        background: level === 0 ? '#3b82f6' : level === 1 ? SEG_COLOR[label.replace(' ↑', '').replace(' ↓', '')] || '#6b7280' : '#4b5563',
+        borderRadius: 2
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#6b7280',
+        fontSize: 9
+      }
+    }, pctOfParent.toFixed(0), "%")) : null), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 12px',
         textAlign: 'right',
@@ -3779,24 +3831,27 @@ function CategorySalesView({
     }, fmtCPM(prev.avgCpm)))));
   };
 
-  // Render tree rows
+  // Render tree: Category → Segment → Keyword → Campaign
   filtered.forEach(cat => {
     const ck = `${cat.brand}||${cat.category}`;
     const catExp = expanded.has(ck);
+    const catPct = totalDrrDQ > 0 ? cat.drrDQ / totalDrrDQ * 100 : null;
     pushRow({
       key: ck,
       level: 0,
       label: cat.category,
-      labelSub: cat.brand ? `(${cat.brand})` : null,
-      labelColor: BRAND_COLORS[cat.brand] ? null : '#e5e7eb',
+      labelSub: cat.brand ? cat.brand : null,
       curr: cat,
       prevKey: ck,
-      hasChildren: Object.keys(cat.segs || {}).length > 0
+      hasChildren: Object.keys(cat.segs || {}).length > 0,
+      pctOfParent: catPct
     });
     if (catExp && cat.segs) {
-      sortItems(Object.entries(cat.segs)).forEach(([seg, sd]) => {
+      const filteredSegs = segF ? Object.entries(cat.segs).filter(([s]) => s === segF) : Object.entries(cat.segs);
+      sortItems(filteredSegs).forEach(([seg, sd]) => {
         const sk = `${ck}||${seg}`;
         const segExp = expanded.has(sk);
+        const segPct = cat.drrDQ > 0 ? sd.drrDQ / cat.drrDQ * 100 : null;
         const segLabel = SEG_SHORT2[seg] || seg;
         pushRow({
           key: sk,
@@ -3805,32 +3860,37 @@ function CategorySalesView({
           labelColor: SEG_COLOR[seg] || '#6b7280',
           curr: sd,
           prevKey: sk,
-          hasChildren: Object.keys(sd.campaigns || {}).length > 0
+          hasChildren: Object.keys(sd.keywords || {}).length > 0,
+          pctOfParent: segPct
         });
-        if (segExp && sd.campaigns) {
-          sortItems(Object.entries(sd.campaigns)).forEach(([camp, cd]) => {
-            const campk = `${sk}||${camp}`;
-            const campExp = expanded.has(campk);
+        if (segExp && sd.keywords) {
+          sortItems(Object.entries(sd.keywords)).forEach(([kw, kd]) => {
+            const kwk = `${sk}||${kw}`;
+            const kwExp = expanded.has(kwk);
+            const kwPct = sd.drrDQ > 0 ? kd.drrDQ / sd.drrDQ * 100 : null;
             pushRow({
-              key: campk,
+              key: kwk,
               level: 2,
-              label: camp,
+              label: kw,
               labelColor: '#9ca3af',
-              curr: cd,
-              prevKey: campk,
-              hasChildren: Object.keys(cd.keywords || {}).length > 0
+              curr: kd,
+              prevKey: kwk,
+              hasChildren: Object.keys(kd.campaigns || {}).length > 0,
+              pctOfParent: kwPct
             });
-            if (campExp && cd.keywords) {
-              sortItems(Object.entries(cd.keywords)).forEach(([kw, kd]) => {
-                const kwk = `${campk}||${kw}`;
+            if (kwExp && kd.campaigns) {
+              sortItems(Object.entries(kd.campaigns)).forEach(([camp, cd]) => {
+                const campk = `${kwk}||${camp}`;
+                const campPct = kd.drrDQ > 0 ? cd.drrDQ / kd.drrDQ * 100 : null;
                 pushRow({
-                  key: kwk,
+                  key: campk,
                   level: 3,
-                  label: kw,
+                  label: camp,
                   labelColor: '#6b7280',
-                  curr: kd,
-                  prevKey: kwk,
-                  hasChildren: false
+                  curr: cd,
+                  prevKey: campk,
+                  hasChildren: false,
+                  pctOfParent: campPct
                 });
               });
             }
@@ -3854,11 +3914,28 @@ function CategorySalesView({
     }
   }, /*#__PURE__*/React.createElement(Select, {
     value: brandF,
-    onChange: setBrandF,
+    onChange: v => {
+      setBrandF(v);
+      setCatF('');
+    },
     options: brands,
     placeholder: "All Brands"
-  }), brandF && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setBrandF(''),
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: catF,
+    onChange: setCatF,
+    options: cats,
+    placeholder: "All Categories"
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: segF,
+    onChange: setSegF,
+    options: segs,
+    placeholder: "All Segments"
+  }), (brandF || catF || segF) && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setBrandF('');
+      setCatF('');
+      setSegF('');
+    },
     style: {
       color: '#6b7280',
       fontSize: 10,
@@ -3866,7 +3943,7 @@ function CategorySalesView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear"), /*#__PURE__*/React.createElement("div", {
+  }, "\u2715 Clear filters"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 4,
@@ -3956,7 +4033,23 @@ function CategorySalesView({
     }
   }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement(Th, {
     col: "_name"
-  }, "Category / Segment / Campaign / Keyword"), /*#__PURE__*/React.createElement(Th, {
+  }, "Category / Segment / Keyword / Campaign"), /*#__PURE__*/React.createElement("th", {
+    style: {
+      padding: '7px 12px',
+      textAlign: 'right',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      whiteSpace: 'nowrap',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      zIndex: 2,
+      borderBottom: '1px solid #1f2937'
+    }
+  }, "% Contrib"), /*#__PURE__*/React.createElement(Th, {
     col: "drrDQ",
     right: true
   }, "DQty / day"), /*#__PURE__*/React.createElement(Th, {
