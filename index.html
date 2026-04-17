@@ -19,7 +19,8 @@
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 
 const SHEET_ID = '1enTpKSWbTqSEEZDo4WRsFj9HwlDjgbpVfUyW5icPGuM';
-const SHEET_BASE = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&gid=`;
+// export?format=csv bypasses any active sheet filters; gviz respects them
+const SHEET_BASE = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=`;
 const RAW_SHEET_CFGS = [{
   key: 'search',
   gid: 1816954201,
