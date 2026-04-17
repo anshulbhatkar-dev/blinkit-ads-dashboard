@@ -520,7 +520,7 @@ async function fetchAllDataFromSheets() {
   // Parse campaign-level segment index from Rough Analysis sheet
   // Three column groups: A/B (cols 0/1), J/K (cols 9/10)
   // Col with campaign name paired with Generic Head / Generic Tail / Comp
-  const VALID_SEGS = new Set(['Generic Head', 'Generic Tail', 'Comp']);
+  const VALID_SEGS = new Set(['Generic Head', 'Generic Tail', 'Comp', 'Brand', 'Add to Index']);
   const campaignIndexMap = {};
   const idxRows = parseCSV(idxText);
   const INDEX_COL_PAIRS = [[0, 1], [9, 10]]; // [nameCol, typeCol]
@@ -860,9 +860,17 @@ function computeMetrics(rows, numDays) {
     numDays
   };
 }
-function aggregateByCategory(allRows, startDate, endDate) {
+function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {}) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
   const window = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.hasMetrics);
+
+  // Step 1: Determine campaign-level segment (same logic as aggregateCampaigns)
+  // campaignIndexMap (from Rough Analysis) is authoritative; row-level segment (col 36) is fallback
+  const campaignSegMap = {};
+  window.forEach(r => {
+    const key = (r.campaign || '').toLowerCase();
+    if (!campaignSegMap[key] && r.segment) campaignSegMap[key] = r.segment;
+  });
 
   // Structure: brand||category → segment → keyword → campaign → rows[]
   const groups = {};
@@ -874,7 +882,8 @@ function aggregateByCategory(allRows, startDate, endDate) {
       category: r.category,
       data: {}
     };
-    const seg = r.segment || 'Other';
+    const campKey = (r.campaign || '').toLowerCase();
+    const seg = campaignIndexMap[campKey] || campaignSegMap[campKey] || 'Other';
     const kw = r.keyword || '(no keyword)';
     const camp = r.campaign || '(no campaign)';
     if (!groups[ck].data[seg]) groups[ck].data[seg] = {};
@@ -4322,9 +4331,10 @@ function App() {
     const {
       allRows,
       startDate,
-      endDate
+      endDate,
+      campaignIndexMap
     } = appState;
-    return aggregateByCategory(allRows, startDate, endDate);
+    return aggregateByCategory(allRows, startDate, endDate, campaignIndexMap);
   }, [appState]);
   const catPrev = useMemo(() => {
     if (!appState || !prevCampaigns) return null;
@@ -4335,7 +4345,8 @@ function App() {
       endDate,
       compareMode,
       compareStart,
-      compareEnd
+      compareEnd,
+      campaignIndexMap
     } = appState;
     const startTs = startDate.getTime();
     const periodLen = Math.round((endDate.getTime() - startTs) / 864e5) + 1;
@@ -4351,7 +4362,7 @@ function App() {
       pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
     }
     if (pStart < bounds.min) return null;
-    return aggregateByCategory(allRows, pStart, pEnd);
+    return aggregateByCategory(allRows, pStart, pEnd, campaignIndexMap);
   }, [appState, prevCampaigns]);
 
   // Keyword aggregations (current + comparison)
