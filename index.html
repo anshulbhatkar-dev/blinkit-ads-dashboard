@@ -49,6 +49,7 @@ const RAW_SHEET_CFGS = [{
 }];
 const CONDITIONS_GID = 988587276;
 const CAMPAIGN_IDX_GID = 1095613721; // "Rough Analysis" — campaign → segment index
+const SALES_IMPORT_GID = 645442496; // Total sales (organic + ads) by date/brand/category
 
 const BENCHMARKS = {
   'Generic Head': {
@@ -496,7 +497,7 @@ async function fetchAllDataFromSheets() {
     if (!r.ok) throw new Error(`Sheet ${gid} returned ${r.status}`);
     return r.text();
   });
-  const [condText, idxText, ...rawTexts] = await Promise.all([fetchGid(CONDITIONS_GID), fetchGid(CAMPAIGN_IDX_GID), ...RAW_SHEET_CFGS.map(c => fetchGid(c.gid))]);
+  const [condText, idxText, salesText, ...rawTexts] = await Promise.all([fetchGid(CONDITIONS_GID), fetchGid(CAMPAIGN_IDX_GID), fetchGid(SALES_IMPORT_GID), ...RAW_SHEET_CFGS.map(c => fetchGid(c.gid))]);
 
   // Parse LTV from Conditions sheet
   const ltvMap = {
@@ -533,10 +534,29 @@ async function fetchAllDataFromSheets() {
       }
     }
   }
+
+  // Parse Sales import: skip 4 header rows; date=col1, units=col4, brand=col7, gc_cat=col8
+  // salesAgg[`${brand}||${cat}`][dateTimestamp] = totalUnits
+  const salesAgg = {};
+  parseCSV(salesText).slice(4).forEach(row => {
+    if (!row || !row[1]) return;
+    const dateStr = String(row[1] || '').trim();
+    const d = dateStr ? new Date(dateStr.length >= 10 ? dateStr.slice(0, 10) + 'T00:00:00' : dateStr) : null;
+    if (!d || isNaN(d)) return;
+    const brand = String(row[7] || '').trim();
+    const cat = String(row[8] || '').trim();
+    const units = parseFloat(row[4]) || 0;
+    if (!brand || !cat || units <= 0) return;
+    const k = `${brand}||${cat}`;
+    if (!salesAgg[k]) salesAgg[k] = {};
+    const ts = d.getTime();
+    salesAgg[k][ts] = (salesAgg[k][ts] || 0) + units;
+  });
   return {
     rawTexts,
     ltvMap,
-    campaignIndexMap
+    campaignIndexMap,
+    salesAgg
   };
 }
 
@@ -863,7 +883,7 @@ function computeMetrics(rows, numDays) {
 
 // Flat keyword-level aggregation for Cat. Sales tab
 // Returns: [{brand, category, segment, keyword, ...metrics, campaigns:{name→metrics}}]
-function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}) {
+function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}, salesAgg = {}) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
   const win = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.hasMetrics);
 
@@ -893,7 +913,14 @@ function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}
     if (!groups[gk].camps[camp]) groups[gk].camps[camp] = [];
     groups[gk].camps[camp].push(r);
   });
-  return Object.values(groups).map(({
+
+  // Track ad DQ per brand||category (for organic computation)
+  const catAdDQ = {};
+  win.forEach(r => {
+    const ck = `${r.brand || ''}||${r.category}`;
+    catAdDQ[ck] = (catAdDQ[ck] || 0) + (r.directQty || 0);
+  });
+  const result = Object.values(groups).map(({
     brand,
     category,
     segment,
@@ -915,10 +942,42 @@ function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}
       campaigns
     };
   });
+
+  // Add Organic rows: one per brand||category that has sales import data
+  const seen = new Set(result.map(r => `${r.brand}||${r.category}`));
+  seen.forEach(ck => {
+    const byDate = salesAgg[ck] || {};
+    let totalSalesDQ = 0;
+    Object.entries(byDate).forEach(([ts, u]) => {
+      const d = new Date(parseInt(ts));
+      if (d >= startDate && d <= endDate) totalSalesDQ += u;
+    });
+    const organicDQ = Math.max(0, totalSalesDQ - (catAdDQ[ck] || 0));
+    if (totalSalesDQ > 0) {
+      const [brand, category] = ck.split('||');
+      result.push({
+        brand,
+        category,
+        segment: 'Organic',
+        keyword: 'Organic',
+        drrDQ: organicDQ / numDays,
+        drrSpend: 0,
+        directQty: organicDQ,
+        spend: 0,
+        directSales: null,
+        impressions: 0,
+        avgCpm: null,
+        directRoas: null,
+        numDays,
+        campaigns: {}
+      });
+    }
+  });
+  return result;
 }
 
 // Nested Category → Segment → Keyword → Campaign aggregation for Sales Flow tab
-function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {}) {
+function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {}, salesAgg = {}) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
   const win = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.hasMetrics);
   const campaignSegMap = {};
@@ -973,10 +1032,37 @@ function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {})
       };
       allCatRows.push(...allSegRows);
     });
+    // Add Organic segment: totalSales (from Sales import) − totalAdDQ
+    const salesKey = `${brand}||${category}`;
+    const byDate = salesAgg[salesKey] || {};
+    let totalSalesDQ = 0;
+    Object.entries(byDate).forEach(([ts, u]) => {
+      const d = new Date(parseInt(ts));
+      if (d >= startDate && d <= endDate) totalSalesDQ += u;
+    });
+    const totalAdDQ = allCatRows.reduce((s, r) => s + (r.directQty || 0), 0);
+    const organicDQ = Math.max(0, totalSalesDQ - totalAdDQ);
+    if (totalSalesDQ > 0) {
+      segs['Organic'] = {
+        drrDQ: organicDQ / numDays,
+        drrSpend: 0,
+        directQty: organicDQ,
+        spend: 0,
+        directSales: null,
+        impressions: 0,
+        avgCpm: null,
+        directRoas: null,
+        numDays,
+        keywords: {}
+      };
+    }
+    const adMet = computeMetrics(allCatRows, numDays);
+    // Category-level drrDQ = total (ads + organic); other metrics stay ad-only
     return {
       brand,
       category,
-      ...computeMetrics(allCatRows, numDays),
+      ...adMet,
+      drrDQ: totalSalesDQ > 0 ? totalSalesDQ / numDays : adMet.drrDQ,
       segs
     };
   });
@@ -1108,6 +1194,126 @@ function Select({
     key: o,
     value: o
   }, o)));
+}
+function MultiSelect({
+  values,
+  onChange,
+  options,
+  placeholder
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    const h = e => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+  const toggle = opt => onChange(values.includes(opt) ? values.filter(v => v !== opt) : [...values, opt]);
+  const label = values.length === 0 ? placeholder : values.length === 1 ? values[0] : `${values.length} selected`;
+  return /*#__PURE__*/React.createElement("div", {
+    ref: ref,
+    style: {
+      position: 'relative',
+      display: 'inline-block'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpen(o => !o),
+    style: {
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: values.length ? '#d1d5db' : '#6b7280',
+      borderRadius: 6,
+      fontSize: 11,
+      padding: '5px 28px 5px 10px',
+      cursor: 'pointer',
+      minWidth: 140,
+      textAlign: 'left',
+      position: 'relative'
+    }
+  }, label, /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: 'absolute',
+      right: 8,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      color: '#4b5563',
+      fontSize: 8,
+      pointerEvents: 'none'
+    }
+  }, open ? '▲' : '▼')), open && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: 'calc(100% + 4px)',
+      left: 0,
+      zIndex: 200,
+      background: '#0d1117',
+      border: '1px solid #1f2937',
+      borderRadius: 6,
+      minWidth: 200,
+      boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
+      maxHeight: 240,
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: '4px 0'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: () => onChange([]),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '5px 10px',
+      cursor: 'pointer',
+      color: '#6b7280',
+      fontSize: 10,
+      background: values.length === 0 ? 'rgba(59,130,246,0.08)' : 'transparent'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 12,
+      height: 12,
+      border: `1px solid ${values.length === 0 ? '#3b82f6' : '#374151'}`,
+      borderRadius: 3,
+      background: values.length === 0 ? '#3b82f6' : 'transparent',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: 'white',
+      fontSize: 8,
+      flexShrink: 0
+    }
+  }, values.length === 0 ? '✓' : ''), "All"), options.map(opt => /*#__PURE__*/React.createElement("div", {
+    key: opt,
+    onClick: () => toggle(opt),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '5px 10px',
+      cursor: 'pointer',
+      fontSize: 10,
+      color: values.includes(opt) ? '#d1d5db' : '#9ca3af',
+      background: values.includes(opt) ? 'rgba(59,130,246,0.08)' : 'transparent'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 12,
+      height: 12,
+      border: `1px solid ${values.includes(opt) ? '#3b82f6' : '#374151'}`,
+      borderRadius: 3,
+      background: values.includes(opt) ? '#3b82f6' : 'transparent',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: 'white',
+      fontSize: 8,
+      flexShrink: 0
+    }
+  }, values.includes(opt) ? '✓' : ''), opt)))));
 }
 function Card({
   children,
@@ -1286,7 +1492,7 @@ function DateRangePicker({
     max: toISODate(endDate),
     onChange: e => {
       setActivePreset('Custom');
-      const d = new Date(e.target.value);
+      const d = new Date(e.target.value + 'T00:00:00');
       if (!isNaN(d)) onDateChange(d, endDate);
     },
     style: {
@@ -1309,7 +1515,7 @@ function DateRangePicker({
     min: toISODate(startDate),
     onChange: e => {
       setActivePreset('Custom');
-      const d = new Date(e.target.value);
+      const d = new Date(e.target.value + 'T00:00:00');
       if (!isNaN(d)) onDateChange(startDate, d);
     },
     style: {
@@ -2353,10 +2559,10 @@ function ScorecardView({
   endDate
 }) {
   const [search, setSearch] = useState('');
-  const [brand, setBrand] = useState('');
-  const [cat, setCat] = useState('');
-  const [seg, setSeg] = useState('');
-  const [verdict, setVerdict] = useState('');
+  const [brand, setBrand] = useState([]);
+  const [cat, setCat] = useState([]);
+  const [seg, setSeg] = useState([]);
+  const [verdict, setVerdict] = useState([]);
   const [kw, setKw] = useState('');
   const [sort, setSort] = useState({
     col: 'spend',
@@ -2380,10 +2586,10 @@ function ScorecardView({
   const filtered = useMemo(() => {
     let out = campaigns;
     if (search) out = out.filter(c => c.campaign.toLowerCase().includes(search.toLowerCase()));
-    if (brand) out = out.filter(c => c.brand === brand);
-    if (cat) out = out.filter(c => c.category === cat);
-    if (seg) out = out.filter(c => c.segment === seg);
-    if (verdict) out = out.filter(c => c.verdict === verdict);
+    if (brand.length) out = out.filter(c => brand.includes(c.brand));
+    if (cat.length) out = out.filter(c => cat.includes(c.category));
+    if (seg.length) out = out.filter(c => seg.includes(c.segment));
+    if (verdict.length) out = out.filter(c => verdict.includes(c.verdict));
     if (kw) out = out.filter(c => allRows.some(r => r.campaign.toLowerCase() === c.campaign.toLowerCase() && r.keyword && r.keyword.toLowerCase().includes(kw.toLowerCase())));
     return [...out].sort((a, b) => {
       const av = a[sort.col] ?? a.drr?.[sort.col] ?? null;
@@ -2467,34 +2673,34 @@ function ScorecardView({
       outline: 'none',
       width: 150
     }
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: brand,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: brand,
     onChange: setBrand,
     options: brands,
     placeholder: "All Brands"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: cat,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: cat,
     onChange: setCat,
     options: cats,
     placeholder: "All Categories"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: seg,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: seg,
     onChange: setSeg,
     options: segs,
     placeholder: "All Segments"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: verdict,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: verdict,
     onChange: setVerdict,
     options: verdicts,
     placeholder: "All Verdicts"
-  }), (search || kw || brand || cat || seg || verdict) && /*#__PURE__*/React.createElement("button", {
+  }), search || kw || brand.length || cat.length || seg.length || verdict.length ? /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setSearch('');
       setKw('');
-      setBrand('');
-      setCat('');
-      setSeg('');
-      setVerdict('');
+      setBrand([]);
+      setCat([]);
+      setSeg([]);
+      setVerdict([]);
     },
     style: {
       color: '#6b7280',
@@ -2503,7 +2709,7 @@ function ScorecardView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear"), /*#__PURE__*/React.createElement("span", {
+  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 10,
@@ -3194,10 +3400,10 @@ function KeywordScorecardView({
   kwPrev
 }) {
   const [search, setSearch] = useState('');
-  const [brand, setBrand] = useState('');
-  const [cat, setCat] = useState('');
-  const [seg, setSeg] = useState('');
-  const [camp, setCamp] = useState('');
+  const [brand, setBrand] = useState([]);
+  const [cat, setCat] = useState([]);
+  const [seg, setSeg] = useState([]);
+  const [camp, setCamp] = useState([]);
   const [sort, setSort] = useState({
     col: 'spend',
     dir: -1
@@ -3217,10 +3423,10 @@ function KeywordScorecardView({
   const filtered = useMemo(() => {
     let out = kwCurrent;
     if (search) out = out.filter(k => k.keyword.toLowerCase().includes(search.toLowerCase()));
-    if (brand) out = out.filter(k => k.brand === brand);
-    if (cat) out = out.filter(k => k.category === cat);
-    if (seg) out = out.filter(k => k.segment === seg);
-    if (camp) out = out.filter(k => k.campaign === camp);
+    if (brand.length) out = out.filter(k => brand.includes(k.brand));
+    if (cat.length) out = out.filter(k => cat.includes(k.category));
+    if (seg.length) out = out.filter(k => seg.includes(k.segment));
+    if (camp.length) out = out.filter(k => camp.includes(k.campaign));
     return [...out].sort((a, b) => {
       const av = a[sort.col] ?? a.drr?.[sort.col] ?? null;
       const bv = b[sort.col] ?? b.drr?.[sort.col] ?? null;
@@ -3284,33 +3490,33 @@ function KeywordScorecardView({
       outline: 'none',
       width: 160
     }
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: camp,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: camp,
     onChange: setCamp,
     options: camps,
     placeholder: "All Campaigns"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: brand,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: brand,
     onChange: setBrand,
     options: brands,
     placeholder: "All Brands"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: cat,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: cat,
     onChange: setCat,
     options: cats,
     placeholder: "All Categories"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: seg,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: seg,
     onChange: setSeg,
     options: segs,
     placeholder: "All Segments"
-  }), (search || camp || brand || cat || seg) && /*#__PURE__*/React.createElement("button", {
+  }), search || camp.length || brand.length || cat.length || seg.length ? /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setSearch('');
-      setCamp('');
-      setBrand('');
-      setCat('');
-      setSeg('');
+      setCamp([]);
+      setBrand([]);
+      setCat([]);
+      setSeg([]);
     },
     style: {
       color: '#6b7280',
@@ -3319,7 +3525,7 @@ function KeywordScorecardView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear"), /*#__PURE__*/React.createElement("span", {
+  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 10,
@@ -3551,12 +3757,12 @@ function CategorySalesView({
     dir: -1
   });
   const [expanded, setExp] = useState(new Set());
-  const [brandF, setBrandF] = useState('');
-  const [catF, setCatF] = useState('');
-  const [segF, setSegF] = useState('');
+  const [brandF, setBrandF] = useState([]);
+  const [catF, setCatF] = useState([]);
+  const [segF, setSegF] = useState([]);
   const brands = useMemo(() => [...new Set(catCurr.map(r => r.brand).filter(Boolean))].sort(), [catCurr]);
   const cats = useMemo(() => {
-    const src = brandF ? catCurr.filter(r => r.brand === brandF) : catCurr;
+    const src = brandF.length ? catCurr.filter(r => brandF.includes(r.brand)) : catCurr;
     return [...new Set(src.map(r => r.category).filter(Boolean))].sort();
   }, [catCurr, brandF]);
   const segs = useMemo(() => [...new Set(catCurr.map(r => r.segment).filter(Boolean))].sort(), [catCurr]);
@@ -3597,9 +3803,9 @@ function CategorySalesView({
   };
   const filtered = useMemo(() => {
     let out = catCurr;
-    if (brandF) out = out.filter(r => r.brand === brandF);
-    if (catF) out = out.filter(r => r.category === catF);
-    if (segF) out = out.filter(r => r.segment === segF);
+    if (brandF.length) out = out.filter(r => brandF.includes(r.brand));
+    if (catF.length) out = out.filter(r => catF.includes(r.category));
+    if (segF.length) out = out.filter(r => segF.includes(r.segment));
     return [...out].sort((a, b) => {
       let av, bv;
       if (sort.col === 'deltaDQ') {
@@ -3712,8 +3918,104 @@ function CategorySalesView({
     'Generic Tail': 'Gen Tail'
   };
 
+  // Subtotal computation
+  const subTotalDQ = useMemo(() => filtered.reduce((s, r) => s + (r.drrDQ || 0), 0), [filtered]);
+  const subTotalSpend = useMemo(() => filtered.reduce((s, r) => s + (r.drrSpend || 0), 0), [filtered]);
+  const subDeltaDQ = useMemo(() => filtered.reduce((s, r) => {
+    const pk = `${r.brand}||${r.category}||${r.segment}||${r.keyword}`;
+    return s + ((r.drrDQ ?? 0) - (prevMap[pk]?.drrDQ ?? 0));
+  }, 0), [filtered, prevMap]);
+  const subRoas = useMemo(() => {
+    let num = 0,
+      den = 0;
+    filtered.forEach(r => {
+      if (r.directRoas != null && r.drrSpend > 0) {
+        num += r.directRoas * r.drrSpend;
+        den += r.drrSpend;
+      }
+    });
+    return den > 0 ? num / den : null;
+  }, [filtered]);
+
   // Build table rows
   const tableRows = [];
+
+  // Subtotal row
+  tableRows.push(/*#__PURE__*/React.createElement("tr", {
+    key: "__subtotal__",
+    style: {
+      borderBottom: '2px solid #1f2937',
+      background: 'rgba(59,130,246,0.08)',
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      color: '#60a5fa',
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, "TOTAL ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontWeight: 400,
+      fontSize: 9
+    }
+  }, "(", filtered.length, " keywords)")), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px'
+    }
+  }), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 10
+    }
+  }, "100%"), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 700,
+      fontSize: 11,
+      color: Math.abs(subDeltaDQ) < 0.5 ? '#4b5563' : subDeltaDQ > 0 ? '#22c55e' : '#ef4444'
+    }
+  }, subDeltaDQ > 0 ? '+' : '', subDeltaDQ.toFixed(1))), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#e5e7eb',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtDQ(subTotalDQ)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#e5e7eb',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtS(subTotalSpend)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      fontSize: 11,
+      whiteSpace: 'nowrap',
+      color: subRoas != null ? mColor(subRoas, 0.5, 1.5, 3.0) : '#4b5563'
+    }
+  }, fmtR(subRoas)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#4b5563',
+      fontSize: 11
+    }
+  }, "\u2014")));
   filtered.forEach(row => {
     const kwKey = `${row.brand}||${row.category}||${row.segment}||${row.keyword}`;
     const prevRow = prevMap[kwKey] || null;
@@ -4095,29 +4397,29 @@ function CategorySalesView({
       alignItems: 'center',
       flexWrap: 'wrap'
     }
-  }, /*#__PURE__*/React.createElement(Select, {
-    value: brandF,
+  }, /*#__PURE__*/React.createElement(MultiSelect, {
+    values: brandF,
     onChange: v => {
       setBrandF(v);
-      setCatF('');
+      setCatF([]);
     },
     options: brands,
     placeholder: "All Brands"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: catF,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: catF,
     onChange: setCatF,
     options: cats,
     placeholder: "All Categories"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: segF,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: segF,
     onChange: setSegF,
     options: segs,
     placeholder: "All Segments"
-  }), (brandF || catF || segF) && /*#__PURE__*/React.createElement("button", {
+  }), brandF.length || catF.length || segF.length ? /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      setBrandF('');
-      setCatF('');
-      setSegF('');
+      setBrandF([]);
+      setCatF([]);
+      setSegF([]);
     },
     style: {
       color: '#6b7280',
@@ -4126,7 +4428,7 @@ function CategorySalesView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear"), /*#__PURE__*/React.createElement("div", {
+  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 4,
@@ -4216,12 +4518,12 @@ function SalesFlowView({
     dir: -1
   });
   const [expanded, setExp] = useState(new Set());
-  const [brandF, setBrandF] = useState('');
-  const [catF, setCatF] = useState('');
-  const [segF, setSegF] = useState('');
+  const [brandF, setBrandF] = useState([]);
+  const [catF, setCatF] = useState([]);
+  const [segF, setSegF] = useState([]);
   const brands = useMemo(() => [...new Set(sfCurr.map(c => c.brand).filter(Boolean))].sort(), [sfCurr]);
   const cats = useMemo(() => {
-    const src = brandF ? sfCurr.filter(c => c.brand === brandF) : sfCurr;
+    const src = brandF.length ? sfCurr.filter(c => brandF.includes(c.brand)) : sfCurr;
     return [...new Set(src.map(c => c.category).filter(Boolean))].sort();
   }, [sfCurr, brandF]);
   const segs = useMemo(() => {
@@ -4304,9 +4606,9 @@ function SalesFlowView({
   });
   const filtered = useMemo(() => {
     let out = sfCurr;
-    if (brandF) out = out.filter(c => c.brand === brandF);
-    if (catF) out = out.filter(c => c.category === catF);
-    if (segF) out = out.filter(c => Object.keys(c.segs || {}).some(s => s === segF));
+    if (brandF.length) out = out.filter(c => brandF.includes(c.brand));
+    if (catF.length) out = out.filter(c => catF.includes(c.category));
+    if (segF.length) out = out.filter(c => Object.keys(c.segs || {}).some(s => segF.includes(s)));
     return out;
   }, [sfCurr, brandF, catF, segF]);
   const totalDrrDQ = useMemo(() => filtered.reduce((s, c) => s + (c.drrDQ || 0), 0), [filtered]);
@@ -4403,7 +4705,98 @@ function SalesFlowView({
     'Generic Head': 'Gen Head',
     'Generic Tail': 'Gen Tail'
   };
+
+  // Subtotal
+  const sfSubSpend = useMemo(() => filtered.reduce((s, c) => s + (c.drrSpend || 0), 0), [filtered]);
+  const sfSubRoas = useMemo(() => {
+    let num = 0,
+      den = 0;
+    filtered.forEach(c => {
+      if (c.directRoas != null && c.drrSpend > 0) {
+        num += c.directRoas * c.drrSpend;
+        den += c.drrSpend;
+      }
+    });
+    return den > 0 ? num / den : null;
+  }, [filtered]);
+  const sfSubDeltaDQ = useMemo(() => filtered.reduce((s, c) => {
+    const pk = `${c.brand}||${c.category}`;
+    return s + ((c.drrDQ ?? 0) - (prevMap[pk]?.drrDQ ?? 0));
+  }, 0), [filtered, prevMap]);
   const tableRows = [];
+
+  // Subtotal row (pushed first, before pushRow calls)
+  tableRows.push(/*#__PURE__*/React.createElement("tr", {
+    key: "__subtotal__",
+    style: {
+      borderBottom: '2px solid #1f2937',
+      background: 'rgba(59,130,246,0.08)',
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      color: '#60a5fa',
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, "TOTAL ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontWeight: 400,
+      fontSize: 9
+    }
+  }, "(", filtered.length, " categories)")), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 10
+    }
+  }, "100%"), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 700,
+      fontSize: 11,
+      color: Math.abs(sfSubDeltaDQ) < 0.5 ? '#4b5563' : sfSubDeltaDQ > 0 ? '#22c55e' : '#ef4444'
+    }
+  }, sfSubDeltaDQ > 0 ? '+' : '', sfSubDeltaDQ.toFixed(1))), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#e5e7eb',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtDQ(totalDrrDQ)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#e5e7eb',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtS(sfSubSpend)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      fontSize: 11,
+      whiteSpace: 'nowrap',
+      color: sfSubRoas != null ? mColor(sfSubRoas, 0.5, 1.5, 3.0) : '#4b5563'
+    }
+  }, fmtR(sfSubRoas)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#4b5563',
+      fontSize: 11
+    }
+  }, "\u2014")));
   const pushRow = ({
     key,
     prevKey,
@@ -4688,29 +5081,29 @@ function SalesFlowView({
       alignItems: 'center',
       flexWrap: 'wrap'
     }
-  }, /*#__PURE__*/React.createElement(Select, {
-    value: brandF,
+  }, /*#__PURE__*/React.createElement(MultiSelect, {
+    values: brandF,
     onChange: v => {
       setBrandF(v);
-      setCatF('');
+      setCatF([]);
     },
     options: brands,
     placeholder: "All Brands"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: catF,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: catF,
     onChange: setCatF,
     options: cats,
     placeholder: "All Categories"
-  }), /*#__PURE__*/React.createElement(Select, {
-    value: segF,
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: segF,
     onChange: setSegF,
     options: segs,
     placeholder: "All Segments"
-  }), (brandF || catF || segF) && /*#__PURE__*/React.createElement("button", {
+  }), brandF.length || catF.length || segF.length ? /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      setBrandF('');
-      setCatF('');
-      setSegF('');
+      setBrandF([]);
+      setCatF([]);
+      setSegF([]);
     },
     style: {
       color: '#6b7280',
@@ -4719,7 +5112,7 @@ function SalesFlowView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear"), /*#__PURE__*/React.createElement("div", {
+  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 4,
@@ -4812,7 +5205,8 @@ function LoadingScreen({
       const {
         rawTexts,
         ltvMap,
-        campaignIndexMap
+        campaignIndexMap,
+        salesAgg
       } = await fetchAllDataFromSheets();
       setStep('Processing & scoring campaigns…');
       const allRows = parseAllRows(rawTexts);
@@ -4820,7 +5214,8 @@ function LoadingScreen({
       onLoad({
         allRows,
         ltvMap,
-        campaignIndexMap
+        campaignIndexMap,
+        salesAgg
       });
     } catch (e) {
       setStatus('error');
@@ -4963,7 +5358,8 @@ function App() {
   const handleLoad = useCallback(({
     allRows,
     ltvMap,
-    campaignIndexMap
+    campaignIndexMap,
+    salesAgg
   }) => {
     const bounds = getDateBounds(allRows);
     const endDate = bounds.max;
@@ -4973,13 +5369,13 @@ function App() {
       allRows,
       ltvMap,
       campaignIndexMap: campaignIndexMap || {},
+      salesAgg: salesAgg || {},
       bounds,
       startDate: startDate < bounds.min ? bounds.min : startDate,
       endDate,
       compareMode: 'lastMonthMTD',
-      // default comparison
       compareStart: null,
-      compareEnd: null // only used in 'custom' mode
+      compareEnd: null
     });
   }, []);
   const onDateChange = useCallback((s, e) => {
@@ -5086,9 +5482,10 @@ function App() {
       allRows,
       startDate,
       endDate,
-      campaignIndexMap
+      campaignIndexMap,
+      salesAgg
     } = appState;
-    return aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap);
+    return aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap, salesAgg);
   }, [appState]);
   const catPrev = useMemo(() => {
     if (!appState || !prevCampaigns) return null;
@@ -5096,9 +5493,10 @@ function App() {
     if (!r) return null;
     const {
       allRows,
-      campaignIndexMap
+      campaignIndexMap,
+      salesAgg
     } = appState;
-    return aggregateForCatSales(allRows, r.pStart, r.pEnd, campaignIndexMap);
+    return aggregateForCatSales(allRows, r.pStart, r.pEnd, campaignIndexMap, salesAgg);
   }, [appState, prevCampaigns, getPrevRange]);
 
   // Sales Flow aggregations (nested Category→Segment→Keyword→Campaign)
@@ -5108,9 +5506,10 @@ function App() {
       allRows,
       startDate,
       endDate,
-      campaignIndexMap
+      campaignIndexMap,
+      salesAgg
     } = appState;
-    return aggregateByCategory(allRows, startDate, endDate, campaignIndexMap);
+    return aggregateByCategory(allRows, startDate, endDate, campaignIndexMap, salesAgg);
   }, [appState]);
   const sfPrev = useMemo(() => {
     if (!appState || !prevCampaigns) return null;
@@ -5118,9 +5517,10 @@ function App() {
     if (!r) return null;
     const {
       allRows,
-      campaignIndexMap
+      campaignIndexMap,
+      salesAgg
     } = appState;
-    return aggregateByCategory(allRows, r.pStart, r.pEnd, campaignIndexMap);
+    return aggregateByCategory(allRows, r.pStart, r.pEnd, campaignIndexMap, salesAgg);
   }, [appState, prevCampaigns, getPrevRange]);
 
   // Keyword aggregations (current + comparison)
@@ -5378,7 +5778,7 @@ function App() {
     type: "date",
     value: compareStart ? toISODate(compareStart) : '',
     onChange: e => {
-      const d = new Date(e.target.value);
+      const d = new Date(e.target.value + 'T00:00:00');
       if (!isNaN(d)) onCompareRangeChange(d, compareEnd || endDate);
     },
     style: {
@@ -5399,7 +5799,7 @@ function App() {
     type: "date",
     value: compareEnd ? toISODate(compareEnd) : '',
     onChange: e => {
-      const d = new Date(e.target.value);
+      const d = new Date(e.target.value + 'T00:00:00');
       if (!isNaN(d)) onCompareRangeChange(compareStart || startDate, d);
     },
     style: {
