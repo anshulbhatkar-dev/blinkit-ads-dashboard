@@ -5136,6 +5136,10 @@ function CategorySalesView({
       if (kwMode === 'exact') out = out.filter(r => (r.keyword || '').toLowerCase() === kwSearch.toLowerCase());else out = out.filter(r => (r.keyword || '').toLowerCase().includes(kwSearch.toLowerCase()));
     }
     return [...out].sort((a, b) => {
+      // Organic rows always pinned to the bottom
+      const aOrg = a.segment === 'Organic' ? 1 : 0;
+      const bOrg = b.segment === 'Organic' ? 1 : 0;
+      if (aOrg !== bOrg) return aOrg - bOrg;
       let av, bv;
       if (sort.col === 'deltaDQ') {
         const ak = `${a.brand}||${a.category}||${a.segment}||${a.keyword}`;
@@ -5357,11 +5361,12 @@ function CategorySalesView({
       padding: '6px 10px'
     }
   })));
-  filtered.forEach(row => {
+  filtered.forEach((row, rowIdx) => {
     const kwKey = `${row.brand}||${row.category}||${row.segment}||${row.keyword}`;
     const prevRow = prevMap[kwKey] || null;
     const isExp = expanded.has(kwKey);
     const hasCamps = Object.keys(row.campaigns || {}).length > 0;
+    const isOrganic = row.segment === 'Organic';
 
     // % contribution
     const currPct = totalDrrDQ > 0 ? row.drrDQ / totalDrrDQ * 100 : null;
@@ -5372,13 +5377,43 @@ function CategorySalesView({
     const deltaDQ = prevRow != null ? (row.drrDQ ?? 0) - (prevRow.drrDQ ?? 0) : null;
     const segLabel = SEG_SHORT[row.segment] || row.segment || '—';
     const segColor = SEG_COLOR[row.segment] || '#6b7280';
+
+    // Separator before first organic row
+    if (isOrganic) {
+      const prevFiltered = filtered[rowIdx - 1];
+      if (!prevFiltered || prevFiltered.segment !== 'Organic') {
+        tableRows.push(/*#__PURE__*/React.createElement("tr", {
+          key: "__organic_sep__",
+          style: {
+            background: 'transparent'
+          }
+        }, /*#__PURE__*/React.createElement("td", {
+          colSpan: 11,
+          style: {
+            padding: '4px 10px',
+            borderTop: '1px dashed #1f2937',
+            borderBottom: '1px dashed #1f2937'
+          }
+        }, /*#__PURE__*/React.createElement("span", {
+          style: {
+            color: '#22c55e',
+            fontSize: 9,
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            opacity: 0.7
+          }
+        }, "\uD83C\uDF3F Organic Sales (from Sales Import \u2014 total minus ad-attributed)"))));
+      }
+    }
     tableRows.push(/*#__PURE__*/React.createElement("tr", {
       key: kwKey,
-      onClick: hasCamps ? () => toggle(kwKey) : undefined,
+      onClick: !isOrganic && hasCamps ? () => toggle(kwKey) : undefined,
       style: {
         borderBottom: '1px solid #111827',
-        background: isExp ? 'rgba(30,58,95,0.15)' : 'transparent',
-        cursor: hasCamps ? 'pointer' : 'default'
+        background: isOrganic ? 'rgba(34,197,94,0.04)' : isExp ? 'rgba(30,58,95,0.15)' : 'transparent',
+        cursor: !isOrganic && hasCamps ? 'pointer' : 'default',
+        borderLeft: isOrganic ? '2px solid rgba(34,197,94,0.4)' : 'none'
       }
     }, /*#__PURE__*/React.createElement("td", {
       style: {
@@ -5392,7 +5427,7 @@ function CategorySalesView({
         alignItems: 'center',
         gap: 5
       }
-    }, hasCamps ? /*#__PURE__*/React.createElement("span", {
+    }, !isOrganic && hasCamps ? /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#4b5563',
         fontSize: 9,
@@ -5410,21 +5445,22 @@ function CategorySalesView({
       }
     }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
       style: {
-        color: '#e5e7eb',
-        fontSize: 11,
+        color: isOrganic ? '#4ade80' : '#e5e7eb',
+        fontSize: isOrganic ? 10 : 11,
         fontWeight: 500,
+        fontStyle: isOrganic ? 'italic' : 'normal',
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         maxWidth: 240
       },
-      title: row.keyword
-    }, row.keyword), /*#__PURE__*/React.createElement("div", {
+      title: isOrganic ? `Organic Sales · ${row.brand} · ${row.category}` : row.keyword
+    }, isOrganic ? `${row.category}` : row.keyword), /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#374151',
         fontSize: 8
       }
-    }, row.brand, " \xB7 ", row.category)))), /*#__PURE__*/React.createElement("td", {
+    }, row.brand, isOrganic ? '' : ` · ${row.category}`)))), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         whiteSpace: 'nowrap'
@@ -5501,7 +5537,7 @@ function CategorySalesView({
     }, /*#__PURE__*/React.createElement("div", {
       style: {
         fontWeight: 600,
-        color: '#e5e7eb',
+        color: isOrganic ? '#4ade80' : '#e5e7eb',
         fontSize: 11
       }
     }, fmtDQ(row.drrDQ), /*#__PURE__*/React.createElement(DPct, {
@@ -5518,7 +5554,13 @@ function CategorySalesView({
         textAlign: 'right',
         whiteSpace: 'nowrap'
       }
-    }, /*#__PURE__*/React.createElement("div", {
+    }, isOrganic ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 10,
+        fontStyle: 'italic'
+      }
+    }, "no ad spend") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontWeight: 600,
         color: '#e5e7eb',
@@ -5532,13 +5574,18 @@ function CategorySalesView({
         color: '#374151',
         fontSize: 9
       }
-    }, fmtS(prevRow.drrSpend))), /*#__PURE__*/React.createElement("td", {
+    }, fmtS(prevRow.drrSpend)))), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         textAlign: 'right',
         whiteSpace: 'nowrap'
       }
-    }, /*#__PURE__*/React.createElement("div", {
+    }, isOrganic ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#374151',
+        fontSize: 10
+      }
+    }, "\u2014") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontWeight: 600,
         fontSize: 11,
@@ -5552,7 +5599,7 @@ function CategorySalesView({
         color: '#374151',
         fontSize: 9
       }
-    }, fmtR(prevRow.directRoas))), /*#__PURE__*/React.createElement("td", {
+    }, fmtR(prevRow.directRoas)))), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         textAlign: 'right',
