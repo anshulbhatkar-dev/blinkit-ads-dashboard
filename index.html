@@ -493,11 +493,34 @@ function extractRow(row, type) {
 // ─── DATA FETCH ──────────────────────────────────────────────────────────────
 
 async function fetchAllDataFromSheets() {
-  const fetchGid = gid => fetch(SHEET_BASE + gid).then(r => {
+  const today = new Date();
+  const cutoffDate = new Date(today.getFullYear(), today.getMonth() - 3, 1);
+  const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours in ms
+
+  const fetchWithCache = async gid => {
+    const cacheKey = `blinkit_sheet_${gid}`;
+    try {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const {
+          ts,
+          data
+        } = JSON.parse(cached);
+        if (Date.now() - ts < CACHE_TTL) return data;
+      }
+    } catch (e) {}
+    const r = await fetch(SHEET_BASE + gid);
     if (!r.ok) throw new Error(`Sheet ${gid} returned ${r.status}`);
-    return r.text();
-  });
-  const [condText, idxText, salesText, ...rawTexts] = await Promise.all([fetchGid(CONDITIONS_GID), fetchGid(CAMPAIGN_IDX_GID), fetchGid(SALES_IMPORT_GID), ...RAW_SHEET_CFGS.map(c => fetchGid(c.gid))]);
+    const text = await r.text();
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify({
+        ts: Date.now(),
+        data: text
+      }));
+    } catch (e) {}
+    return text;
+  };
+  const [condText, idxText, salesText, ...rawTexts] = await Promise.all([fetchWithCache(CONDITIONS_GID), fetchWithCache(CAMPAIGN_IDX_GID), fetchWithCache(SALES_IMPORT_GID), ...RAW_SHEET_CFGS.map(c => fetchWithCache(c.gid))]);
 
   // Parse LTV from Conditions sheet
   const ltvMap = {
@@ -537,12 +560,14 @@ async function fetchAllDataFromSheets() {
 
   // Parse Sales import: skip 4 header rows; date=col1, units=col4, brand=col7, gc_cat=col8
   // salesAgg[`${brand}||${cat}`][dateTimestamp] = totalUnits
+  // Dates are in DD-MM-YYYY format (e.g. "01-03-2026" = 1 March 2026)
   const salesAgg = {};
   parseCSV(salesText).slice(4).forEach(row => {
     if (!row || !row[1]) return;
     const dateStr = String(row[1] || '').trim();
-    const d = dateStr ? new Date(dateStr.length >= 10 ? dateStr.slice(0, 10) + 'T00:00:00' : dateStr) : null;
-    if (!d || isNaN(d)) return;
+    const parts = dateStr.split('-');
+    const d = parts.length === 3 ? new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0])) : null;
+    if (!d || isNaN(d.getTime())) return;
     const brand = String(row[7] || '').trim();
     const cat = String(row[8] || '').trim();
     const units = parseFloat(row[4]) || 0;
@@ -556,7 +581,8 @@ async function fetchAllDataFromSheets() {
     rawTexts,
     ltvMap,
     campaignIndexMap,
-    salesAgg
+    salesAgg,
+    cutoffDate
   };
 }
 
@@ -577,7 +603,9 @@ function parseAllRows(rawTexts) {
       if (parsed && parsed.date) allRows.push(parsed);
     });
   });
-  return allRows;
+  // Filter to only keep rows within the 4-month window
+  const cutoff = new Date(new Date().getFullYear(), new Date().getMonth() - 3, 1);
+  return allRows.filter(r => r.date && r.date >= cutoff);
 }
 
 // ─── AGGREGATE CAMPAIGNS ─────────────────────────────────────────────────────
@@ -873,6 +901,127 @@ function aggregateKeywords(allRows, ltvMap, startDate, endDate, campaignIndexMap
     });
   });
   return keywords.sort((a, b) => (b.spend || 0) - (a.spend || 0));
+}
+
+// ─── KEYWORD-LEVEL AGGREGATION (flattened to keyword, with campaign drill-down) ──
+
+function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignIndexMap = {}) {
+  const numDays = Math.round((endDate - startDate) / 864e5) + 1;
+  const windowRows = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.keyword && r.type === 'Search');
+
+  // Group by keyword only (across all campaigns)
+  const kwGroups = {};
+  windowRows.forEach(r => {
+    const kw = r.keyword.toLowerCase();
+    if (!kwGroups[kw]) kwGroups[kw] = {
+      keyword: r.keyword,
+      brands: new Set(),
+      categories: new Set(),
+      segments: new Set(),
+      rows: [],
+      campRows: {}
+    };
+    kwGroups[kw].rows.push(r);
+    kwGroups[kw].brands.add(r.brand || '');
+    kwGroups[kw].categories.add(r.category || '');
+    // Per-campaign rows
+    const campKey = r.campaign || '(no campaign)';
+    if (!kwGroups[kw].campRows[campKey]) kwGroups[kw].campRows[campKey] = {
+      campaign: r.campaign,
+      brand: r.brand,
+      category: r.category,
+      segment: campaignIndexMap[r.campaign?.toLowerCase()] || r.segment || 'Other',
+      rows: []
+    };
+    kwGroups[kw].campRows[campKey].rows.push(r);
+  });
+  return Object.values(kwGroups).map(g => {
+    const {
+      rows,
+      campRows
+    } = g;
+    const totSpend = rows.reduce((s, r) => s + r.spend, 0);
+    const totDS = rows.reduce((s, r) => s + r.directSales, 0);
+    const totNU = rows.reduce((s, r) => s + r.newUsers, 0);
+    const totDQ = rows.reduce((s, r) => s + r.directQty, 0);
+    const totIQ = rows.reduce((s, r) => s + r.indirectQty, 0);
+    const totImp = rows.reduce((s, r) => s + r.impressions, 0);
+    const totQty = totDQ + totIQ;
+    const posRows = rows.filter(r => r.position > 0 && r.impressions > 0);
+    const posImp = posRows.reduce((s, r) => s + r.impressions, 0);
+    const avgPos = posImp > 0 ? posRows.reduce((s, r) => s + r.position * r.impressions, 0) / posImp : null;
+    const cpmRows = rows.filter(r => r.cpm > 0 && r.impressions > 0);
+    const cpmImp = cpmRows.reduce((s, r) => s + r.impressions, 0);
+    const avgCpm = cpmImp > 0 ? cpmRows.reduce((s, r) => s + r.cpm * r.impressions, 0) / cpmImp : null;
+    const roas = totSpend > 0 ? totDS / totSpend : null;
+    const nur = totQty > 0 ? totNU / totQty : null;
+    const drr = {
+      spend: totSpend / numDays,
+      directSales: totDS / numDays,
+      impressions: totImp / numDays,
+      totalQty: totQty / numDays,
+      newUsers: totNU / numDays
+    };
+
+    // Per-campaign breakdown
+    const campaigns = {};
+    Object.entries(campRows).forEach(([camp, cd]) => {
+      const cr = cd.rows;
+      const cSpend = cr.reduce((s, r) => s + r.spend, 0);
+      const cDS = cr.reduce((s, r) => s + r.directSales, 0);
+      const cNU = cr.reduce((s, r) => s + r.newUsers, 0);
+      const cDQ = cr.reduce((s, r) => s + r.directQty, 0);
+      const cIQ = cr.reduce((s, r) => s + r.indirectQty, 0);
+      const cImp = cr.reduce((s, r) => s + r.impressions, 0);
+      const cQty = cDQ + cIQ;
+      const cCpmR = cr.filter(r => r.cpm > 0 && r.impressions > 0);
+      const cCpmI = cCpmR.reduce((s, r) => s + r.impressions, 0);
+      campaigns[camp] = {
+        campaign: cd.campaign,
+        brand: cd.brand,
+        category: cd.category,
+        segment: cd.segment,
+        spend: cSpend,
+        directSales: cDS,
+        newUsers: cNU,
+        directQty: cDQ,
+        impressions: cImp,
+        roas: cSpend > 0 ? cDS / cSpend : null,
+        nur: cQty > 0 ? cNU / cQty : null,
+        avgCpm: cCpmI > 0 ? cCpmR.reduce((s, r) => s + r.cpm * r.impressions, 0) / cCpmI : null,
+        drr: {
+          spend: cSpend / numDays,
+          directSales: cDS / numDays,
+          impressions: cImp / numDays,
+          totalQty: cQty / numDays,
+          newUsers: cNU / numDays
+        }
+      };
+    });
+
+    // Pick primary brand/segment from highest-spend campaign
+    const topCamp = Object.values(campaigns).sort((a, b) => (b.spend || 0) - (a.spend || 0))[0];
+    return {
+      keyword: g.keyword,
+      brand: topCamp?.brand || '',
+      category: topCamp?.category || '',
+      segment: topCamp?.segment || 'Other',
+      campaignCount: Object.keys(campaigns).length,
+      spend: totSpend,
+      directSales: totDS,
+      impressions: totImp,
+      newUsers: totNU,
+      totalQty: totQty,
+      directQty: totDQ,
+      drr,
+      numDays,
+      roas,
+      nur,
+      avgPos,
+      avgCpm,
+      campaigns
+    };
+  }).sort((a, b) => (b.spend || 0) - (a.spend || 0));
 }
 
 // ─── CATEGORY-LEVEL AGGREGATION ──────────────────────────────────────────────
@@ -3038,6 +3187,34 @@ function ScorecardView({
     const subCPM = subCpmDen > 0 ? subCpmNum / subCpmDen : null;
     const hrsFiltered = filtered.filter(c => c.hoursPerDay > 0);
     const subHrs = hrsFiltered.length > 0 ? filtered.reduce((s, c) => s + (c.hoursPerDay || 0), 0) / hrsFiltered.length : null;
+    const subBudget = filtered.reduce((s, c) => s + (c.currentDailyBudget || 0), 0) || null;
+    const subTROAS = (() => {
+      let n = 0,
+        d = 0;
+      filtered.forEach(c => {
+        if (c.avgTotalRoas != null && c.drr?.impressions > 0) {
+          n += c.avgTotalRoas * c.drr.impressions;
+          d += c.drr.impressions;
+        }
+      });
+      return d > 0 ? n / d : null;
+    })();
+    const subCAC = (() => {
+      const tSpend = filtered.reduce((s, c) => s + (c.spend || 0), 0);
+      const tNU = filtered.reduce((s, c) => s + (c.newUsers || 0), 0);
+      return tNU > 0 ? tSpend / tNU : null;
+    })();
+    const subLtvCac = (() => {
+      let n = 0,
+        d = 0;
+      filtered.forEach(c => {
+        if (c.ltvCac != null && c.drr?.spend > 0) {
+          n += c.ltvCac * (c.drr?.spend || 0);
+          d += c.drr?.spend || 0;
+        }
+      });
+      return d > 0 ? n / d : null;
+    })();
     return /*#__PURE__*/React.createElement("tr", {
       style: {
         borderBottom: '2px solid #1f2937',
@@ -3105,10 +3282,10 @@ function ScorecardView({
       style: {
         padding: '6px 8px',
         textAlign: 'right',
-        color: '#4b5563',
+        color: '#a78bfa',
         fontSize: 11
       }
-    }, "\u2014"), /*#__PURE__*/React.createElement("td", {
+    }, subTROAS != null ? subTROAS.toFixed(2) + 'x' : '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         textAlign: 'right',
@@ -3119,17 +3296,17 @@ function ScorecardView({
       style: {
         padding: '6px 8px',
         textAlign: 'right',
-        color: '#4b5563',
+        color: '#9ca3af',
         fontSize: 11
       }
-    }, "\u2014"), /*#__PURE__*/React.createElement("td", {
+    }, subLtvCac != null ? subLtvCac.toFixed(2) + 'x' : '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         textAlign: 'right',
-        color: '#4b5563',
+        color: '#9ca3af',
         fontSize: 11
       }
-    }, "\u2014"), /*#__PURE__*/React.createElement("td", {
+    }, subCAC != null ? fmt(subCAC, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         textAlign: 'right',
@@ -3173,9 +3350,12 @@ function ScorecardView({
       }
     }, fmt(subTotalQty, 'int')), /*#__PURE__*/React.createElement("td", {
       style: {
-        padding: '6px 8px'
+        padding: '6px 8px',
+        textAlign: 'right',
+        color: '#d1d5db',
+        fontSize: 11
       }
-    }), /*#__PURE__*/React.createElement("td", {
+    }, subBudget ? fmt(subBudget, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px'
       }
@@ -3736,10 +3916,13 @@ function SegmentHealthView({
 // ─── ACTION QUEUE VIEW ───────────────────────────────────────────────────────
 
 function ActionQueueView({
-  campaigns
+  campaigns,
+  prevCampaigns,
+  allRows,
+  endDate
 }) {
-  const urgent = ['Cut', 'Reduce', 'Optimise', 'Scale'];
-  const queue = campaigns.filter(c => urgent.includes(c.verdict)).sort((a, b) => urgent.indexOf(a.verdict) - urgent.indexOf(b.verdict) || (b.spend || 0) - (a.spend || 0));
+  const [verdictF, setVerdictF] = useState('All');
+  const [sortBy, setSortBy] = useState('spend');
   const actionText = c => {
     const bm = BENCHMARKS[c.segment];
     const breaches = [];
@@ -3754,151 +3937,390 @@ function ActionQueueView({
       return `Optimise: ${breaches.join(' · ')}`;
     }
     if (c.verdict === 'Scale') return `Increase budget${c.avgPos && bm?.posThr && c.avgPos > bm.posThr ? ' and raise CPM' : ''} — all metrics above floor.`;
+    if (c.verdict === 'Hold') return 'Hold — monitor closely.';
+    if (c.verdict === 'Monitor') return 'Monitor — no action needed yet.';
     return '';
   };
-  const byVerdict = urgent.filter(v => queue.some(c => c.verdict === v));
+
+  // Live campaigns: had spend on endDate
+  const maxDateStr = endDate.toDateString();
+  const liveCampKeys = useMemo(() => new Set(allRows.filter(r => r.date && r.date.toDateString() === maxDateStr && r.spend > 0).map(r => r.campaign.toLowerCase())), [allRows, maxDateStr]);
+  const liveCampaigns = useMemo(() => campaigns.filter(c => liveCampKeys.has(c.campaign.toLowerCase())), [campaigns, liveCampKeys]);
+  const prevMap = useMemo(() => {
+    if (!prevCampaigns) return {};
+    const m = {};
+    prevCampaigns.forEach(c => {
+      m[c.campaign.toLowerCase()] = c;
+    });
+    return m;
+  }, [prevCampaigns]);
+  const verdictCounts = useMemo(() => {
+    const counts = {};
+    liveCampaigns.forEach(c => {
+      counts[c.verdict] = (counts[c.verdict] || 0) + 1;
+    });
+    return counts;
+  }, [liveCampaigns]);
+  const displayed = useMemo(() => {
+    let out = liveCampaigns;
+    if (verdictF !== 'All') out = out.filter(c => c.verdict === verdictF);
+    if (sortBy === 'budget') out = [...out].sort((a, b) => (b.currentDailyBudget || 0) - (a.currentDailyBudget || 0));else if (sortBy === 'verdict') out = [...out].sort((a, b) => VERDICT_ORDER.indexOf(a.verdict) - VERDICT_ORDER.indexOf(b.verdict));else out = [...out].sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0));
+    return out;
+  }, [liveCampaigns, verdictF, sortBy]);
+  const totalSpendD = liveCampaigns.reduce((s, c) => s + (c.drr?.spend || 0), 0);
+  const cutCount = liveCampaigns.filter(c => c.verdict === 'Cut').length;
+  const scaleCount = liveCampaigns.filter(c => c.verdict === 'Scale').length;
+  const verdictPills = ['All', 'Cut', 'Scale', 'Optimise', 'Reduce', 'Hold', 'Monitor', 'Insufficient Data', 'Inactive'];
+  const availablePills = verdictPills.filter(v => v === 'All' || verdictCounts[v]);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
-      gap: 16
+      gap: 12
     }
-  }, byVerdict.map(v => {
-    const group = queue.filter(c => c.verdict === v);
-    const cfg = VERDICT_CFG[v];
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      background: '#0d1117',
+      borderRadius: 8,
+      padding: '10px 14px',
+      border: '1px solid #1f2937'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      fontWeight: 600
+    }
+  }, liveCampaigns.length, " campaigns live"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontSize: 11
+    }
+  }, "\xB7"), cutCount > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#ef4444',
+      fontSize: 11
+    }
+  }, cutCount, " to cut"), scaleCount > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#22c55e',
+      fontSize: 11
+    }
+  }, scaleCount, " to scale"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontSize: 11
+    }
+  }, "\xB7"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#d1d5db',
+      fontSize: 11
+    }
+  }, "\u20B9", (totalSpendD / 1000).toFixed(0), "K spend/d"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginLeft: 'auto',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 10
+    }
+  }, "Sort:"), ['spend', 'budget', 'verdict'].map(s => /*#__PURE__*/React.createElement("button", {
+    key: s,
+    onClick: () => setSortBy(s),
+    style: {
+      background: sortBy === s ? '#1e3a5f' : 'transparent',
+      color: sortBy === s ? '#93c5fd' : '#4b5563',
+      border: `1px solid ${sortBy === s ? '#2563eb' : '#1f2937'}`,
+      borderRadius: 4,
+      padding: '2px 8px',
+      fontSize: 9,
+      cursor: 'pointer',
+      textTransform: 'capitalize'
+    }
+  }, s === 'spend' ? 'Spend/d' : s === 'budget' ? 'Budget/d' : 'Verdict')))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 4,
+      flexWrap: 'wrap'
+    }
+  }, availablePills.map(v => {
+    const cfg = v === 'All' ? null : VERDICT_CFG[v];
+    const active = verdictF === v;
+    const cnt = v === 'All' ? liveCampaigns.length : verdictCounts[v] || 0;
+    return /*#__PURE__*/React.createElement("button", {
+      key: v,
+      onClick: () => setVerdictF(v),
+      style: {
+        background: active ? cfg?.bg || 'rgba(59,130,246,0.1)' : 'transparent',
+        color: active ? cfg?.color || '#93c5fd' : '#6b7280',
+        border: `1px solid ${active ? cfg?.border || 'rgba(59,130,246,0.3)' : '#1f2937'}`,
+        borderRadius: 999,
+        padding: '3px 10px',
+        fontSize: 9,
+        cursor: 'pointer',
+        fontWeight: active ? 700 : 400
+      }
+    }, v === 'Insufficient Data' ? 'Insuf. Data' : v, " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        opacity: 0.7
+      }
+    }, cnt));
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, displayed.map(c => {
+    const bm = BENCHMARKS[c.segment] || null;
+    const pv = prevMap[c.campaign.toLowerCase()];
+    const budgetConsumption = c.currentDailyBudget > 0 ? (c.drr?.spend || 0) / c.currentDailyBudget : null;
+    const cfg = VERDICT_CFG[c.verdict] || VERDICT_CFG['Inactive'];
     return /*#__PURE__*/React.createElement("div", {
-      key: v
+      key: c.campaign,
+      style: {
+        background: '#0d1117',
+        border: `1px solid ${cfg.border}`,
+        borderRadius: 8,
+        padding: '12px 14px'
+      }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
-        alignItems: 'center',
-        gap: 10,
+        alignItems: 'flex-start',
+        justifyContent: 'space-between',
         marginBottom: 8
       }
-    }, /*#__PURE__*/React.createElement(VBadge, {
-      verdict: v
-    }), /*#__PURE__*/React.createElement("span", {
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        marginRight: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        fontWeight: 600,
+        marginBottom: 2,
+        wordBreak: 'break-word'
+      }
+    }, c.campaign), /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#4b5563',
         fontSize: 10
       }
-    }, group.length, " campaigns \xB7 ", fmt(group.reduce((s, c) => s + (c.spend || 0), 0), 'rsk'), " spend")), /*#__PURE__*/React.createElement("div", {
+    }, actionText(c))), /*#__PURE__*/React.createElement(VBadge, {
+      verdict: c.verdict,
+      sm: true
+    })), /*#__PURE__*/React.createElement("div", {
       style: {
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 5
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))',
+        gap: 8
       }
-    }, group.map((c, i) => {
-      const bm = BENCHMARKS[c.segment];
-      return /*#__PURE__*/React.createElement("div", {
-        key: i,
-        style: {
-          background: '#0d1117',
-          border: `1px solid ${cfg.border}`,
-          borderRadius: 8,
-          padding: '10px 14px',
-          display: 'flex',
-          gap: 12,
-          alignItems: 'center',
-          flexWrap: 'wrap'
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          flex: '1 1 260px',
-          minWidth: 200
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          color: '#e5e7eb',
-          fontSize: 11,
-          fontWeight: 600,
-          marginBottom: 2
-        },
-        title: c.campaign
-      }, c.campaign.length > 55 ? c.campaign.slice(0, 55) + '…' : c.campaign), /*#__PURE__*/React.createElement("div", {
-        style: {
-          color: '#4b5563',
-          fontSize: 10
-        }
-      }, actionText(c))), /*#__PURE__*/React.createElement("div", {
-        style: {
-          display: 'flex',
-          gap: 12,
-          alignItems: 'center'
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          textAlign: 'center'
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          color: '#6b7280',
-          fontSize: 8,
-          textTransform: 'uppercase'
-        }
-      }, "ROAS"), /*#__PURE__*/React.createElement(MCell, {
-        val: c.roas,
-        floor: bm?.roasF,
-        healthy: bm?.roasH,
-        strong: bm?.roasS,
-        type: "x"
-      })), /*#__PURE__*/React.createElement("div", {
-        style: {
-          textAlign: 'center'
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          color: '#6b7280',
-          fontSize: 8,
-          textTransform: 'uppercase'
-        }
-      }, "NUR"), /*#__PURE__*/React.createElement(MCell, {
-        val: c.nur,
-        floor: bm?.nurF,
-        healthy: bm?.nurH,
-        strong: bm?.nurS,
-        type: "%"
-      })), /*#__PURE__*/React.createElement("div", {
-        style: {
-          textAlign: 'center'
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          color: '#6b7280',
-          fontSize: 8,
-          textTransform: 'uppercase'
-        }
-      }, "LTV:CAC"), /*#__PURE__*/React.createElement(MCell, {
-        val: c.ltvCac,
-        floor: bm?.ltvF,
-        healthy: bm?.ltvH,
-        strong: bm?.ltvS,
-        type: "x"
-      }))), /*#__PURE__*/React.createElement("div", {
-        style: {
-          textAlign: 'right',
-          minWidth: 80
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          color: '#d1d5db',
-          fontSize: 12,
-          fontWeight: 600
-        }
-      }, fmt(c.spend, 'rsk')), /*#__PURE__*/React.createElement("div", {
-        style: {
-          color: '#4b5563',
-          fontSize: 9
-        }
-      }, SEG_SHORT[c.segment] || c.segment)));
-    })));
-  }), queue.length === 0 && /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: '#111827',
+        borderRadius: 6,
+        padding: '6px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 8,
+        textTransform: 'uppercase',
+        marginBottom: 2
+      }
+    }, "Spend/d"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        fontWeight: 600
+      }
+    }, fmt(c.drr?.spend, 'rsk')), pv && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 8
+      }
+    }, /*#__PURE__*/React.createElement(PctChg, {
+      curr: c.drr?.spend,
+      prev: pv.drr?.spend
+    }))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: '#111827',
+        borderRadius: 6,
+        padding: '6px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 8,
+        textTransform: 'uppercase',
+        marginBottom: 2
+      }
+    }, "Budget/d"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#d1d5db',
+        fontSize: 11,
+        fontWeight: 600
+      }
+    }, c.currentDailyBudget != null ? fmt(c.currentDailyBudget, 'rs') : '—')), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: '#111827',
+        borderRadius: 6,
+        padding: '6px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 8,
+        textTransform: 'uppercase',
+        marginBottom: 2
+      }
+    }, "Consumption"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: budgetConsumption == null ? '#374151' : budgetConsumption >= 0.9 ? '#ef4444' : budgetConsumption >= 0.7 ? '#22c55e' : '#f59e0b'
+      }
+    }, budgetConsumption != null ? (budgetConsumption * 100).toFixed(0) + '%' : '—')), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: '#111827',
+        borderRadius: 6,
+        padding: '6px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 8,
+        textTransform: 'uppercase',
+        marginBottom: 2
+      }
+    }, "CPM"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 11
+      }
+    }, c.avgCpm != null ? fmt(c.avgCpm, 'rs') : '—')), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: '#111827',
+        borderRadius: 6,
+        padding: '6px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 8,
+        textTransform: 'uppercase',
+        marginBottom: 2
+      }
+    }, "Hrs Live/d"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 11
+      }
+    }, c.hoursPerDay != null ? c.hoursPerDay.toFixed(1) : '—')), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: '#111827',
+        borderRadius: 6,
+        padding: '6px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 8,
+        textTransform: 'uppercase',
+        marginBottom: 2
+      }
+    }, "D.ROAS"), /*#__PURE__*/React.createElement(MCell, {
+      val: c.roas,
+      floor: bm?.roasF,
+      healthy: bm?.roasH,
+      strong: bm?.roasS,
+      type: "x"
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: '#111827',
+        borderRadius: 6,
+        padding: '6px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 8,
+        textTransform: 'uppercase',
+        marginBottom: 2
+      }
+    }, "NUR"), /*#__PURE__*/React.createElement(MCell, {
+      val: c.nur,
+      floor: bm?.nurF,
+      healthy: bm?.nurH,
+      strong: bm?.nurS,
+      type: "%"
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: '#111827',
+        borderRadius: 6,
+        padding: '6px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 8,
+        textTransform: 'uppercase',
+        marginBottom: 2
+      }
+    }, "LTV:CAC"), /*#__PURE__*/React.createElement(MCell, {
+      val: c.ltvCac,
+      floor: bm?.ltvF,
+      healthy: bm?.ltvH,
+      strong: bm?.ltvS,
+      type: "x"
+    }))), (c.lastCpmChange || c.lastBudgetChange) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 8,
+        display: 'flex',
+        gap: 12,
+        flexWrap: 'wrap'
+      }
+    }, c.lastCpmChange && c.prevCpmBefore && c.lastCpmValue && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#f59e0b',
+        fontSize: 9,
+        background: 'rgba(245,158,11,0.08)',
+        padding: '2px 8px',
+        borderRadius: 4
+      }
+    }, "CPM: \u20B9", Math.round(c.prevCpmBefore), " \u2192 \u20B9", Math.round(c.lastCpmValue), " \xB7 ", c.lastCpmChange.toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short'
+    })), c.lastBudgetChange && c.prevBudgetBefore && c.lastBudgetValue && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#60a5fa',
+        fontSize: 9,
+        background: 'rgba(96,165,250,0.08)',
+        padding: '2px 8px',
+        borderRadius: 4
+      }
+    }, "Budget: \u20B9", Math.round(c.prevBudgetBefore), " \u2192 \u20B9", Math.round(c.lastBudgetValue), " \xB7 ", c.lastBudgetChange.toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short'
+    }))));
+  }), displayed.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4b5563',
       textAlign: 'center',
       padding: 40
     }
-  }, "No action items found."));
+  }, "No campaigns matching filter.")));
 }
 
 // ─── KEYWORD SCORECARD VIEW ──────────────────────────────────────────────────
@@ -3912,21 +4334,21 @@ function KeywordScorecardView({
   const [brand, setBrand] = useState([]);
   const [cat, setCat] = useState([]);
   const [seg, setSeg] = useState([]);
-  const [camp, setCamp] = useState([]);
   const [sort, setSort] = useState({
     col: 'spend',
     dir: -1
   });
-  const [expandedCamp, setExpandedCamp] = useState(new Set());
+  const [expandedKw, setExpandedKw] = useState(new Set());
   const brands = [...new Set(kwCurrent.map(k => k.brand).filter(Boolean))].sort();
   const cats = [...new Set(kwCurrent.map(k => k.category).filter(Boolean))].sort();
   const segs = [...new Set(kwCurrent.map(k => k.segment).filter(Boolean))].sort();
-  const camps = [...new Set(kwCurrent.map(k => k.campaign).filter(Boolean))].sort();
+
+  // prevMap keyed by keyword (lowercase) — keyword-level, not campaign×keyword
   const prevMap = useMemo(() => {
     if (!kwPrev) return {};
     const m = {};
     kwPrev.forEach(k => {
-      m[`${k.campaign.toLowerCase()}||${k.keyword.toLowerCase()}`] = k;
+      m[k.keyword.toLowerCase()] = k;
     });
     return m;
   }, [kwPrev]);
@@ -3938,22 +4360,21 @@ function KeywordScorecardView({
     if (brand.length) out = out.filter(k => brand.includes(k.brand));
     if (cat.length) out = out.filter(k => cat.includes(k.category));
     if (seg.length) out = out.filter(k => seg.includes(k.segment));
-    if (camp.length) out = out.filter(k => camp.includes(k.campaign));
     return [...out].sort((a, b) => {
       let av, bv;
       if (sort.col === 'kw_deltaSpend') {
-        const pa = prevMap[`${a.campaign.toLowerCase()}||${a.keyword.toLowerCase()}`];
-        const pb = prevMap[`${b.campaign.toLowerCase()}||${b.keyword.toLowerCase()}`];
+        const pa = prevMap[a.keyword.toLowerCase()];
+        const pb = prevMap[b.keyword.toLowerCase()];
         av = (a.drr?.spend || 0) - (pa?.drr?.spend || 0);
         bv = (b.drr?.spend || 0) - (pb?.drr?.spend || 0);
       } else if (sort.col === 'kw_deltaDQty') {
-        const pa = prevMap[`${a.campaign.toLowerCase()}||${a.keyword.toLowerCase()}`];
-        const pb = prevMap[`${b.campaign.toLowerCase()}||${b.keyword.toLowerCase()}`];
+        const pa = prevMap[a.keyword.toLowerCase()];
+        const pb = prevMap[b.keyword.toLowerCase()];
         av = (a.drr?.totalQty || 0) - (pa?.drr?.totalQty || 0);
         bv = (b.drr?.totalQty || 0) - (pb?.drr?.totalQty || 0);
       } else if (sort.col === 'kw_deltaSales') {
-        const pa = prevMap[`${a.campaign.toLowerCase()}||${a.keyword.toLowerCase()}`];
-        const pb = prevMap[`${b.campaign.toLowerCase()}||${b.keyword.toLowerCase()}`];
+        const pa = prevMap[a.keyword.toLowerCase()];
+        const pb = prevMap[b.keyword.toLowerCase()];
         av = (a.drr?.directSales || 0) - (pa?.drr?.directSales || 0);
         bv = (b.drr?.directSales || 0) - (pb?.drr?.directSales || 0);
       } else {
@@ -3964,7 +4385,7 @@ function KeywordScorecardView({
       if (bv == null) return -1;
       return sort.dir * (av > bv ? 1 : av < bv ? -1 : 0);
     });
-  }, [kwCurrent, search, searchMode, brand, cat, seg, camp, sort, prevMap]);
+  }, [kwCurrent, search, searchMode, brand, cat, seg, sort, prevMap]);
   const toggleSort = col => setSort(s => ({
     col,
     dir: s.col === col ? -s.dir : -1
@@ -3993,6 +4414,49 @@ function KeywordScorecardView({
       backdropFilter: 'blur(8px)'
     }
   }, children, sort.col === col ? sort.dir > 0 ? ' ↑' : ' ↓' : '');
+
+  // Subtotal computations
+  const subSpend = useMemo(() => filtered.reduce((s, k) => s + (k.drr?.spend || 0), 0), [filtered]);
+  const subSales = useMemo(() => filtered.reduce((s, k) => s + (k.drr?.directSales || 0), 0), [filtered]);
+  const subImp = useMemo(() => filtered.reduce((s, k) => s + (k.drr?.impressions || 0), 0), [filtered]);
+  const subNU = useMemo(() => filtered.reduce((s, k) => s + (k.drr?.newUsers || 0), 0), [filtered]);
+  const subQty = useMemo(() => filtered.reduce((s, k) => s + (k.drr?.totalQty || 0), 0), [filtered]);
+  const subDRoas = useMemo(() => subSpend > 0 ? subSales / subSpend : null, [subSales, subSpend]);
+  const subNUR = useMemo(() => subQty > 0 ? subNU / subQty : null, [subNU, subQty]);
+  const subRank = useMemo(() => {
+    let num = 0,
+      den = 0;
+    filtered.forEach(k => {
+      if (k.avgPos != null && k.drr?.impressions > 0) {
+        num += k.avgPos * k.drr.impressions;
+        den += k.drr.impressions;
+      }
+    });
+    return den > 0 ? num / den : null;
+  }, [filtered]);
+  const subCPM = useMemo(() => {
+    let num = 0,
+      den = 0;
+    filtered.forEach(k => {
+      if (k.avgCpm != null && k.drr?.impressions > 0) {
+        num += k.avgCpm * k.drr.impressions;
+        den += k.drr.impressions;
+      }
+    });
+    return den > 0 ? num / den : null;
+  }, [filtered]);
+  const subDeltaSpend = useMemo(() => filtered.reduce((s, k) => {
+    const pk = prevMap[k.keyword.toLowerCase()];
+    return s + ((k.drr?.spend || 0) - (pk?.drr?.spend || 0));
+  }, 0), [filtered, prevMap]);
+  const subDeltaDQty = useMemo(() => filtered.reduce((s, k) => {
+    const pk = prevMap[k.keyword.toLowerCase()];
+    return s + ((k.drr?.totalQty || 0) - (pk?.drr?.totalQty || 0));
+  }, 0), [filtered, prevMap]);
+  const subDeltaSales = useMemo(() => filtered.reduce((s, k) => {
+    const pk = prevMap[k.keyword.toLowerCase()];
+    return s + ((k.drr?.directSales || 0) - (pk?.drr?.directSales || 0));
+  }, 0), [filtered, prevMap]);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -4041,11 +4505,6 @@ function KeywordScorecardView({
       whiteSpace: 'nowrap'
     }
   }, searchMode === 'exact' ? 'Exact' : 'Contains')), /*#__PURE__*/React.createElement(MultiSelect, {
-    values: camp,
-    onChange: setCamp,
-    options: camps,
-    placeholder: "All Campaigns"
-  }), /*#__PURE__*/React.createElement(MultiSelect, {
     values: brand,
     onChange: setBrand,
     options: brands,
@@ -4060,10 +4519,9 @@ function KeywordScorecardView({
     onChange: setSeg,
     options: segs,
     placeholder: "All Segments"
-  }), search || camp.length || brand.length || cat.length || seg.length ? /*#__PURE__*/React.createElement("button", {
+  }), search || brand.length || cat.length || seg.length ? /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setSearch('');
-      setCamp([]);
       setBrand([]);
       setCat([]);
       setSeg([]);
@@ -4081,7 +4539,7 @@ function KeywordScorecardView({
       fontSize: 10,
       marginLeft: 'auto'
     }
-  }, filtered.length, " keywords")), /*#__PURE__*/React.createElement("div", {
+  }, filtered.length, " keywords \xB7 click to expand campaigns")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
@@ -4120,7 +4578,6 @@ function KeywordScorecardView({
       minWidth: 180
     }
   }, "Keyword", sort.col === 'keyword' ? sort.dir > 0 ? ' ↑' : ' ↓' : ''), /*#__PURE__*/React.createElement("th", {
-    onClick: () => toggleSort('campaign'),
     style: {
       padding: '7px 8px',
       textAlign: 'left',
@@ -4129,18 +4586,15 @@ function KeywordScorecardView({
       fontWeight: 600,
       textTransform: 'uppercase',
       letterSpacing: '0.06em',
-      cursor: 'pointer',
       whiteSpace: 'nowrap',
-      userSelect: 'none',
-      background: sort.col === 'campaign' ? 'rgba(59,130,246,0.05)' : '#0a0e14',
+      background: '#0a0e14',
       position: 'sticky',
       top: 0,
       left: 180,
       zIndex: 3,
-      minWidth: 140
+      minWidth: 80
     }
-  }, "Campaign", sort.col === 'campaign' ? sort.dir > 0 ? ' ↑' : ' ↓' : ''), /*#__PURE__*/React.createElement("th", {
-    onClick: () => toggleSort('brand'),
+  }, "Brand"), /*#__PURE__*/React.createElement("th", {
     style: {
       padding: '7px 8px',
       textAlign: 'left',
@@ -4149,37 +4603,15 @@ function KeywordScorecardView({
       fontWeight: 600,
       textTransform: 'uppercase',
       letterSpacing: '0.06em',
-      cursor: 'pointer',
       whiteSpace: 'nowrap',
-      userSelect: 'none',
-      background: sort.col === 'brand' ? 'rgba(59,130,246,0.05)' : '#0a0e14',
+      background: '#0a0e14',
       position: 'sticky',
       top: 0,
-      left: 320,
+      left: 260,
       zIndex: 3,
       minWidth: 80
     }
-  }, "Brand", sort.col === 'brand' ? sort.dir > 0 ? ' ↑' : ' ↓' : ''), /*#__PURE__*/React.createElement("th", {
-    onClick: () => toggleSort('segment'),
-    style: {
-      padding: '7px 8px',
-      textAlign: 'left',
-      color: '#6b7280',
-      fontSize: 9,
-      fontWeight: 600,
-      textTransform: 'uppercase',
-      letterSpacing: '0.06em',
-      cursor: 'pointer',
-      whiteSpace: 'nowrap',
-      userSelect: 'none',
-      background: sort.col === 'segment' ? 'rgba(59,130,246,0.05)' : '#0a0e14',
-      position: 'sticky',
-      top: 0,
-      left: 400,
-      zIndex: 3,
-      minWidth: 80
-    }
-  }, "Seg", sort.col === 'segment' ? sort.dir > 0 ? ' ↑' : ' ↓' : ''), /*#__PURE__*/React.createElement(Th, {
+  }, "Seg"), /*#__PURE__*/React.createElement(Th, {
     col: "spend",
     align: "right"
   }, "Spend/d"), /*#__PURE__*/React.createElement(Th, {
@@ -4207,9 +4639,9 @@ function KeywordScorecardView({
     col: "directQty",
     align: "right"
   }, "DQty/d"), /*#__PURE__*/React.createElement(Th, {
-    col: "ltvCac",
+    col: "campaignCount",
     align: "right"
-  }, "LTV:CAC"), /*#__PURE__*/React.createElement(Th, {
+  }, "Camps"), /*#__PURE__*/React.createElement(Th, {
     col: "kw_deltaSpend",
     align: "right"
   }, "\u0394Spend/d"), /*#__PURE__*/React.createElement(Th, {
@@ -4218,142 +4650,162 @@ function KeywordScorecardView({
   }, "\u0394DQty/d"), /*#__PURE__*/React.createElement(Th, {
     col: "kw_deltaSales",
     align: "right"
-  }, "\u0394Sales/d"))), /*#__PURE__*/React.createElement("tbody", null, (() => {
-    const subSpend = filtered.reduce((s, k) => s + (k.drr?.spend || 0), 0);
-    const subSales = filtered.reduce((s, k) => s + (k.drr?.directSales || 0), 0);
-    const subImp = filtered.reduce((s, k) => s + (k.drr?.impressions || 0), 0);
-    const subDeltaSpend = filtered.reduce((s, k) => {
-      const pk = prevMap[`${k.campaign.toLowerCase()}||${k.keyword.toLowerCase()}`];
-      return s + ((k.drr?.spend || 0) - (pk?.drr?.spend || 0));
-    }, 0);
-    const subDeltaDQty = filtered.reduce((s, k) => {
-      const pk = prevMap[`${k.campaign.toLowerCase()}||${k.keyword.toLowerCase()}`];
-      return s + ((k.drr?.totalQty || 0) - (pk?.drr?.totalQty || 0));
-    }, 0);
-    const subDeltaSales = filtered.reduce((s, k) => {
-      const pk = prevMap[`${k.campaign.toLowerCase()}||${k.keyword.toLowerCase()}`];
-      return s + ((k.drr?.directSales || 0) - (pk?.drr?.directSales || 0));
-    }, 0);
-    return /*#__PURE__*/React.createElement("tr", {
-      style: {
-        borderBottom: '2px solid #1f2937',
-        background: 'rgba(59,130,246,0.08)',
-        fontWeight: 700
-      }
-    }, /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        color: '#60a5fa',
-        fontSize: 11,
-        fontWeight: 700,
-        position: 'sticky',
-        left: 0,
-        zIndex: 1,
-        background: 'rgba(59,130,246,0.08)'
-      }
-    }, "TOTAL ", /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#374151',
-        fontWeight: 400,
-        fontSize: 9
-      }
-    }, "(", filtered.length, ")")), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        position: 'sticky',
-        left: 180,
-        zIndex: 1,
-        background: 'rgba(59,130,246,0.08)'
-      }
-    }), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        position: 'sticky',
-        left: 320,
-        zIndex: 1,
-        background: 'rgba(59,130,246,0.08)'
-      }
-    }), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        position: 'sticky',
-        left: 400,
-        zIndex: 1,
-        background: 'rgba(59,130,246,0.08)'
-      }
-    }), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        textAlign: 'right',
-        color: '#e5e7eb',
-        fontSize: 11,
-        whiteSpace: 'nowrap'
-      }
-    }, fmt(subSpend, 'rsk')), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        textAlign: 'right',
-        color: '#e5e7eb',
-        fontSize: 11,
-        whiteSpace: 'nowrap'
-      }
-    }, fmt(subSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
-      colSpan: 4,
-      style: {
-        padding: '6px 8px'
-      }
-    }), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        textAlign: 'right',
-        color: '#6b7280',
-        fontSize: 11
-      }
-    }, fmt(subImp, 'int')), /*#__PURE__*/React.createElement("td", {
-      colSpan: 3,
-      style: {
-        padding: '6px 8px'
-      }
-    }), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        textAlign: 'right',
-        whiteSpace: 'nowrap',
-        fontWeight: 700,
-        fontSize: 11,
-        color: Math.abs(subDeltaSpend) < 1 ? '#4b5563' : subDeltaSpend > 0 ? '#22c55e' : '#ef4444'
-      }
-    }, subDeltaSpend >= 0 ? '+' : '', fmt(subDeltaSpend, 'rsk')), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        textAlign: 'right',
-        whiteSpace: 'nowrap',
-        fontWeight: 700,
-        fontSize: 11,
-        color: Math.abs(subDeltaDQty) < 0.1 ? '#4b5563' : subDeltaDQty > 0 ? '#22c55e' : '#ef4444'
-      }
-    }, subDeltaDQty >= 0 ? '+' : '', subDeltaDQty.toFixed(1)), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 8px',
-        textAlign: 'right',
-        whiteSpace: 'nowrap',
-        fontWeight: 700,
-        fontSize: 11,
-        color: Math.abs(subDeltaSales) < 1 ? '#4b5563' : subDeltaSales > 0 ? '#22c55e' : '#ef4444'
-      }
-    }, subDeltaSales >= 0 ? '+' : '', fmt(subDeltaSales, 'rsk')));
-  })(), filtered.slice(0, 300).map((k, i) => {
-    const pk = prevMap[`${k.campaign.toLowerCase()}||${k.keyword.toLowerCase()}`];
+  }, "\u0394Sales/d"))), /*#__PURE__*/React.createElement("tbody", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      borderBottom: '2px solid #1f2937',
+      background: 'rgba(59,130,246,0.08)',
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      color: '#60a5fa',
+      fontSize: 11,
+      fontWeight: 700,
+      position: 'sticky',
+      left: 0,
+      zIndex: 1,
+      background: 'rgba(59,130,246,0.08)'
+    }
+  }, "TOTAL ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontWeight: 400,
+      fontSize: 9
+    }
+  }, "(", filtered.length, ")")), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      position: 'sticky',
+      left: 180,
+      zIndex: 1,
+      background: 'rgba(59,130,246,0.08)'
+    }
+  }), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      position: 'sticky',
+      left: 260,
+      zIndex: 1,
+      background: 'rgba(59,130,246,0.08)'
+    }
+  }), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: '#e5e7eb',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmt(subSpend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: '#e5e7eb',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmt(subSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      fontSize: 11,
+      color: subDRoas != null ? mColor(subDRoas, 0.5, 1.5, 3.0) : '#4b5563'
+    }
+  }, subDRoas != null ? subDRoas.toFixed(2) + 'x' : '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      fontSize: 11,
+      color: subNUR != null ? mColor(subNUR, 0.3, 0.5, 0.66) : '#4b5563'
+    }
+  }, subNUR != null ? fmt(subNUR, '%') : '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 11
+    }
+  }, subRank != null ? subRank.toFixed(1) : '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 11
+    }
+  }, subCPM != null ? fmt(subCPM, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: '#6b7280',
+      fontSize: 11
+    }
+  }, fmt(subImp, 'int')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 11
+    }
+  }, fmt(subNU, 'int')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 11
+    }
+  }, fmt(subQty, 'int')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px'
+    }
+  }), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap',
+      fontWeight: 700,
+      fontSize: 11,
+      color: Math.abs(subDeltaSpend) < 1 ? '#4b5563' : subDeltaSpend > 0 ? '#22c55e' : '#ef4444'
+    }
+  }, subDeltaSpend >= 0 ? '+' : '', fmt(subDeltaSpend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap',
+      fontWeight: 700,
+      fontSize: 11,
+      color: Math.abs(subDeltaDQty) < 0.1 ? '#4b5563' : subDeltaDQty > 0 ? '#22c55e' : '#ef4444'
+    }
+  }, subDeltaDQty >= 0 ? '+' : '', subDeltaDQty.toFixed(1)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap',
+      fontWeight: 700,
+      fontSize: 11,
+      color: Math.abs(subDeltaSales) < 1 ? '#4b5563' : subDeltaSales > 0 ? '#22c55e' : '#ef4444'
+    }
+  }, subDeltaSales >= 0 ? '+' : '', fmt(subDeltaSales, 'rsk'))), filtered.slice(0, 400).map((k, i) => {
+    const pk = prevMap[k.keyword.toLowerCase()];
     const bm = BENCHMARKS[k.segment] || null;
-    const campExp = expandedCamp.has(`${k.campaign}||${k.keyword}`);
+    const isExpKw = expandedKw.has(k.keyword);
     const deltaSpend = (k.drr?.spend || 0) - (pk?.drr?.spend || 0);
     const deltaDQty = (k.drr?.totalQty || 0) - (pk?.drr?.totalQty || 0);
     const deltaSales = (k.drr?.directSales || 0) - (pk?.drr?.directSales || 0);
-    return /*#__PURE__*/React.createElement("tr", {
-      key: i,
+    const rowBg = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)';
+    const cellBg = i % 2 === 0 ? '#070711' : '#080c12';
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: i
+    }, /*#__PURE__*/React.createElement("tr", {
+      onClick: () => setExpandedKw(prev => {
+        const n = new Set(prev);
+        isExpKw ? n.delete(k.keyword) : n.add(k.keyword);
+        return n;
+      }),
       style: {
-        borderBottom: '1px solid #111827',
-        background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)'
+        borderBottom: isExpKw ? 'none' : '1px solid #111827',
+        background: isExpKw ? 'rgba(59,130,246,0.04)' : rowBg,
+        cursor: 'pointer'
       }
     }, /*#__PURE__*/React.createElement("td", {
       style: {
@@ -4366,33 +4818,16 @@ function KeywordScorecardView({
         position: 'sticky',
         left: 0,
         zIndex: 1,
-        background: i % 2 === 0 ? '#070711' : '#080c12'
+        background: isExpKw ? 'rgba(59,130,246,0.04)' : cellBg
       },
       title: k.keyword
-    }, k.keyword), /*#__PURE__*/React.createElement("td", {
+    }, /*#__PURE__*/React.createElement("span", {
       style: {
-        padding: '5px 8px',
-        color: '#4b5563',
-        fontSize: 9,
-        minWidth: 140,
-        maxWidth: campExp ? 'none' : 140,
-        overflow: 'hidden',
-        textOverflow: campExp ? 'clip' : 'ellipsis',
-        whiteSpace: campExp ? 'normal' : 'nowrap',
-        cursor: 'pointer',
-        position: 'sticky',
-        left: 180,
-        zIndex: 1,
-        background: i % 2 === 0 ? '#070711' : '#080c12'
-      },
-      title: k.campaign,
-      onClick: () => setExpandedCamp(prev => {
-        const n = new Set(prev);
-        const key = `${k.campaign}||${k.keyword}`;
-        n.has(key) ? n.delete(key) : n.add(key);
-        return n;
-      })
-    }, k.campaign), /*#__PURE__*/React.createElement("td", {
+        color: isExpKw ? '#93c5fd' : '#6b7280',
+        marginRight: 5,
+        fontSize: 8
+      }
+    }, isExpKw ? '▼' : '▶'), k.keyword), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 8px',
         color: BRAND_COLORS[k.brand] || '#6b7280',
@@ -4400,9 +4835,9 @@ function KeywordScorecardView({
         fontSize: 10,
         minWidth: 80,
         position: 'sticky',
-        left: 320,
+        left: 180,
         zIndex: 1,
-        background: i % 2 === 0 ? '#070711' : '#080c12'
+        background: isExpKw ? 'rgba(59,130,246,0.04)' : cellBg
       }
     }, k.brand || '—'), /*#__PURE__*/React.createElement("td", {
       style: {
@@ -4412,9 +4847,9 @@ function KeywordScorecardView({
         whiteSpace: 'nowrap',
         minWidth: 80,
         position: 'sticky',
-        left: 400,
+        left: 260,
         zIndex: 1,
-        background: i % 2 === 0 ? '#070711' : '#080c12'
+        background: isExpKw ? 'rgba(59,130,246,0.04)' : cellBg
       }
     }, SEG_SHORT[k.segment] || k.segment || '—'), /*#__PURE__*/React.createElement("td", {
       style: {
@@ -4519,15 +4954,11 @@ function KeywordScorecardView({
     })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 8px',
-        textAlign: 'right'
+        color: '#4b5563',
+        textAlign: 'right',
+        fontSize: 10
       }
-    }, /*#__PURE__*/React.createElement(MCell, {
-      val: k.ltvCac,
-      floor: bm?.ltvF,
-      healthy: bm?.ltvH,
-      strong: bm?.ltvS,
-      type: "x"
-    })), /*#__PURE__*/React.createElement("td", {
+    }, k.campaignCount), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 8px',
         textAlign: 'right',
@@ -4554,7 +4985,88 @@ function KeywordScorecardView({
         whiteSpace: 'nowrap',
         color: Math.abs(deltaSales) < 1 ? '#4b5563' : deltaSales > 0 ? '#22c55e' : '#ef4444'
       }
-    }, pk ? (deltaSales >= 0 ? '+' : '') + fmt(deltaSales, 'rsk') : '—'));
+    }, pk ? (deltaSales >= 0 ? '+' : '') + fmt(deltaSales, 'rsk') : '—')), isExpKw && Object.values(k.campaigns || {}).sort((a, b) => (b.spend || 0) - (a.spend || 0)).map(cd => /*#__PURE__*/React.createElement("tr", {
+      key: cd.campaign,
+      style: {
+        background: 'rgba(255,255,255,0.02)',
+        borderBottom: '1px solid #0d1117'
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px 4px 28px',
+        color: '#6b7280',
+        fontSize: 10,
+        position: 'sticky',
+        left: 0,
+        zIndex: 1,
+        background: '#080c12'
+      },
+      colSpan: 1
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 10
+      }
+    }, cd.campaign)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: BRAND_COLORS[cd.brand] || '#6b7280',
+        fontSize: 9,
+        position: 'sticky',
+        left: 180,
+        background: '#080c12'
+      }
+    }, cd.brand || '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: '#6b7280',
+        fontSize: 9,
+        position: 'sticky',
+        left: 260,
+        background: '#080c12'
+      }
+    }, SEG_SHORT[cd.segment] || cd.segment || '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, fmt(cd.drr?.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: '#9ca3af',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, fmt(cd.drr?.directSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: cd.roas != null ? mColor(cd.roas, 0.5, 1.5, 3) : '#374151',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, cd.roas != null ? cd.roas.toFixed(2) + 'x' : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '4px 8px',
+        color: '#6b7280',
+        textAlign: 'right',
+        fontSize: 10
+      }
+    }, cd.nur != null ? (cd.nur * 100).toFixed(0) + '%' : '—'), /*#__PURE__*/React.createElement("td", {
+      colSpan: 6,
+      style: {
+        padding: '4px 8px',
+        color: '#374151',
+        textAlign: 'right',
+        fontSize: 9
+      }
+    }, fmt(cd.drr?.impressions, 'int'), " impr/d \xB7 ", cd.avgCpm != null ? fmt(cd.avgCpm, 'rs') + ' CPM' : '—'), /*#__PURE__*/React.createElement("td", {
+      colSpan: 3,
+      style: {
+        padding: '4px 8px'
+      }
+    }))));
   })))));
 }
 
@@ -6889,7 +7401,14 @@ function LoadingScreen({
   const [status, setStatus] = useState('loading');
   const [step, setStep] = useState('Connecting to Google Sheets…');
   const [err, setErr] = useState('');
-  const doLoad = useCallback(async () => {
+  const clearCache = () => {
+    try {
+      const keys = Object.keys(localStorage).filter(k => k.startsWith('blinkit_sheet_'));
+      keys.forEach(k => localStorage.removeItem(k));
+    } catch (e) {}
+  };
+  const doLoad = useCallback(async (forceRefresh = false) => {
+    if (forceRefresh) clearCache();
     setStatus('loading');
     setErr('');
     try {
@@ -6915,7 +7434,7 @@ function LoadingScreen({
     }
   }, [onLoad]);
   useEffect(() => {
-    doLoad();
+    doLoad(false);
   }, []);
   const Dot = ({
     delay
@@ -6990,9 +7509,21 @@ function LoadingScreen({
   }, step), /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4b5563',
-      fontSize: 11
+      fontSize: 11,
+      marginBottom: 16
     }
-  }, "Pulling live data from Google Sheets\u2026")), status === 'error' && /*#__PURE__*/React.createElement("div", {
+  }, "Pulling live data from Google Sheets\u2026"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => doLoad(true),
+    style: {
+      background: 'transparent',
+      color: '#4b5563',
+      border: '1px solid #1f2937',
+      borderRadius: 6,
+      padding: '6px 16px',
+      fontSize: 11,
+      cursor: 'pointer'
+    }
+  }, "\u21BA Refresh (clear cache)")), status === 'error' && /*#__PURE__*/React.createElement("div", {
     style: {
       background: '#0d1117',
       border: '1px solid #7f1d1d',
@@ -7215,7 +7746,7 @@ function App() {
     return aggregateByCategory(allRows, r.pStart, r.pEnd, campaignIndexMap, salesAgg);
   }, [appState, prevCampaigns, getPrevRange]);
 
-  // Keyword aggregations (current + comparison)
+  // Keyword aggregations (flattened to keyword level with per-campaign drill-down)
   const kwCurrent = useMemo(() => {
     if (!appState) return [];
     const {
@@ -7225,37 +7756,19 @@ function App() {
       startDate,
       endDate
     } = appState;
-    return aggregateKeywords(allRows, ltvMap, startDate, endDate, campaignIndexMap);
+    return aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignIndexMap);
   }, [appState]);
   const kwPrev = useMemo(() => {
-    if (!appState || !prevCampaigns) return null;
+    if (!appState) return null;
+    const r = getPrevRange();
+    if (!r) return null;
     const {
       allRows,
       ltvMap,
-      campaignIndexMap,
-      bounds,
-      startDate,
-      endDate,
-      compareMode,
-      compareStart,
-      compareEnd
+      campaignIndexMap
     } = appState;
-    const startTs = startDate.getTime();
-    const periodLen = Math.round((endDate.getTime() - startTs) / 864e5) + 1;
-    let pStart, pEnd;
-    if (compareMode === 'lastMonthMTD') {
-      pStart = new Date(startDate.getFullYear(), startDate.getMonth() - 1, 1);
-      pEnd = new Date(endDate.getFullYear(), endDate.getMonth() - 1, endDate.getDate());
-    } else if (compareMode === 'custom' && compareStart && compareEnd) {
-      pStart = compareStart;
-      pEnd = compareEnd;
-    } else {
-      pEnd = new Date(startTs - 864e5);
-      pStart = new Date(pEnd.getTime() - (periodLen - 1) * 864e5);
-    }
-    if (pStart < bounds.min) return null;
-    return aggregateKeywords(allRows, ltvMap, pStart, pEnd, campaignIndexMap);
-  }, [appState, prevCampaigns]);
+    return aggregateKeywordsByKw(allRows, ltvMap, r.pStart, r.pEnd, campaignIndexMap);
+  }, [appState, getPrevRange]);
   // ─────────────────────────────────────────────────────────────────────────
 
   // Conditional return only AFTER all hooks are declared
@@ -7384,8 +7897,13 @@ function App() {
       fontSize: 10
     }
   }, campaigns.length, " campaigns"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setAppState(null),
-    title: "Re-fetch from Google Sheets",
+    onClick: () => {
+      try {
+        Object.keys(localStorage).filter(k => k.startsWith('blinkit_sheet_')).forEach(k => localStorage.removeItem(k));
+      } catch (e) {}
+      setAppState(null);
+    },
+    title: "Clear cache and re-fetch from Google Sheets",
     style: {
       color: '#6b7280',
       fontSize: 10,
@@ -7541,7 +8059,10 @@ function App() {
   }), tab === 'segment' && /*#__PURE__*/React.createElement(SegmentHealthView, {
     campaigns: campaigns
   }), tab === 'actions' && /*#__PURE__*/React.createElement(ActionQueueView, {
-    campaigns: campaigns
+    campaigns: campaigns,
+    prevCampaigns: prevCampaigns,
+    allRows: allRows,
+    endDate: endDate
   }), tab === 'budgetthreat' && /*#__PURE__*/React.createElement(BudgetThreatView, {
     allRows: allRows,
     endDate: endDate
