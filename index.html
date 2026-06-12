@@ -7134,8 +7134,10 @@ function SalesFlowView({
 // Predicts surplus drawdown BEFORE it lands. Blinkit billing: unspent daily
 // budget rolls into a surplus bank; Blinkit can spend above the daily budget
 // any day, drawing the bank down — often in month-end spikes at ~17% worse
-// ROAS (backtested Apr–May 2026). Drain capacity calibrated from data:
-// overspend days run median 1.3x, p90 ~2.5x of set budget → plan at 1.5x.
+// ROAS (backtested Apr–May 2026).
+// Drain capacity is DEMAND-GATED per campaign: p90 of its own trailing-60d
+// daily spend is the demonstrated max the market can absorb. No demonstrated
+// headroom above budget → surplus likely lapses unspent → ⚪, not an alarm.
 
 function computeSpikeRadar(allRows, refDate) {
   if (!refDate) return {
@@ -7147,8 +7149,23 @@ function computeSpikeRadar(allRows, refDate) {
   const monthStart = new Date(y, m, 1);
   const daysInMonth = new Date(y, m + 1, 0).getDate();
   const dom = refDate.getDate();
-  const remaining = daysInMonth - dom; // full days after the latest data day
+  const remaining = daysInMonth - dom;
 
+  // trailing-60d daily spend per campaign → p90 demonstrated capacity
+  const histStart = new Date(refDate.getTime() - 59 * 864e5);
+  const histDaily = {};
+  allRows.forEach(r => {
+    if (!r.date || r.date < histStart || r.date > refDate) return;
+    const ck = r.campaign.toLowerCase();
+    const dk = r.date.toDateString();
+    if (!histDaily[ck]) histDaily[ck] = {};
+    histDaily[ck][dk] = (histDaily[ck][dk] || 0) + (r.spend || 0);
+  });
+  const p90Of = ck => {
+    const v = Object.values(histDaily[ck] || {}).filter(x => x > 0).sort((a, b) => a - b);
+    if (v.length < 5) return null;
+    return v[Math.min(v.length - 1, Math.floor(v.length * 0.9))];
+  };
   const camps = {};
   allRows.forEach(r => {
     if (!r.date || r.date < monthStart || r.date > refDate) return;
@@ -7173,13 +7190,12 @@ function computeSpikeRadar(allRows, refDate) {
     c.days[dk].sales += r.directSales || 0;
   });
   const rows = [];
-  Object.values(camps).forEach(c => {
+  Object.entries(camps).forEach(([ck, c]) => {
     const days = Object.values(c.days).sort((a, b) => a.date - b.date);
     if (days.length < 3) return;
-    if (days[days.length - 1].date.getDate() < dom - 1) return; // not live
+    if (days[days.length - 1].date.getDate() < dom - 1) return;
     const budgetDays = days.filter(d => d.budget > 0);
-    if (budgetDays.length < 3) return; // no usable budget data
-
+    if (budgetDays.length < 3) return;
     const capMTD = days.reduce((s, d) => s + d.budget, 0);
     const cumSpend = days.reduce((s, d) => s + d.spend, 0);
     const surplus = capMTD - cumSpend;
@@ -7194,8 +7210,6 @@ function computeSpikeRadar(allRows, refDate) {
     const drawnMTD = budgetDays.reduce((s, d) => s + Math.max(0, d.spend - d.budget), 0);
     const maxMult = drawDays.length ? Math.max(...drawDays.map(d => d.spend / d.budget)) : null;
     const drainingNow = days.slice(-2).some(d => d.budget > 0 && d.spend > d.budget * 1.1);
-
-    // ROAS: drawdown days vs normal days (this month)
     const dSp = drawDays.reduce((s, d) => s + d.spend, 0),
       dSa = drawDays.reduce((s, d) => s + d.sales, 0);
     const nList = days.filter(d => !(d.budget > 0 && d.spend > d.budget * 1.1));
@@ -7204,18 +7218,21 @@ function computeSpikeRadar(allRows, refDate) {
     const roasDraw = dSp > 0 ? dSa / dSp : null;
     const roasNorm = nSp > 0 ? nSa / nSp : null;
 
-    // Forward projection (assumes current budget persists)
+    // demand-gated drain capacity
+    const p90Spend = p90Of(ck);
+    const excessRate = p90Spend != null ? Math.max(0, p90Spend - curBudget) : 0.5 * curBudget; // young campaign fallback
+    const hasCapacity = excessRate > 0.1 * curBudget;
+    const daysToDrain = surplus > 0 ? hasCapacity ? surplus / excessRate : Infinity : 0;
+    const drainable = isFinite(daysToDrain) && daysToDrain <= Math.max(remaining, 1);
+    const spikeStartIn = isFinite(daysToDrain) ? Math.max(0, remaining - daysToDrain) : Infinity;
     const landingRate = remaining > 0 ? curBudget + Math.max(0, surplus) / remaining : curBudget + Math.max(0, surplus);
     const spikeRatio = landingRate / curBudget;
-    const daysToDrain = surplus > 0 ? surplus / (0.5 * curBudget) : 0; // excess drain ≈ 0.5x budget/day (1.5x total)
-    const drainable = daysToDrain <= Math.max(remaining, 1);
-    const spikeStartIn = Math.max(0, remaining - daysToDrain); // days until drain must begin
-    const spikeStart = surplus > 0 && remaining > 0 ? new Date(y, m, Math.min(daysInMonth, Math.max(dom + 1, Math.round(daysInMonth - daysToDrain + 1)))) : null;
-    let cls = null;
-    if (drainingNow && surplus > curBudget) cls = 'RED';else if (surplus >= 3 * curBudget && remaining > 0 && drainable && spikeStartIn <= 7) cls = 'ORANGE';else if (ratioMTD < 0.85 && surplus > curBudget) cls = 'YELLOW';
-    if (!cls) return;
+    const spikeStart = surplus > 0 && remaining > 0 && isFinite(daysToDrain) ? new Date(y, m, Math.min(daysInMonth, Math.max(dom + 1, Math.round(daysInMonth - daysToDrain + 1)))) : null;
 
-    // suggested budget to land smoothly (15% haircut, ₹500 platform floor)
+    // Observed drawdown ALWAYS overrides the prediction (capacity can appear overnight)
+    let cls = null;
+    if (drainingNow && surplus > curBudget) cls = 'RED';else if (surplus >= 3 * curBudget && remaining > 0 && hasCapacity && drainable && spikeStartIn <= 7) cls = 'ORANGE';else if (surplus > curBudget && !hasCapacity) cls = 'LAPSE';else if (ratioMTD < 0.85 && surplus > curBudget) cls = 'YELLOW';
+    if (!cls) return;
     const suggested = remaining > 0 ? Math.max(500, (capMTD + curBudget * remaining - cumSpend) / remaining * 0.85) : null;
     rows.push({
       cls,
@@ -7223,7 +7240,7 @@ function computeSpikeRadar(allRows, refDate) {
       brand: c.brand,
       category: c.category,
       type: c.type,
-      campKey: c.name.toLowerCase(),
+      campKey: ck,
       surplus,
       curBudget,
       spend7,
@@ -7232,6 +7249,9 @@ function computeSpikeRadar(allRows, refDate) {
       drawDayCount: drawDays.length,
       buildDayCount: buildDays.length,
       maxMult,
+      p90Spend,
+      excessRate,
+      hasCapacity,
       landingRate,
       spikeRatio,
       daysToDrain,
@@ -7250,7 +7270,8 @@ function computeSpikeRadar(allRows, refDate) {
   const order = {
     RED: 0,
     ORANGE: 1,
-    YELLOW: 2
+    YELLOW: 2,
+    LAPSE: 3
   };
   rows.sort((a, b) => order[a.cls] - order[b.cls] || b.surplus - a.surplus);
   return {
@@ -7259,7 +7280,9 @@ function computeSpikeRadar(allRows, refDate) {
       red: rows.filter(r => r.cls === 'RED').length,
       orange: rows.filter(r => r.cls === 'ORANGE').length,
       yellow: rows.filter(r => r.cls === 'YELLOW').length,
-      totalSurplus: rows.reduce((s, r) => s + Math.max(0, r.surplus), 0),
+      lapse: rows.filter(r => r.cls === 'LAPSE').length,
+      totalSurplus: rows.filter(r => r.cls !== 'LAPSE').reduce((s, r) => s + Math.max(0, r.surplus), 0),
+      lapseSurplus: rows.filter(r => r.cls === 'LAPSE').reduce((s, r) => s + Math.max(0, r.surplus), 0),
       totalDrawn: rows.reduce((s, r) => s + r.drawnMTD, 0)
     }
   };
@@ -7398,14 +7421,47 @@ function SpikeRadarView({
   const [desiredSpend, setDesiredSpend] = useState({});
   const [expanded, setExpanded] = useState(null);
   const [brandF, setBrandF] = useState([]);
+  const [catF, setCatF] = useState([]);
+  const [typeF, setTypeF] = useState([]);
   const [clsF, setClsF] = useState('All');
+  const [sort, setSort] = useState({
+    col: 'default',
+    dir: -1
+  });
   const brands = useMemo(() => [...new Set(radar.rows.map(t => t.brand).filter(Boolean))].sort(), [radar]);
+  const cats = useMemo(() => {
+    const src = brandF.length ? radar.rows.filter(t => brandF.includes(t.brand)) : radar.rows;
+    return [...new Set(src.map(t => t.category).filter(Boolean))].sort();
+  }, [radar, brandF]);
+  const types = useMemo(() => [...new Set(radar.rows.map(t => t.type).filter(Boolean))].sort(), [radar]);
+  const getV = (t, col) => ({
+    surplus: t.surplus,
+    budget: t.curBudget,
+    spend7: t.spend7,
+    ratio: t.ratioMTD,
+    drawn: t.drawnMTD,
+    cap: t.p90Spend || 0,
+    landing: t.landingRate,
+    spike: t.spikeRatio
+  })[col];
   const filtered = useMemo(() => {
     let out = radar.rows;
     if (brandF.length) out = out.filter(t => brandF.includes(t.brand));
+    if (catF.length) out = out.filter(t => catF.includes(t.category));
+    if (typeF.length) out = out.filter(t => typeF.includes(t.type));
     if (clsF !== 'All') out = out.filter(t => t.cls === clsF);
+    if (sort.col !== 'default') {
+      out = [...out].sort((a, b) => sort.dir * ((getV(a, sort.col) || 0) - (getV(b, sort.col) || 0)));
+    }
     return out;
-  }, [radar, brandF, clsF]);
+  }, [radar, brandF, catF, typeF, clsF, sort]);
+  const toggleSort = col => setSort(s => s.col === col ? {
+    col,
+    dir: -s.dir
+  } : {
+    col,
+    dir: -1
+  });
   const fmtRs = n => n == null ? '—' : n >= 100000 ? '₹' + (n / 100000).toFixed(1) + 'L' : n >= 1000 ? '₹' + (n / 1000).toFixed(1) + 'K' : '₹' + Math.round(n);
   const fmtD = d => d ? d.toLocaleDateString('en-IN', {
     day: '2-digit',
@@ -7426,11 +7482,17 @@ function SpikeRadarView({
       label: '🟡 BUILDING',
       color: '#f59e0b',
       bg: 'transparent'
+    },
+    LAPSE: {
+      label: '⚪ LIKELY LAPSES',
+      color: '#6b7280',
+      bg: 'transparent'
     }
   };
   const actionText = t => {
     if (t.cls === 'RED') return `Surplus draining through this campaign NOW (drew ${fmtRs(t.drawnMTD)} over budget MTD${t.maxMult ? `, peaks at ${t.maxMult.toFixed(1)}x budget` : ''}). Cutting budget cannot claw the surplus back — drop budget to floor ₹500 to stop the cap growing, and expect ~${fmtRs(Math.max(0, t.surplus))} more to drain by ${fmtD(t.monthEnd)}.`;
-    if (t.cls === 'ORANGE') return `Spike projected to start ~${fmtD(t.spikeStart)}: effective spend heading to ${fmtRs(t.landingRate)}/d vs ${fmtRs(t.curBudget)}/d set (${t.spikeRatio.toFixed(1)}x). Set budget to ${fmtRs(t.suggested)} today to smooth the landing — or do nothing and take the spike at ~17% worse ROAS.`;
+    if (t.cls === 'ORANGE') return `Spike projected to start ~${fmtD(t.spikeStart)}: effective spend heading to ${fmtRs(t.landingRate)}/d vs ${fmtRs(t.curBudget)}/d set (${t.spikeRatio.toFixed(1)}x). Demand verified: this campaign has spent up to ${fmtRs(t.p90Spend)}/d. Set budget to ${fmtRs(t.suggested)} today to smooth it — or take the spike at ~17% worse ROAS.`;
+    if (t.cls === 'LAPSE') return `${fmtRs(t.surplus)} surplus, but no demonstrated volume: p90 daily spend ${fmtRs(t.p90Spend)} vs ₹${Math.round(t.curBudget).toLocaleString('en-IN')} budget — the market has never absorbed meaningfully more than budget here. Surplus will most likely lapse unspent. No action; auto-promotes to 🔴 if a drawdown day appears.`;
     return `Surplus building (spend ratio ${(t.ratioMTD * 100).toFixed(0)}%). Cheap to fix now: recalibrate to ${fmtRs(t.suggested)}/d before the bank gets dangerous.`;
   };
   const getRecalibrated = t => {
@@ -7439,8 +7501,6 @@ function SpikeRadarView({
     const capForward = t.capMTD + t.curBudget * t.remaining;
     return Math.max(500, (capForward - t.cumSpend - d * t.remaining) / t.remaining + d);
   };
-
-  // drawdown ledger narrative for expanded row
   const ledgerNarrative = t => {
     const built = t.days.filter(d => d.budget > 0 && d.spend < d.budget * 0.9);
     const drawn = t.days.filter(d => d.budget > 0 && d.spend > d.budget * 1.1);
@@ -7452,6 +7512,28 @@ function SpikeRadarView({
     if (!drawn.length && t.surplus > 0) parts.push(`None drawn yet — ${fmtRs(t.surplus)} still loaded`);
     return parts.join('. ') + '.';
   };
+  const Th = ({
+    col,
+    label,
+    right
+  }) => /*#__PURE__*/React.createElement("th", {
+    onClick: col ? () => toggleSort(col) : undefined,
+    style: {
+      padding: '7px 10px',
+      color: sort.col === col ? '#93c5fd' : '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      zIndex: 2,
+      textAlign: right ? 'right' : 'left',
+      whiteSpace: 'nowrap',
+      cursor: col ? 'pointer' : 'default',
+      userSelect: 'none'
+    }
+  }, label, sort.col === col ? sort.dir > 0 ? ' ↑' : ' ↓' : '');
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -7477,7 +7559,11 @@ function SpikeRadarView({
     val: radar.summary.yellow,
     color: '#f59e0b'
   }, {
-    label: 'Surplus Loaded',
+    label: '⚪ Likely Lapses',
+    val: `${radar.summary.lapse} (${fmtRs(radar.summary.lapseSurplus)})`,
+    color: '#6b7280'
+  }, {
+    label: 'Drainable Surplus',
     val: fmtRs(radar.summary.totalSurplus),
     color: '#8b5cf6'
   }, {
@@ -7492,11 +7578,11 @@ function SpikeRadarView({
     key: label,
     style: {
       flex: 1,
-      minWidth: 140,
+      minWidth: 130,
       background: '#0d1117',
       border: '1px solid #1f2937',
       borderRadius: 8,
-      padding: '12px 16px'
+      padding: '12px 14px'
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7509,7 +7595,7 @@ function SpikeRadarView({
   }, label), /*#__PURE__*/React.createElement("div", {
     style: {
       color,
-      fontSize: 20,
+      fontSize: 18,
       fontWeight: 700
     }
   }, val)))), /*#__PURE__*/React.createElement("div", {
@@ -7519,7 +7605,7 @@ function SpikeRadarView({
       alignItems: 'center',
       flexWrap: 'wrap'
     }
-  }, ['All', 'RED', 'ORANGE', 'YELLOW'].map(c => /*#__PURE__*/React.createElement("button", {
+  }, ['All', 'RED', 'ORANGE', 'YELLOW', 'LAPSE'].map(c => /*#__PURE__*/React.createElement("button", {
     key: c,
     onClick: () => setClsF(c),
     style: {
@@ -7534,21 +7620,52 @@ function SpikeRadarView({
     }
   }, c === 'All' ? `All (${radar.rows.length})` : CLS_CFG[c].label)), /*#__PURE__*/React.createElement(MultiSelect, {
     values: brandF,
-    onChange: setBrandF,
+    onChange: v => {
+      setBrandF(v);
+      setCatF([]);
+    },
     options: brands,
     placeholder: "All Brands"
-  }), /*#__PURE__*/React.createElement("span", {
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: catF,
+    onChange: setCatF,
+    options: cats,
+    placeholder: "All Categories"
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: typeF,
+    onChange: setTypeF,
+    options: types,
+    placeholder: "All Types"
+  }), brandF.length || catF.length || typeF.length || clsF !== 'All' || sort.col !== 'default' ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setBrandF([]);
+      setCatF([]);
+      setTypeF([]);
+      setClsF('All');
+      setSort({
+        col: 'default',
+        dir: -1
+      });
+    },
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      background: 'transparent',
+      border: 'none',
+      cursor: 'pointer'
+    }
+  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "billing: unspent budget banks as surplus \xB7 Blinkit draws it above daily budget \xB7 drain modelled at 1.5x budget/day (p90 backtest)")), /*#__PURE__*/React.createElement("div", {
+  }, "click column headers to sort \xB7 drain capacity = campaign's own p90 daily spend (60d)")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
       border: '1px solid #1f2937',
-      maxHeight: '68vh',
+      maxHeight: '66vh',
       overflowY: 'auto'
     }
   }, /*#__PURE__*/React.createElement("table", {
@@ -7561,22 +7678,58 @@ function SpikeRadarView({
     style: {
       borderBottom: '1px solid #1f2937'
     }
-  }, ['Risk', 'Campaign', 'Surplus Bank', 'Budget/d', 'Spend/d (7d)', 'Ratio MTD', 'Drawn Over MTD', 'Landing Rate', 'Spike', 'Spike Window', 'ROAS Draw vs Norm', 'Suggested/d', 'Desired/d', 'Set To'].map(h => /*#__PURE__*/React.createElement("th", {
-    key: h,
-    style: {
-      padding: '7px 10px',
-      color: '#6b7280',
-      fontSize: 9,
-      fontWeight: 600,
-      textTransform: 'uppercase',
-      background: '#0a0e14',
-      position: 'sticky',
-      top: 0,
-      zIndex: 2,
-      textAlign: ['Risk', 'Campaign'].includes(h) ? 'left' : 'right',
-      whiteSpace: 'nowrap'
-    }
-  }, h)))), /*#__PURE__*/React.createElement("tbody", null, filtered.map(t => {
+  }, /*#__PURE__*/React.createElement(Th, {
+    label: "Risk"
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Campaign"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "surplus",
+    label: "Surplus Bank",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "budget",
+    label: "Budget/d",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "cap",
+    label: "Drain Cap/d (p90)",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "spend7",
+    label: "Spend/d (7d)",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "ratio",
+    label: "Ratio MTD",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "drawn",
+    label: "Drawn Over MTD",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "landing",
+    label: "Landing Rate",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "spike",
+    label: "Spike",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Spike Window",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "ROAS Draw vs Norm",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Suggested/d",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Desired/d",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Set To",
+    right: true
+  }))), /*#__PURE__*/React.createElement("tbody", null, filtered.map(t => {
     const cfg = CLS_CFG[t.cls];
     const recalib = getRecalibrated(t);
     const desiredVal = parseFloat(desiredSpend[t.campKey]);
@@ -7589,7 +7742,8 @@ function SpikeRadarView({
       style: {
         borderBottom: '1px solid #111827',
         cursor: 'pointer',
-        background: isExp ? 'rgba(30,58,95,0.2)' : cfg.bg
+        background: isExp ? 'rgba(30,58,95,0.2)' : cfg.bg,
+        opacity: t.cls === 'LAPSE' ? 0.65 : 1
       }
     }, /*#__PURE__*/React.createElement("td", {
       style: {
@@ -7605,7 +7759,7 @@ function SpikeRadarView({
     }, cfg.label)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
-        maxWidth: 220
+        maxWidth: 210
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -7637,6 +7791,22 @@ function SpikeRadarView({
         color: '#d1d5db'
       }
     }, fmtRs(t.curBudget)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: t.hasCapacity ? '#22c55e' : '#6b7280',
+        fontWeight: 600
+      }
+    }, fmtRs(t.p90Spend)), !t.hasCapacity && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 8
+      }
+    }, "no headroom")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
@@ -7685,11 +7855,11 @@ function SpikeRadarView({
       style: {
         padding: '6px 10px',
         textAlign: 'right',
-        color: '#f97316',
+        color: t.cls === 'LAPSE' ? '#4b5563' : '#f97316',
         fontSize: 10,
         whiteSpace: 'nowrap'
       }
-    }, t.cls === 'RED' ? 'live now' : t.spikeStart ? `${fmtD(t.spikeStart)} → ${fmtD(t.monthEnd)}` : '—'), /*#__PURE__*/React.createElement("td", {
+    }, t.cls === 'RED' ? 'live now' : t.cls === 'LAPSE' ? 'likely none' : t.spikeStart ? `${fmtD(t.spikeStart)} → ${fmtD(t.monthEnd)}` : '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
@@ -7772,7 +7942,7 @@ function SpikeRadarView({
         background: '#070b11'
       }
     }, /*#__PURE__*/React.createElement("td", {
-      colSpan: 14,
+      colSpan: 15,
       style: {
         padding: '14px 16px'
       }
@@ -7801,7 +7971,7 @@ function SpikeRadarView({
       campaign: t.campaign
     }))));
   }), filtered.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
-    colSpan: 14,
+    colSpan: 15,
     style: {
       padding: 40,
       textAlign: 'center',
@@ -9363,7 +9533,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v4 spike-radar + all-type-budgets
+// build: v4.1 demand-gated-radar + sort-filter
 
 </script>
 </body></html>
