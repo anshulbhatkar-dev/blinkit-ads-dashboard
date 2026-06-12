@@ -217,6 +217,7 @@ const SEG_SHORT = {
   'Generic Head': 'Gen Head',
   'Generic Tail': 'Gen Tail',
   'Comp': 'Comp',
+  'Brand': 'Brand',
   'Similar Product Recommendations': 'Reco Similar',
   'Cart Recommendations': 'Reco Cart',
   'Next Product Recommendations': 'Reco Next',
@@ -264,9 +265,14 @@ const VERDICT_CFG = {
     color: '#6b7280',
     bg: 'rgba(107,114,128,0.08)',
     border: 'rgba(107,114,128,0.25)'
+  },
+  'Not Scored': {
+    color: '#60a5fa',
+    bg: 'rgba(96,165,250,0.08)',
+    border: 'rgba(96,165,250,0.25)'
   }
 };
-const VERDICT_ORDER = ['Scale', 'Maintain', 'Optimise', 'Reduce', 'Cut', 'Insufficient Data', 'Inactive', 'Unindexed'];
+const VERDICT_ORDER = ['Scale', 'Maintain', 'Optimise', 'Reduce', 'Cut', 'Insufficient Data', 'Not Scored', 'Inactive', 'Unindexed'];
 const BRAND_COLORS = {
   'Be Bodywise': '#3b82f6',
   'Man Matters': '#8b5cf6',
@@ -683,13 +689,14 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
         name: r.campaign,
         type: r.type,
         hasMetrics: r.hasMetrics,
-        segment: r.segment,
+        segment: null,
+        segCounts: {},
         brand: r.brand,
         category: r.category,
         rows: []
       };
     }
-    if (!groups[key].segment && r.segment) groups[key].segment = r.segment;
+    if (r.segment) groups[key].segCounts[r.segment] = (groups[key].segCounts[r.segment] || 0) + 1;
     if (!groups[key].brand && r.brand) groups[key].brand = r.brand;
     if (!groups[key].category && r.category) groups[key].category = r.category;
     if (r.hasMetrics) groups[key].hasMetrics = true;
@@ -716,7 +723,12 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     const {
       rows
     } = data;
-    const segment = data.segment || campaignIndexMap[key] || 'Unindexed';
+    // Segment = MODE of row-level tags (col AK tracks the live keyword mix).
+    // Rough Analysis index is fallback only — it goes stale (e.g. Brand campaigns
+    // indexed as Generic Tail; the index has no Brand entries at all).
+    const segEntries = Object.entries(data.segCounts || {});
+    const modeSeg = segEntries.length ? segEntries.sort((a, b) => b[1] - a[1])[0][0] : null;
+    const segment = modeSeg || campaignIndexMap[key] || 'Unindexed';
     const {
       brand,
       category,
@@ -896,7 +908,8 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
         if (score7 <= score - 20) trend = 'deteriorating';else if (score7 >= score + 20) trend = 'improving';
       }
     }
-    const verdict = hasMetrics ? computeVerdict(roas, nur, ltvCac, score, bm, isInactive, isInsuf) : 'Insufficient Data';
+    const verdict = segment === 'Brand' ? isInactive ? 'Inactive' : 'Not Scored' // Brand: metrics ready, no scoring by design
+    : hasMetrics ? computeVerdict(roas, nur, ltvCac, score, bm, isInactive, isInsuf) : 'Insufficient Data';
     campaigns.push({
       campaign: data.name,
       brand,
@@ -1056,7 +1069,7 @@ function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignInde
       campaign: r.campaign,
       brand: r.brand,
       category: r.category,
-      segment: campaignIndexMap[r.campaign?.toLowerCase()] || r.segment || 'Other',
+      segment: r.segment || campaignIndexMap[r.campaign?.toLowerCase()] || 'Other',
       rows: []
     };
     kwGroups[kw].campRows[campKey].rows.push(r);
@@ -1216,7 +1229,7 @@ function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}
   win.forEach(r => {
     if (!r.category) return;
     const campKey = (r.campaign || '').toLowerCase();
-    const seg = campaignIndexMap[campKey] || campaignSegMap[campKey] || 'Other';
+    const seg = campaignSegMap[campKey] || campaignIndexMap[campKey] || 'Other';
     const kw = r.keyword || seg; // no keyword → use segment as keyword label
     const camp = r.campaign || '(no campaign)';
     const gk = `${r.brand || ''}||${r.category}||${seg}||${kw}`;
@@ -1320,7 +1333,7 @@ function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {},
       data: {}
     };
     const campKey = (r.campaign || '').toLowerCase();
-    const seg = campaignIndexMap[campKey] || campaignSegMap[campKey] || 'Other';
+    const seg = campaignSegMap[campKey] || campaignIndexMap[campKey] || 'Other';
     const kw = r.keyword || seg;
     const camp = r.campaign || '(no campaign)';
     if (!groups[ck].data[seg]) groups[ck].data[seg] = {};
@@ -8180,7 +8193,9 @@ function DailyBriefView({
   alerts,
   kwAlerts,
   endDate,
-  kwCamp = []
+  kwCamp = [],
+  catCurr = [],
+  catPrev = null
 }) {
   const [done, setDone] = useState(new Set());
   const [copied, setCopied] = useState(false);
@@ -8214,20 +8229,58 @@ function DailyBriefView({
     prev: prevMap[c.campaign.toLowerCase()]
   })).filter(x => x.prev && x.prev.verdict !== x.c.verdict && (x.c.verdict === 'Cut' || x.c.verdict === 'Reduce') && ['Scale', 'Maintain', 'Optimise'].includes(x.prev.verdict)).sort((a, b) => (b.c.drr?.spend || 0) - (a.c.drr?.spend || 0)), [live, prevMap]);
 
-  // Qty drops vs comparison period: drop ≥30% AND baseline ≥5 units/d,
-  // ranked by absolute units/d lost (the quantum)
-  const qtyDrops = useMemo(() => live.map(c => ({
-    c,
-    pv: prevMap[c.campaign.toLowerCase()]
-  })).filter(({
-    c,
-    pv
-  }) => {
-    if (!pv) return false;
-    const pq = pv.drr?.totalQty || 0,
-      cq = c.drr?.totalQty || 0;
-    return pq >= 5 && (pq - cq) / pq >= 0.3;
-  }).sort((a, b) => (b.pv.drr?.totalQty || 0) - (b.c.drr?.totalQty || 0) - ((a.pv.drr?.totalQty || 0) - (a.c.drr?.totalQty || 0))), [live, prevMap]);
+  // Qty drops at KEYWORD level (from Cat Sales aggregation, organic excluded).
+  // Ranked by share-of-sales lost (Δpp of brand×category total incl organic).
+  // A drop that is inline with a category-wide dip = market problem, not ads.
+  const qtyDrops = useMemo(() => {
+    if (!catCurr.length || !catPrev || !catPrev.length) return [];
+    const tot = {},
+      totP = {};
+    catCurr.forEach(r => {
+      const k = r.brand + '||' + r.category;
+      tot[k] = (tot[k] || 0) + (r.drrDQ || 0);
+    });
+    catPrev.forEach(r => {
+      const k = r.brand + '||' + r.category;
+      totP[k] = (totP[k] || 0) + (r.drrDQ || 0);
+    });
+    const pm = {};
+    catPrev.forEach(r => {
+      pm[`${r.brand}||${r.category}||${r.segment}||${r.keyword}`] = r;
+    });
+    const out = [];
+    catCurr.forEach(r => {
+      if (r.segment === 'Organic') return;
+      const pv = pm[`${r.brand}||${r.category}||${r.segment}||${r.keyword}`];
+      if (!pv) return;
+      const pq = pv.drrDQ || 0,
+        cq = r.drrDQ || 0;
+      if (pq < 3 || (pq - cq) / pq < 0.3) return;
+      const ck = r.brand + '||' + r.category;
+      const contribNow = tot[ck] > 0 ? cq / tot[ck] * 100 : null;
+      const contribPrev = totP[ck] > 0 ? pq / totP[ck] * 100 : null;
+      const deltaPP = contribNow != null && contribPrev != null ? contribNow - contribPrev : null;
+      const catChg = totP[ck] > 0 ? (tot[ck] - totP[ck]) / totP[ck] * 100 : null;
+      out.push({
+        r,
+        pv,
+        pq,
+        cq,
+        contribNow,
+        contribPrev,
+        deltaPP,
+        catChg
+      });
+    });
+    return out.sort((a, b) => (a.deltaPP ?? 0) - (b.deltaPP ?? 0));
+  }, [catCurr, catPrev]);
+  const inlineVerdict = (deltaPP, catChg) => {
+    if (deltaPP == null || catChg == null) return '';
+    if (Math.abs(deltaPP) < 0.3 && catChg < -10) return `INLINE with category dip (cat ▼${Math.abs(catChg).toFixed(0)}%) — market issue, not ads`;
+    if (deltaPP < 0 && catChg < -5) return `share lost ON TOP of category dip (cat ▼${Math.abs(catChg).toFixed(0)}%) — ads problem`;
+    if (deltaPP < 0) return `pure share loss (category ${catChg >= 0 ? '+' : ''}${catChg.toFixed(0)}%) — competition or rank`;
+    return '';
+  };
   const cutSavings = cuts.reduce((s, c) => s + (c.drr?.spend || 0), 0);
   const reduceSavings = reduces.reduce((s, c) => s + (c.drr?.spend || 0) * 0.25, 0);
   const alertRisk = alerts.slice(0, 15).reduce((s, a) => s + a.severity, 0);
@@ -8468,23 +8521,35 @@ function DailyBriefView({
       'Extra Sales/d': Math.round(c.iRoasDeltaSales || 0),
       'Incremental ROAS': c.iRoas != null ? +c.iRoas.toFixed(2) : null
     })));
-    // Qty Drops: quantum columns up front so impact-sorting is one click
+    // Qty Drops — keyword level, contribution-led
     addSheet('Qty Drops', qtyDrops.map(({
-      c,
-      pv
-    }) => {
-      const m = metricRow(c, '');
-      delete m['Action / Reason'];
-      return {
-        'Campaign': c.campaign,
-        'Δ units/d': +((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1),
-        'DQty/d prev': +(pv.drr?.totalQty || 0).toFixed(1),
-        'DQty/d now': +(c.drr?.totalQty || 0).toFixed(1),
-        'Drop %': +(((pv.drr?.totalQty || 0) - (c.drr?.totalQty || 0)) / (pv.drr?.totalQty || 1) * 100).toFixed(0),
-        'Driver': qtyDriver(c, pv),
-        ...m
-      };
-    }));
+      r,
+      pq,
+      cq,
+      contribNow,
+      contribPrev,
+      deltaPP,
+      catChg
+    }) => ({
+      'Keyword': r.keyword,
+      'Brand': r.brand || '',
+      'Category': r.category || '',
+      'Segment': SEG_SHORT[r.segment] || r.segment || '',
+      'Δ Contribution pp': deltaPP != null ? +deltaPP.toFixed(2) : null,
+      'Contrib prev %': contribPrev != null ? +contribPrev.toFixed(2) : null,
+      'Contrib now %': contribNow != null ? +contribNow.toFixed(2) : null,
+      'Δ units/d': +(cq - pq).toFixed(1),
+      'DQty/d prev': +pq.toFixed(1),
+      'DQty/d now': +cq.toFixed(1),
+      'Drop %': +((pq - cq) / pq * 100).toFixed(0),
+      'Category Total Δ%': catChg != null ? +catChg.toFixed(1) : null,
+      'Reading': inlineVerdict(deltaPP, catChg),
+      'Spend/d': Math.round(r.drrSpend || 0),
+      'D.ROAS': r.directRoas != null ? +r.directRoas.toFixed(2) : null,
+      'Rank': r.avgPos != null ? +r.avgPos.toFixed(1) : null,
+      'CPM': r.avgCpm != null ? Math.round(r.avgCpm) : null,
+      'Impr/d': r.drrImp != null ? Math.round(r.drrImp) : null
+    })));
     addSheet('Deteriorating', deteriorating.map(c => metricRow(c, `7d score ${Math.round(c.score7)} vs period ${Math.round(c.score)} — collapsing this week, verdict hasn't flipped yet`)));
     addSheet('Verdict Flips', flips.map(({
       c,
@@ -8568,11 +8633,14 @@ function DailyBriefView({
       revertHikes.forEach(c => L.push(`[ ] ${c.campaign} · hike +${fmt(c.iRoasDeltaSpend, 'rsk')}/d returned ${fmt(c.iRoas, 'x')} incremental`));
     }
     if (qtyDrops.length) {
-      L.push('', '— QTY DROPS vs PREV —');
+      L.push('', '— QTY DROPS (keyword level, by share lost) —');
       qtyDrops.slice(0, 10).forEach(({
-        c,
-        pv
-      }) => L.push(`[ ] ${c.campaign} · ${((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1)} units/d (${(pv.drr?.totalQty || 0).toFixed(1)} → ${(c.drr?.totalQty || 0).toFixed(1)}) · ${qtyDriver(c, pv)}`));
+        r,
+        pq,
+        cq,
+        deltaPP,
+        catChg
+      }) => L.push(`[ ] "${r.keyword}" (${r.brand} · ${r.category}) · ${pq.toFixed(1)} → ${cq.toFixed(1)} units/d · share ${deltaPP != null ? (deltaPP > 0 ? '+' : '') + deltaPP.toFixed(1) + 'pp' : '—'} · ${inlineVerdict(deltaPP, catChg)}`));
     }
     if (scales.length) {
       L.push('', '— SCALE —');
@@ -8867,21 +8935,27 @@ function DailyBriefView({
     }
   }, qtyDrops.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDCE6",
-    title: "Qty Drops vs Prev Period",
+    title: "Qty Drops \u2014 Keyword Level",
     accent: "#ef4444",
     count: qtyDrops.length,
-    sub: "ranked by units/d lost \xB7 driver attached"
-  }, qtyDrops.slice(0, 10).map(({
-    c,
-    pv
+    sub: "ranked by share-of-sales lost (\u0394pp) \xB7 INLINE = market dipped too"
+  }, qtyDrops.slice(0, 12).map(({
+    r,
+    pq,
+    cq,
+    contribNow,
+    contribPrev,
+    deltaPP,
+    catChg
   }) => /*#__PURE__*/React.createElement(Row, {
-    key: 'qd_' + c.campaign,
-    id: 'qd_' + c.campaign,
-    name: c.campaign,
-    tag: SEG_SHORT[c.segment] || c.segment,
-    impact: `${((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1)} units/d`,
+    key: 'qd_' + r.brand + r.category + r.segment + r.keyword,
+    id: 'qd_' + r.brand + r.category + r.segment + r.keyword,
+    name: `"${r.keyword}"`,
+    tag: `${r.brand} · ${r.category} · ${SEG_SHORT[r.segment] || r.segment}`,
+    impact: deltaPP != null ? `${deltaPP > 0 ? '+' : ''}${deltaPP.toFixed(1)}pp share` : `${(cq - pq).toFixed(1)}/d`,
     impactColor: "#ef4444",
-    action: `${(pv.drr?.totalQty || 0).toFixed(1)} → ${(c.drr?.totalQty || 0).toFixed(1)}/d (▼${Math.round(((pv.drr?.totalQty || 0) - (c.drr?.totalQty || 0)) / (pv.drr?.totalQty || 1) * 100)}%). Driver: ${qtyDriver(c, pv)}`
+    action: `${pq.toFixed(1)} → ${cq.toFixed(1)} units/d (▼${Math.round((pq - cq) / pq * 100)}%) · share ${contribPrev != null ? contribPrev.toFixed(1) : '—'}% → ${contribNow != null ? contribNow.toFixed(1) : '—'}%`,
+    meta: inlineVerdict(deltaPP, catChg)
   }))), revertHikes.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDCB8",
     title: "Revert Budget Hikes",
@@ -9096,6 +9170,23 @@ function HelpView() {
     n: "3",
     title: "Open Spike Radar \u2014 look at \uD83D\uDD34 and \uD83D\uDFE0 rows only"
   }, "These are budget problems about to happen. The fix is written on each row (click the row to see the full story). \uD83D\uDFE1 and \u26AA rows can wait for Friday.")), /*#__PURE__*/React.createElement(Box, {
+    accent: "#3b82f6"
+  }, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDC54 For executives \u2014 the 10-minute weekly read"), /*#__PURE__*/React.createElement(Step, {
+    n: "1",
+    title: "Daily Brief, top cards only"
+  }, "\"Savings Available\" = money we can stop wasting today. \"\u20B9 At Risk\" = new problems this week. Both small? The account is healthy \u2014 you can stop here."), /*#__PURE__*/React.createElement(Step, {
+    n: "2",
+    title: "Fix List \u2014 read the top 5 rows"
+  }, "The biggest leaks, biggest first, fix written on each. One question to ask the team: \"was this done?\""), /*#__PURE__*/React.createElement(Step, {
+    n: "3",
+    title: "Spike Radar \u2014 summary cards"
+  }, "\"Drawn Over Budget MTD\" = money Blinkit already took beyond plan this month. Red count = it's happening right now."), /*#__PURE__*/React.createElement(Step, {
+    n: "4",
+    title: "\u23F3 No Action \u2014 the accountability tab"
+  }, "Anything here is a known problem nobody acted on, with the \u20B9 burned counter running. Should be empty."), /*#__PURE__*/React.createElement(Step, {
+    n: "5",
+    title: "Detail? One click"
+  }, "\u2B07 Export Excel gives every list as a filterable sheet. No need to learn the dashboard.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#f59e0b"
   }, /*#__PURE__*/React.createElement(H, null, "\u2301 Daily Brief \u2014 what each box means"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
@@ -9111,7 +9202,11 @@ function HelpView() {
     color: "#f59e0b"
   }, " Optimise"), " = one thing is wrong, the row says exactly what to change."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "\uD83D\uDCE6 Qty Drops"), " \u2014 campaigns selling fewer units than last month. The row tells you why: lost visibility, weaker conversion, or rank slipped."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, "\uD83D\uDCE6 Qty Drops"), " \u2014 keywords selling fewer units than last month. The key number is", /*#__PURE__*/React.createElement(Hi, null, " \"pp share\""), " \u2014 did this keyword's SHARE of the category's sales fall, or did the whole category just have a slow month?", /*#__PURE__*/React.createElement(Hi, {
+    color: "#22c55e"
+  }, " \"INLINE with category dip\""), " = market slowed, ads are fine, don't panic.", /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, " \"share lost\""), " = competitors or rank took your sales \u2014 act on that one."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
   }, "\uD83D\uDCB8 Revert Budget Hikes"), " \u2014 you raised a budget recently, and the extra money is NOT bringing extra sales. Put the budget back to what it was."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#f59e0b"
@@ -9162,6 +9257,8 @@ function HelpView() {
   }, "What you pay for 1,000 people to see the ad. It's your bid \u2014 raise it to show up more / higher."), /*#__PURE__*/React.createElement(Word, {
     w: "Rank"
   }, "Your average position on the page. 1 = top. Bigger number = buried lower."), /*#__PURE__*/React.createElement(Word, {
+    w: "\u0394 Contribution (pp)"
+  }, "How much of the category's total sales this keyword used to bring vs now, in percentage points. -2pp = it used to deliver 6% of sales, now 4% \u2014 someone took that share."), /*#__PURE__*/React.createElement(Word, {
     w: "Util %"
   }, "How much of the daily budget actually got spent. 95% = budget nearly finished \u2014 it's capping you. 40% = money sitting unused."), /*#__PURE__*/React.createElement(Word, {
     w: "Hrs Live/d"
@@ -9701,7 +9798,9 @@ function App() {
     alerts: alerts,
     kwAlerts: kwAlerts,
     endDate: bounds.max,
-    kwCamp: kwCamp
+    kwCamp: kwCamp,
+    catCurr: catCurr,
+    catPrev: catPrev
   }), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns
@@ -9769,7 +9868,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v4.4 newbie-guide-tab
+// build: v5.1 brand-not-scored
 
 </script>
 </body></html>
