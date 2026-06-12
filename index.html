@@ -51,6 +51,7 @@ const RAW_SHEET_CFGS = [{
 const CONDITIONS_GID = 988587276;
 const CAMPAIGN_IDX_GID = 1095613721; // "Rough Analysis" — campaign → segment index
 const SALES_IMPORT_GID = 645442496; // Total sales (organic + ads) by date/brand/category
+const BK_SEARCH_GID = 1321541424; // "BK Import Search" — Blinkit search volume per keyword
 
 const BENCHMARKS = {
   'Generic Head': {
@@ -586,7 +587,39 @@ async function fetchAllDataFromSheets() {
     }); // fire-and-forget
     return text;
   };
-  const [condText, idxText, salesText, ...rawTexts] = await Promise.all([fetchWithCache(CONDITIONS_GID), fetchWithCache(CAMPAIGN_IDX_GID), fetchWithCache(SALES_IMPORT_GID), ...RAW_SHEET_CFGS.map(c => fetchWithCache(c.gid))]);
+  const [condText, idxText, salesText, bkText, ...rawTexts] = await Promise.all([fetchWithCache(CONDITIONS_GID), fetchWithCache(CAMPAIGN_IDX_GID), fetchWithCache(SALES_IMPORT_GID), fetchWithCache(BK_SEARCH_GID).catch(() => ''),
+  // optional feed — dashboard works without it
+  ...RAW_SHEET_CFGS.map(c => fetchWithCache(c.gid))]);
+
+  // Parse BK search volume: hdr rows 1-4, A=keyword, B=type, C=comp brand,
+  // D=category, E=trending volume (search drr), F+= monthly columns (trend)
+  const kwVolume = {};
+  if (bkText) {
+    parseCSV(bkText).slice(4).forEach(row => {
+      const kw = String(row[0] || '').trim().toLowerCase();
+      if (!kw) return;
+      const drr = parseFloat(String(row[4] || '').replace(/,/g, '')) || 0;
+      if (drr <= 0) return;
+      const monthly = [];
+      for (let i = 5; i < row.length; i++) {
+        const v = parseFloat(String(row[i] || '').replace(/,/g, ''));
+        if (!isNaN(v) && v > 0) monthly.push(v);
+      }
+      let trend = null;
+      if (monthly.length >= 2) {
+        const prev = monthly[monthly.length - 2],
+          cur = monthly[monthly.length - 1];
+        if (prev > 0) trend = (cur - prev) / prev;
+      }
+      kwVolume[kw] = {
+        drr,
+        type: String(row[1] || '').trim(),
+        compBrand: String(row[2] || '').trim(),
+        category: String(row[3] || '').trim(),
+        trend
+      };
+    });
+  }
 
   // Parse LTV from Conditions sheet
   const ltvMap = {
@@ -648,6 +681,7 @@ async function fetchAllDataFromSheets() {
     ltvMap,
     campaignIndexMap,
     salesAgg,
+    kwVolume,
     cutoffDate
   };
 }
@@ -1473,7 +1507,7 @@ function getDateBounds(allRows) {
 // choke, conversion breaks. Always runs on the latest data date (bounds.max),
 // independent of the selected analysis period.
 
-function computeAlerts(allRows, refDate, campaignIndexMap = {}) {
+function computeAlerts(allRows, refDate, campaignIndexMap = {}, ladder = {}) {
   if (!refDate) return [];
   const DAY = 864e5;
   const dayKey = d => d.toDateString();
@@ -1655,8 +1689,12 @@ function computeAlerts(allRows, refDate, campaignIndexMap = {}) {
       const cbArr = baseKeys.map(k => cd[k]).filter(v => v > 0);
       const catBase = cbArr.length ? cbArr.reduce((s, v) => s + v, 0) / cbArr.length : null;
       const catRec = recentKeys.reduce((s, k) => s + (cd[k] || 0), 0) / recentKeys.length;
-      if (baseHours > 0 && recHours < baseHours * 0.7) cause = 'Hours live dropped — budget exhausting early → raise budget';else if (rankWorse && baseCpm != null && recCpm != null && recCpm <= baseCpm * 1.05) cause = 'Outbid — rank slipped at flat CPM → competitor intensified, raise CPM';else if (catBase && catRec < catBase * 0.8) cause = 'Category-wide impression dip — demand issue, hold bids';else cause = 'No single cause — check delisting / serving status in Blinkit panel';
+      if (baseHours > 0 && recHours < baseHours * 0.7) cause = 'Hours live dropped — budget exhausting early → raise budget';else if (rankWorse && baseCpm != null && recCpm != null && recCpm <= baseCpm * 1.05) {
+        const sg = suggestCpmFor(ladder, c.category, baseRank != null ? Math.round(baseRank) : null);
+        cause = 'Outbid — rank slipped at flat CPM → competitor intensified, raise CPM' + (sg ? ` to ~₹${sg} (category ladder)` : ' (+15% probe — no ladder data at target rank)');
+      } else if (catBase && catRec < catBase * 0.8) cause = 'Category-wide impression dip — demand issue, hold bids';else if (imprDrop && !rankWorse && baseHours > 0 && recHours >= baseHours * 0.9 && baseCpm != null && recCpm != null && recCpm <= baseCpm * 1.05) cause = '🌙 Daypart squeeze suspected — rank & hours flat, impressions down. Likely served off-peak when competitor budgets exhaust. Watch 1 more day before acting';else cause = 'No single cause — check delisting / serving status in Blinkit panel';
     }
+    const isDaypart = cause != null && cause.indexOf('🌙') === 0;
     alerts.push({
       campaign: c.name,
       brand: c.brand,
@@ -1668,7 +1706,7 @@ function computeAlerts(allRows, refDate, campaignIndexMap = {}) {
       recSpend,
       baseImpr,
       recImpr,
-      severity: Math.max(...flags.map(f => f.pct)) * baseSpend
+      severity: Math.max(...flags.map(f => f.pct)) * baseSpend * (isDaypart ? 0.5 : 1) // 🌙 soft-flag
     });
   });
   return alerts.sort((a, b) => b.severity - a.severity);
@@ -1676,7 +1714,7 @@ function computeAlerts(allRows, refDate, campaignIndexMap = {}) {
 
 // Keyword-level: same 2d vs 7d logic on Search rows grouped by keyword.
 // Bid wars show up here first — a head-term rank slip hides inside campaign aggregates.
-function computeKeywordAlerts(allRows, refDate) {
+function computeKeywordAlerts(allRows, refDate, ladder = {}, kwVolume = {}) {
   if (!refDate) return [];
   const DAY = 864e5;
   const dayKey = d => d.toDateString();
@@ -1740,6 +1778,9 @@ function computeKeywordAlerts(allRows, refDate) {
     const R = f => recentKeys.reduce((s, k) => s + (g.days[k] ? f(g.days[k]) : 0), 0) / recentKeys.length;
     const baseSpend = B(d => d.spend);
     if (baseSpend < 200) return;
+    // demand gate: keyword has negligible Blinkit search volume → not worth alerting
+    const volInfo = kwVolume[g.keyword.toLowerCase()];
+    if (volInfo && volInfo.drr < 20) return;
     const baseImpr = B(d => d.impr),
       recImpr = R(d => d.impr);
     const recSpend = R(d => d.spend);
@@ -1791,7 +1832,10 @@ function computeKeywordAlerts(allRows, refDate) {
     });
     if (flags.length === 0) return;
     let cause = null;
-    if (rankWorse && baseCpm != null && recCpm != null && recCpm <= baseCpm * 1.05) cause = 'Outbid at flat CPM — competitor pushed this keyword';
+    if (rankWorse && baseCpm != null && recCpm != null && recCpm <= baseCpm * 1.05) {
+      const sg = suggestCpmFor(ladder, g.category, baseRank != null ? Math.round(baseRank) : null);
+      cause = 'Outbid at flat CPM — competitor pushed this keyword' + (sg ? ` → raise CPM to ~₹${sg} (category ladder)` : ' → +15% CPM probe');
+    }
     const topCamp = Object.entries(g.campSpend).sort((a, b) => b[1] - a[1])[0];
     alerts.push({
       keyword: g.keyword,
@@ -8161,7 +8205,8 @@ function LoadingScreen({
         rawTexts,
         ltvMap,
         campaignIndexMap,
-        salesAgg
+        salesAgg,
+        kwVolume
       } = await fetchAllDataFromSheets();
       setStep('Processing & scoring campaigns…');
       const allRows = parseAllRows(rawTexts);
@@ -8170,7 +8215,8 @@ function LoadingScreen({
         allRows,
         ltvMap,
         campaignIndexMap,
-        salesAgg
+        salesAgg,
+        kwVolume
       });
     } catch (e) {
       setStatus('error');
@@ -9785,6 +9831,1232 @@ function ReallocatorView({
   }, "How marginal ROAS is estimated: each campaign's days are DOW-normalized (Sunday demand \u2260 Tuesday demand), split into spend terciles, and marginal = extra sales \xF7 extra spend between mid and high spend days. It answers \"what does the NEXT rupee buy here\" \u2014 different from average ROAS, which includes the easy first rupees. Estimates are observational; that's why moves are capped at 15% and meant to be re-measured weekly, not done in one shot."));
 }
 
+// ─── CPM LADDER ──────────────────────────────────────────────────────────────
+// Your own auction receipts: per category, what CPM bands bought what rank over
+// the last 14 days. Powers "raise CPM to ~₹X" instead of "raise CPM".
+
+function buildCpmLadder(allRows, refDate) {
+  if (!refDate) return {};
+  const DAY = 864e5;
+  const start = new Date(refDate.getTime() - 13 * DAY);
+  const cats = {};
+  allRows.forEach(r => {
+    if (r.type !== 'Search' || !r.date || r.date < start || r.date > refDate) return;
+    if (!(r.cpm > 0) || !(r.position > 0) || !(r.impressions > 0) || !r.category) return;
+    const ck = r.category.toLowerCase();
+    (cats[ck] = cats[ck] || []).push({
+      cpm: r.cpm,
+      pos: r.position,
+      imp: r.impressions
+    });
+  });
+  const ladder = {};
+  Object.entries(cats).forEach(([ck, pts]) => {
+    if (pts.length < 20) return;
+    const bands = {};
+    pts.forEach(p => {
+      const b = Math.floor(p.cpm / 50) * 50;
+      if (!bands[b]) bands[b] = {
+        n: 0,
+        i: 0
+      };
+      bands[b].n += p.pos * p.imp;
+      bands[b].i += p.imp;
+    });
+    ladder[ck] = Object.entries(bands).map(([b, v]) => ({
+      band: +b,
+      rank: v.n / v.i,
+      imp: v.i
+    })).filter(x => x.imp > 500).sort((a, b) => a.band - b.band);
+  });
+  return ladder;
+}
+function suggestCpmFor(ladder, category, targetRank) {
+  const L = ladder[(category || '').toLowerCase()];
+  if (!L || !L.length || targetRank == null) return null;
+  const hit = L.find(x => x.rank <= targetRank);
+  if (!hit) return null;
+  return Math.round((hit.band + 25) * 1.05 / 5) * 5;
+}
+
+// ─── CHANGE LEDGER ───────────────────────────────────────────────────────────
+// Every budget/CPM change detected FROM THE DATA (no checkboxes needed), its
+// measured impact (pre-7d vs post-7d), and whether the dashboard's verdict at
+// that moment suggested it (Aligned / Contrary / Unprompted).
+
+function computeChangeLedger(allRows, ltvMap, refDate) {
+  if (!refDate) return {
+    events: [],
+    summary: {}
+  };
+  const camps = {};
+  allRows.forEach(r => {
+    if (!r.date) return;
+    const ck = r.campaign.toLowerCase();
+    if (!camps[ck]) camps[ck] = {
+      name: r.campaign,
+      brand: r.brand,
+      category: r.category,
+      segCounts: {},
+      days: {}
+    };
+    const c = camps[ck];
+    if (r.segment) c.segCounts[r.segment] = (c.segCounts[r.segment] || 0) + 1;
+    const dk = r.date.toDateString();
+    if (!c.days[dk]) c.days[dk] = {
+      date: r.date,
+      budget: 0,
+      cpm: 0,
+      spend: 0,
+      sales: 0,
+      imp: 0,
+      nu: 0,
+      qty: 0,
+      posN: 0,
+      posI: 0
+    };
+    const d = c.days[dk];
+    d.budget = Math.max(d.budget, r.budget || 0);
+    d.cpm = Math.max(d.cpm, r.cpm || 0);
+    d.spend += r.spend || 0;
+    d.sales += r.directSales || 0;
+    d.imp += r.impressions || 0;
+    d.nu += r.newUsers || 0;
+    d.qty += (r.directQty || 0) + (r.indirectQty || 0);
+    if (r.position > 0 && r.impressions > 0) {
+      d.posN += r.position * r.impressions;
+      d.posI += r.impressions;
+    }
+  });
+  const events = [];
+  Object.values(camps).forEach(c => {
+    const segE = Object.entries(c.segCounts);
+    const seg = segE.length ? segE.sort((a, b) => b[1] - a[1])[0][0] : null;
+    const days = Object.values(c.days).sort((a, b) => a.date - b.date);
+    let prevB = null,
+      prevC = null;
+    const evs = [];
+    days.forEach((d, i) => {
+      if (prevB != null && d.budget > 0 && Math.abs(d.budget - prevB) > 1) evs.push({
+        i,
+        kind: 'Budget',
+        from: prevB,
+        to: d.budget,
+        date: d.date
+      });
+      if (prevC != null && d.cpm > 0 && Math.abs(d.cpm - prevC) > 0.5) evs.push({
+        i,
+        kind: 'CPM',
+        from: prevC,
+        to: d.cpm,
+        date: d.date
+      });
+      if (d.budget > 0) prevB = d.budget;
+      if (d.cpm > 0) prevC = d.cpm;
+    });
+    evs.forEach((ev, idx) => {
+      const pre = days.slice(Math.max(0, ev.i - 7), ev.i);
+      const nextI = idx + 1 < evs.length ? evs[idx + 1].i : days.length;
+      const post = days.slice(ev.i, Math.min(ev.i + 7, nextI));
+      if (pre.length < 3 || post.length < 3) return;
+      const avg = (arr, f) => arr.reduce((s, d) => s + f(d), 0) / arr.length;
+      const preSp = avg(pre, d => d.spend),
+        postSp = avg(post, d => d.spend);
+      const preSa = avg(pre, d => d.sales),
+        postSa = avg(post, d => d.sales);
+      const preImp = avg(pre, d => d.imp),
+        postImp = avg(post, d => d.imp);
+      const wr = arr => {
+        let n = 0,
+          i2 = 0;
+        arr.forEach(d => {
+          n += d.posN;
+          i2 += d.posI;
+        });
+        return i2 > 0 ? n / i2 : null;
+      };
+
+      // point-in-time verdict: the campaign's 14 days BEFORE the change
+      const pre14 = days.slice(Math.max(0, ev.i - 14), ev.i);
+      const s14 = pre14.reduce((s, d) => s + d.spend, 0),
+        sa14 = pre14.reduce((s, d) => s + d.sales, 0);
+      const nu14 = pre14.reduce((s, d) => s + d.nu, 0),
+        q14 = pre14.reduce((s, d) => s + d.qty, 0);
+      const bm = BENCHMARKS[seg] || null;
+      const ltv = ltvMap[(c.category || '').toLowerCase()] || null;
+      let verdictAt = '—',
+        suggestedDir = null;
+      if (bm && seg !== 'Brand' && s14 > 0) {
+        const roas = sa14 / s14;
+        const nur = q14 > 0 ? nu14 / q14 : null;
+        const cac = nu14 > 0 ? s14 / nu14 : null;
+        const lc = ltv && cac ? ltv / cac : null;
+        const rs = metricScore(roas, bm.roasF, bm.roasH, bm.roasS);
+        const ns = nur != null ? metricScore(nur, bm.nurF, bm.nurH, bm.nurS) : null;
+        const ls = lc != null ? metricScore(lc, bm.ltvF, bm.ltvH, bm.ltvS) : null;
+        const sc = rs != null && ns != null && ls != null ? rs * bm.roasWt + ns * bm.nurWt + ls * bm.ltvWt : null;
+        verdictAt = computeVerdict(roas, nur, lc, sc, bm, false, pre14.length < 10 && s14 < 3000);
+        suggestedDir = verdictAt === 'Cut' || verdictAt === 'Reduce' ? 'down' : verdictAt === 'Scale' ? 'up' : null;
+      }
+      const dir = ev.to > ev.from ? 'up' : 'down';
+      const align = suggestedDir == null ? 'Unprompted' : dir === suggestedDir ? 'Aligned' : 'Contrary';
+      const dSp = postSp - preSp;
+      events.push({
+        campaign: c.name,
+        brand: c.brand,
+        category: c.category,
+        seg,
+        kind: ev.kind,
+        date: ev.date,
+        from: ev.from,
+        to: ev.to,
+        dir,
+        dSpend: dSp,
+        dSales: postSa - preSa,
+        dImp: postImp - preImp,
+        preRank: wr(pre),
+        postRank: wr(post),
+        iRoas: ev.kind === 'Budget' && dSp > 100 ? (postSa - preSa) / dSp : null,
+        preRoas: preSp > 0 ? preSa / preSp : null,
+        postRoas: postSp > 0 ? postSa / postSp : null,
+        verdictAt,
+        align,
+        postDays: post.length
+      });
+    });
+  });
+  events.sort((a, b) => b.date - a.date);
+  const aligned = events.filter(e => e.align === 'Aligned');
+  const contrary = events.filter(e => e.align === 'Contrary');
+  const avgD = arr => arr.length ? arr.reduce((s, e) => s + e.dSales, 0) / arr.length : null;
+  return {
+    events,
+    summary: {
+      total: events.length,
+      aligned: aligned.length,
+      contrary: contrary.length,
+      unprompted: events.filter(e => e.align === 'Unprompted').length,
+      alignedAvgDSales: avgD(aligned),
+      contraryAvgDSales: avgD(contrary)
+    }
+  };
+}
+function ChangeLedgerView({
+  ledger
+}) {
+  const [brandF, setBrandF] = useState([]);
+  const [kindF, setKindF] = useState('All');
+  const [alignF, setAlignF] = useState('All');
+  const fmtRs = n => n == null ? '—' : (n < 0 ? '−' : '') + (Math.abs(n) >= 1000 ? '₹' + (Math.abs(n) / 1000).toFixed(1) + 'K' : '₹' + Math.round(Math.abs(n)));
+  const brands = [...new Set(ledger.events.map(e => e.brand).filter(Boolean))].sort();
+  const shown = ledger.events.filter(e => (!brandF.length || brandF.includes(e.brand)) && (kindF === 'All' || e.kind === kindF) && (alignF === 'All' || e.align === alignF)).slice(0, 250);
+  const ALIGN_CFG = {
+    Aligned: {
+      color: '#22c55e',
+      label: '✓ Aligned'
+    },
+    Contrary: {
+      color: '#ef4444',
+      label: '✗ Contrary'
+    },
+    Unprompted: {
+      color: '#6b7280',
+      label: '· Unprompted'
+    }
+  };
+  const s = ledger.summary;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, [{
+    label: 'Changes Detected',
+    val: s.total || 0,
+    color: '#3b82f6'
+  }, {
+    label: '✓ Aligned With Dashboard',
+    val: s.aligned || 0,
+    color: '#22c55e'
+  }, {
+    label: '✗ Contrary',
+    val: s.contrary || 0,
+    color: '#ef4444'
+  }, {
+    label: 'Unprompted',
+    val: s.unprompted || 0,
+    color: '#6b7280'
+  }, {
+    label: 'Aligned Avg Impact',
+    val: s.alignedAvgDSales != null ? `${s.alignedAvgDSales >= 0 ? '+' : ''}${fmtRs(s.alignedAvgDSales)}/d` : '—',
+    color: '#22c55e'
+  }, {
+    label: 'Contrary Avg Impact',
+    val: s.contraryAvgDSales != null ? `${s.contraryAvgDSales >= 0 ? '+' : ''}${fmtRs(s.contraryAvgDSales)}/d` : '—',
+    color: '#ef4444'
+  }].map(({
+    label,
+    val,
+    color
+  }) => /*#__PURE__*/React.createElement("div", {
+    key: label,
+    style: {
+      flex: 1,
+      minWidth: 130,
+      background: '#0d1117',
+      border: '1px solid #1f2937',
+      borderRadius: 8,
+      padding: '12px 14px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color,
+      fontSize: 17,
+      fontWeight: 700
+    }
+  }, val)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, ['All', 'Budget', 'CPM'].map(k => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    onClick: () => setKindF(k),
+    style: {
+      background: kindF === k ? '#1e3a5f' : 'transparent',
+      color: kindF === k ? '#93c5fd' : '#6b7280',
+      border: `1px solid ${kindF === k ? '#2563eb' : '#1f2937'}`,
+      borderRadius: 999,
+      padding: '3px 12px',
+      fontSize: 10,
+      cursor: 'pointer'
+    }
+  }, k)), ['All', 'Aligned', 'Contrary', 'Unprompted'].map(a => /*#__PURE__*/React.createElement("button", {
+    key: a,
+    onClick: () => setAlignF(a),
+    style: {
+      background: alignF === a ? '#1e3a5f' : 'transparent',
+      color: alignF === a ? '#93c5fd' : '#6b7280',
+      border: `1px solid ${alignF === a ? '#2563eb' : '#1f2937'}`,
+      borderRadius: 999,
+      padding: '3px 12px',
+      fontSize: 10,
+      cursor: 'pointer'
+    }
+  }, a)), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: brandF,
+    onChange: setBrandF,
+    options: brands,
+    placeholder: "All Brands"
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginLeft: 'auto'
+    }
+  }, "every budget/CPM change found in the data \xB7 impact = 7d after vs 7d before \xB7 alignment = what the verdict said the day before the change")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto',
+      borderRadius: 10,
+      border: '1px solid #1f2937',
+      maxHeight: '66vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      borderBottom: '1px solid #1f2937'
+    }
+  }, ['Date', 'Campaign', 'Change', 'Verdict @ Time', 'Alignment', 'ΔSpend/d', 'ΔSales/d', 'iROAS', 'ROAS pre→post', 'Rank pre→post'].map(h => /*#__PURE__*/React.createElement("th", {
+    key: h,
+    style: {
+      padding: '7px 10px',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      zIndex: 2,
+      textAlign: ['Date', 'Campaign', 'Change', 'Verdict @ Time', 'Alignment'].includes(h) ? 'left' : 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, shown.map((e, i) => {
+    const ac = ALIGN_CFG[e.align];
+    return /*#__PURE__*/React.createElement("tr", {
+      key: i,
+      style: {
+        borderBottom: '1px solid #111827',
+        background: e.align === 'Contrary' ? 'rgba(239,68,68,0.03)' : 'transparent'
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        color: '#9ca3af',
+        whiteSpace: 'nowrap'
+      }
+    }, e.date.toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short'
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        maxWidth: 220
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#e5e7eb',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      },
+      title: e.campaign
+    }, e.campaign), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 8
+      }
+    }, e.brand, " \xB7 ", SEG_SHORT[e.seg] || e.seg)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: e.dir === 'up' ? '#22c55e' : '#f97316',
+        fontSize: 10,
+        fontWeight: 600
+      }
+    }, e.kind, " \u20B9", Math.round(e.from).toLocaleString('en-IN'), " \u2192 \u20B9", Math.round(e.to).toLocaleString('en-IN'))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px'
+      }
+    }, /*#__PURE__*/React.createElement(VBadge, {
+      verdict: e.verdictAt === '—' ? 'Unindexed' : e.verdictAt,
+      sm: true
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: ac.color,
+        fontSize: 10,
+        fontWeight: 700
+      }
+    }, ac.label)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        color: '#9ca3af'
+      }
+    }, e.dSpend >= 0 ? '+' : '', fmtRs(e.dSpend)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        fontWeight: 700,
+        color: e.dSales >= 0 ? '#22c55e' : '#ef4444'
+      }
+    }, e.dSales >= 0 ? '+' : '', fmtRs(e.dSales)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        color: e.iRoas == null ? '#374151' : e.iRoas < 1 ? '#ef4444' : '#22c55e'
+      }
+    }, e.iRoas != null ? e.iRoas.toFixed(2) + 'x' : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        color: '#9ca3af',
+        fontSize: 10
+      }
+    }, e.preRoas != null ? e.preRoas.toFixed(2) : '—', " \u2192 ", e.postRoas != null ? e.postRoas.toFixed(2) : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        color: '#9ca3af',
+        fontSize: 10
+      }
+    }, e.preRank != null ? e.preRank.toFixed(1) : '—', " \u2192 ", e.postRank != null ? e.postRank.toFixed(1) : '—'));
+  }), shown.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    colSpan: 10,
+    style: {
+      padding: 40,
+      textAlign: 'center',
+      color: '#4b5563'
+    }
+  }, "No changes match the filter."))))));
+}
+
+// ─── COMP TRACKER ────────────────────────────────────────────────────────────
+// Competitor pressure per brand×category: comp-keyword CPM trend, our rank,
+// new users gained/lost, impressions — current 14d vs prior 14d. Heat 0–100.
+
+function computeCompTracker(allRows, refDate) {
+  if (!refDate) return {
+    rows: []
+  };
+  const DAY = 864e5;
+  const curStart = new Date(refDate.getTime() - 13 * DAY);
+  const prvStart = new Date(refDate.getTime() - 27 * DAY);
+  const mkB = () => ({
+    cpmN: 0,
+    cpmI: 0,
+    posN: 0,
+    posI: 0,
+    imp: 0,
+    spend: 0,
+    sales: 0,
+    nu: 0,
+    days: new Set(),
+    compSpend: 0,
+    compImp: 0,
+    compCpmN: 0,
+    compCpmI: 0,
+    compPosN: 0,
+    compPosI: 0
+  });
+  const grp = {};
+  allRows.forEach(r => {
+    if (r.type !== 'Search' || !r.date || r.date < prvStart || r.date > refDate || !r.category) return;
+    const k = `${r.brand || ''}||${r.category}`;
+    if (!grp[k]) grp[k] = {
+      brand: r.brand,
+      category: r.category,
+      cur: mkB(),
+      prv: mkB()
+    };
+    const b = r.date >= curStart ? grp[k].cur : grp[k].prv;
+    b.imp += r.impressions || 0;
+    b.spend += r.spend || 0;
+    b.sales += r.directSales || 0;
+    b.nu += r.newUsers || 0;
+    b.days.add(r.date.toDateString());
+    if (r.cpm > 0 && r.impressions > 0) {
+      b.cpmN += r.cpm * r.impressions;
+      b.cpmI += r.impressions;
+    }
+    if (r.position > 0 && r.impressions > 0) {
+      b.posN += r.position * r.impressions;
+      b.posI += r.impressions;
+    }
+    if (r.segment === 'Comp') {
+      b.compSpend += r.spend || 0;
+      b.compImp += r.impressions || 0;
+      if (r.cpm > 0 && r.impressions > 0) {
+        b.compCpmN += r.cpm * r.impressions;
+        b.compCpmI += r.impressions;
+      }
+      if (r.position > 0 && r.impressions > 0) {
+        b.compPosN += r.position * r.impressions;
+        b.compPosI += r.impressions;
+      }
+    }
+  });
+  const rows = [];
+  Object.values(grp).forEach(g => {
+    const cd = g.cur.days.size || 1,
+      pd = g.prv.days.size || 1;
+    if (g.cur.spend / cd < 300 || g.prv.days.size < 7) return;
+    const w = (n, i) => i > 0 ? n / i : null;
+    const cpmC = w(g.cur.cpmN, g.cur.cpmI),
+      cpmP = w(g.prv.cpmN, g.prv.cpmI);
+    const rkC = w(g.cur.posN, g.cur.posI),
+      rkP = w(g.prv.posN, g.prv.posI);
+    const ccpmC = w(g.cur.compCpmN, g.cur.compCpmI),
+      ccpmP = w(g.prv.compCpmN, g.prv.compCpmI);
+    const crkC = w(g.cur.compPosN, g.cur.compPosI),
+      crkP = w(g.prv.compPosN, g.prv.compPosI);
+    const nuC = g.cur.nu / cd,
+      nuP = g.prv.nu / pd;
+    const cpmD = cpmC != null && cpmP > 0 ? (cpmC - cpmP) / cpmP * 100 : null;
+    const ccpmD = ccpmC != null && ccpmP > 0 ? (ccpmC - ccpmP) / ccpmP * 100 : null;
+    const rkD = rkC != null && rkP != null ? rkC - rkP : null;
+    const crkD = crkC != null && crkP != null ? crkC - crkP : null;
+    const nuD = nuP > 0 ? (nuC - nuP) / nuP * 100 : null;
+    let heat = 0;
+    if (ccpmD != null) heat += ccpmD >= 20 ? 40 : ccpmD >= 10 ? 25 : ccpmD >= 5 ? 10 : 0;
+    if (crkD != null) heat += crkD >= 2 ? 30 : crkD >= 1 ? 18 : 0;
+    if (rkD != null) heat += rkD >= 1.5 ? 15 : rkD >= 0.8 ? 8 : 0;
+    if (nuD != null) heat += nuD <= -20 ? 15 : nuD <= -10 ? 8 : 0;
+    heat = Math.min(100, heat);
+    rows.push({
+      brand: g.brand,
+      category: g.category,
+      cpmC,
+      cpmD,
+      ccpmC,
+      ccpmD,
+      rkC,
+      rkD,
+      crkC,
+      crkD,
+      nuC,
+      nuP,
+      nuD,
+      compSpendD: g.cur.compSpend / cd,
+      heat
+    });
+  });
+  rows.sort((a, b) => b.heat - a.heat);
+  return {
+    rows
+  };
+}
+function CompTrackerView({
+  comp
+}) {
+  const [brandF, setBrandF] = useState([]);
+  const brands = [...new Set(comp.rows.map(r => r.brand).filter(Boolean))].sort();
+  const shown = brandF.length ? comp.rows.filter(r => brandF.includes(r.brand)) : comp.rows;
+  const heatColor = h => h >= 60 ? '#ef4444' : h >= 35 ? '#f97316' : h >= 15 ? '#f59e0b' : '#22c55e';
+  const cell = (v, fmt, badWhenUp = true) => {
+    if (v == null) return /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#374151'
+      }
+    }, "\u2014");
+    const bad = badWhenUp ? v > 0 : v < 0;
+    const col = Math.abs(v) < (fmt === 'pp' ? 0.3 : 3) ? '#6b7280' : bad ? '#ef4444' : '#22c55e';
+    const txt = fmt === 'pp' ? `${v > 0 ? '+' : ''}${v.toFixed(1)}` : `${v > 0 ? '+' : ''}${v.toFixed(0)}%`;
+    return /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: col,
+        fontWeight: 600
+      }
+    }, txt);
+  };
+  const totNuC = shown.reduce((s, r) => s + (r.nuC || 0), 0);
+  const totNuP = shown.reduce((s, r) => s + (r.nuP || 0), 0);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, [{
+    label: 'Hottest Category',
+    val: shown[0] ? `${shown[0].category} (${shown[0].heat})` : '—',
+    color: shown[0] ? heatColor(shown[0].heat) : '#6b7280'
+  }, {
+    label: 'Categories Under Pressure (heat ≥35)',
+    val: shown.filter(r => r.heat >= 35).length,
+    color: '#f97316'
+  }, {
+    label: 'New Users/d (14d)',
+    val: Math.round(totNuC).toLocaleString('en-IN'),
+    color: '#8b5cf6'
+  }, {
+    label: 'vs Prior 14d',
+    val: totNuP > 0 ? `${(totNuC - totNuP) / totNuP * 100 >= 0 ? '+' : ''}${((totNuC - totNuP) / totNuP * 100).toFixed(0)}%` : '—',
+    color: totNuC >= totNuP ? '#22c55e' : '#ef4444'
+  }].map(({
+    label,
+    val,
+    color
+  }) => /*#__PURE__*/React.createElement("div", {
+    key: label,
+    style: {
+      flex: 1,
+      minWidth: 150,
+      background: '#0d1117',
+      border: '1px solid #1f2937',
+      borderRadius: 8,
+      padding: '12px 14px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color,
+      fontSize: 16,
+      fontWeight: 700
+    }
+  }, val)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement(MultiSelect, {
+    values: brandF,
+    onChange: setBrandF,
+    options: brands,
+    placeholder: "All Brands"
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginLeft: 'auto'
+    }
+  }, "current 14d vs prior 14d \xB7 heat = comp-keyword CPM inflation + rank slips + new-user loss \xB7 \uD83C\uDF19 daypart squeezes are soft-flagged in alerts, not here")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto',
+      borderRadius: 10,
+      border: '1px solid #1f2937',
+      maxHeight: '68vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      borderBottom: '1px solid #1f2937'
+    }
+  }, ['Heat', 'Brand · Category', 'Comp CPM (Δ%)', 'Comp Rank (Δ)', 'Our CPM (Δ%)', 'Our Rank (Δ)', 'NU/d (Δ%)', 'Comp Spend/d', 'Read'].map(h => /*#__PURE__*/React.createElement("th", {
+    key: h,
+    style: {
+      padding: '7px 10px',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      zIndex: 2,
+      textAlign: ['Heat', 'Brand · Category', 'Read'].includes(h) ? 'left' : 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, shown.map((r, i) => {
+    const hc = heatColor(r.heat);
+    const read = r.heat >= 60 ? 'Active bid war — defend head terms, check pricing' : r.heat >= 35 ? 'Pressure building — watch CPMs, pre-empt on hero keywords' : r.heat >= 15 ? 'Mild movement — monitor' : 'Quiet';
+    return /*#__PURE__*/React.createElement("tr", {
+      key: i,
+      style: {
+        borderBottom: '1px solid #111827',
+        background: r.heat >= 60 ? 'rgba(239,68,68,0.04)' : 'transparent'
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 34,
+        height: 6,
+        background: '#1f2937',
+        borderRadius: 3,
+        overflow: 'hidden'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: `${r.heat}%`,
+        height: '100%',
+        background: hc
+      }
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: hc,
+        fontWeight: 700,
+        fontSize: 11
+      }
+    }, r.heat))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: BRAND_COLORS[r.brand] || '#9ca3af',
+        fontSize: 10,
+        fontWeight: 600
+      }
+    }, r.brand), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        marginLeft: 6
+      }
+    }, r.category)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#d1d5db'
+      }
+    }, r.ccpmC != null ? '₹' + Math.round(r.ccpmC) : '—'), " ", cell(r.ccpmD, '%')), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#d1d5db'
+      }
+    }, r.crkC != null ? r.crkC.toFixed(1) : '—'), " ", cell(r.crkD, 'pp')), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#9ca3af'
+      }
+    }, r.cpmC != null ? '₹' + Math.round(r.cpmC) : '—'), " ", cell(r.cpmD, '%')), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#9ca3af'
+      }
+    }, r.rkC != null ? r.rkC.toFixed(1) : '—'), " ", cell(r.rkD, 'pp')), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#d1d5db'
+      }
+    }, Math.round(r.nuC)), " ", cell(r.nuD, '%', false)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        color: '#9ca3af'
+      }
+    }, r.compSpendD >= 1000 ? '₹' + (r.compSpendD / 1000).toFixed(1) + 'K' : '₹' + Math.round(r.compSpendD)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        color: '#9ca3af',
+        fontSize: 10,
+        maxWidth: 220
+      }
+    }, read));
+  }), shown.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    colSpan: 9,
+    style: {
+      padding: 40,
+      textAlign: 'center',
+      color: '#4b5563'
+    }
+  }, "Not enough comp-keyword data yet."))))));
+}
+
+// ─── OPPORTUNITIES (BK search volume feed) ───────────────────────────────────
+// Uses the "BK Import Search" sheet (Blinkit search volume per keyword) to find
+// demand we're not capturing: untargeted keywords with volume, and targeted
+// keywords performing well but starved of spend.
+
+function computeOpportunities(allRows, kwVolume, refDate) {
+  if (!refDate || !kwVolume || !Object.keys(kwVolume).length) return {
+    expansion: [],
+    underfed: [],
+    hasVolume: false
+  };
+  const DAY = 864e5;
+  const start = new Date(refDate.getTime() - 29 * DAY);
+  const live = {};
+  allRows.forEach(r => {
+    if (r.type !== 'Search' || !r.keyword || !r.date || r.date < start || r.date > refDate) return;
+    const k = r.keyword.toLowerCase();
+    if (!live[k]) live[k] = {
+      kw: r.keyword,
+      spend: 0,
+      sales: 0,
+      imp: 0,
+      posN: 0,
+      posI: 0,
+      brand: r.brand,
+      category: r.category,
+      days: new Set()
+    };
+    const o = live[k];
+    o.spend += r.spend || 0;
+    o.sales += r.directSales || 0;
+    o.imp += r.impressions || 0;
+    if (r.position > 0 && r.impressions > 0) {
+      o.posN += r.position * r.impressions;
+      o.posI += r.impressions;
+    }
+    o.days.add(r.date.toDateString());
+  });
+  const expansion = [];
+  Object.entries(kwVolume).forEach(([k, v]) => {
+    if (!live[k] && v.drr >= 50) expansion.push({
+      kw: k,
+      ...v
+    });
+  });
+  expansion.sort((a, b) => b.drr - a.drr);
+  const underfed = [];
+  Object.values(live).forEach(o => {
+    const days = o.days.size || 1;
+    const spd = o.spend / days;
+    const roas = o.spend > 0 ? o.sales / o.spend : null;
+    if (o.spend < 500 || roas == null || roas < 3 || spd >= 300) return;
+    const v = kwVolume[o.kw.toLowerCase()];
+    if (v && v.drr < 100) return; // volume known and too small — not an opportunity
+    underfed.push({
+      ...o,
+      spd,
+      roas,
+      impD: o.imp / days,
+      vol: v ? v.drr : null,
+      volTrend: v ? v.trend : null,
+      rank: o.posI > 0 ? o.posN / o.posI : null
+    });
+  });
+  underfed.sort((a, b) => (b.vol || 100) * b.roas - (a.vol || 100) * a.roas);
+  return {
+    expansion,
+    underfed,
+    hasVolume: true
+  };
+}
+function OpportunitiesView({
+  opps
+}) {
+  const [brandF, setBrandF] = useState([]);
+  const fmtRs = n => n == null ? '—' : n >= 1000 ? '₹' + (n / 1000).toFixed(1) + 'K' : '₹' + Math.round(n);
+  if (!opps.hasVolume) return /*#__PURE__*/React.createElement(Card, {
+    style: {
+      textAlign: 'center',
+      padding: 48
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 24,
+      marginBottom: 8
+    }
+  }, "\uD83D\uDCE1"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 13
+    }
+  }, "BK Import Search volume data not loaded \u2014 check the sheet tab is accessible, then \u21BA Refresh."));
+  const expBrands = [...new Set(opps.expansion.map(e => e.compBrand).filter(b => b && b !== 'Generic'))].sort();
+  const exp = opps.expansion.slice(0, 60);
+  const und = (brandF.length ? opps.underfed.filter(u => brandF.includes(u.brand)) : opps.underfed).slice(0, 40);
+  const undBrands = [...new Set(opps.underfed.map(u => u.brand).filter(Boolean))].sort();
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, [{
+    label: 'Untargeted Keywords With Volume',
+    val: opps.expansion.length,
+    color: '#22c55e'
+  }, {
+    label: 'Underfed Winners',
+    val: opps.underfed.length,
+    color: '#8b5cf6'
+  }, {
+    label: 'Top Missed Demand',
+    val: opps.expansion[0] ? `"${opps.expansion[0].kw}" · ${Math.round(opps.expansion[0].drr).toLocaleString('en-IN')}/d` : '—',
+    color: '#f59e0b'
+  }].map(({
+    label,
+    val,
+    color
+  }) => /*#__PURE__*/React.createElement("div", {
+    key: label,
+    style: {
+      flex: 1,
+      minWidth: 170,
+      background: '#0d1117',
+      border: '1px solid #1f2937',
+      borderRadius: 8,
+      padding: '12px 14px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color,
+      fontSize: 15,
+      fontWeight: 700,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, val)))), /*#__PURE__*/React.createElement(Card, {
+    accent: "#22c55e",
+    style: {
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 12,
+      fontWeight: 700,
+      marginBottom: 8
+    }
+  }, "\uD83C\uDFAF Expansion \u2014 searched on Blinkit, not targeted by us ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      fontWeight: 400
+    }
+  }, "\xB7 volume \u226550 searches/d \xB7 sorted by demand")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto',
+      maxHeight: '34vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      borderBottom: '1px solid #1f2937'
+    }
+  }, ['Keyword', 'Type', 'Comp Brand', 'Category', 'Searches/d', 'Demand Trend', 'Do This'].map(h => /*#__PURE__*/React.createElement("th", {
+    key: h,
+    style: {
+      padding: '6px 10px',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      textAlign: ['Searches/d', 'Demand Trend'].includes(h) ? 'right' : 'left',
+      whiteSpace: 'nowrap',
+      position: 'sticky',
+      top: 0,
+      background: '#0d1117'
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, exp.map((e, i) => /*#__PURE__*/React.createElement("tr", {
+    key: i,
+    style: {
+      borderBottom: '1px solid #111827'
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      color: '#e5e7eb',
+      fontWeight: 600
+    }
+  }, e.kw), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      color: e.type === 'Comp' ? '#ef4444' : '#6b7280',
+      fontSize: 10
+    }
+  }, e.type || '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      color: '#9ca3af',
+      fontSize: 10
+    }
+  }, e.compBrand && e.compBrand !== 'Generic' ? e.compBrand : '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      color: '#9ca3af',
+      fontSize: 10
+    }
+  }, e.category || '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      color: '#22c55e',
+      fontWeight: 700
+    }
+  }, Math.round(e.drr).toLocaleString('en-IN')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      color: e.trend == null ? '#374151' : e.trend > 0.1 ? '#22c55e' : e.trend < -0.1 ? '#ef4444' : '#6b7280',
+      fontSize: 10
+    }
+  }, e.trend != null ? `${e.trend > 0 ? '+' : ''}${(e.trend * 100).toFixed(0)}%` : '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      color: '#9ca3af',
+      fontSize: 10
+    }
+  }, e.type === 'Comp' ? `Add to ${e.category || ''} comp campaign` : `Add to ${e.category || ''} generic campaign`))))))), /*#__PURE__*/React.createElement(Card, {
+    accent: "#8b5cf6",
+    style: {
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, "\uD83C\uDF7D Underfed Winners \u2014 strong ROAS, starved of spend ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      fontWeight: 400
+    }
+  }, "\xB7 ROAS \u22653x, spend <\u20B9300/d, demand confirmed where volume known")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginLeft: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement(MultiSelect, {
+    values: brandF,
+    onChange: setBrandF,
+    options: undBrands,
+    placeholder: "All Brands"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto',
+      maxHeight: '34vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      borderBottom: '1px solid #1f2937'
+    }
+  }, ['Keyword', 'Brand · Category', 'ROAS (30d)', 'Spend/d', 'Impr/d', 'Searches/d', 'Rank', 'Do This'].map(h => /*#__PURE__*/React.createElement("th", {
+    key: h,
+    style: {
+      padding: '6px 10px',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      textAlign: ['Keyword', 'Brand · Category', 'Do This'].includes(h) ? 'left' : 'right',
+      whiteSpace: 'nowrap',
+      position: 'sticky',
+      top: 0,
+      background: '#0d1117'
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, und.map((u, i) => /*#__PURE__*/React.createElement("tr", {
+    key: i,
+    style: {
+      borderBottom: '1px solid #111827'
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      color: '#e5e7eb',
+      fontWeight: 600
+    }
+  }, u.kw), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      color: '#9ca3af',
+      fontSize: 10
+    }
+  }, u.brand, " \xB7 ", u.category), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      color: '#22c55e',
+      fontWeight: 700
+    }
+  }, u.roas.toFixed(2), "x"), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      color: '#d1d5db'
+    }
+  }, fmtRs(u.spd)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      color: '#6b7280'
+    }
+  }, Math.round(u.impD).toLocaleString('en-IN')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      color: u.vol != null ? '#22c55e' : '#374151'
+    }
+  }, u.vol != null ? Math.round(u.vol).toLocaleString('en-IN') : 'unmapped'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      color: '#9ca3af'
+    }
+  }, u.rank != null ? u.rank.toFixed(1) : '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      color: '#9ca3af',
+      fontSize: 10
+    }
+  }, u.rank != null && u.rank > 6 ? 'Raise CPM — demand exists above current rank' : 'Raise keyword budget share'))))))));
+}
+
 // ─── HOW-TO GUIDE (for newbies) ──────────────────────────────────────────────
 
 function HelpView() {
@@ -9995,7 +11267,19 @@ function HelpView() {
     color: "#ef4444"
   }, "red bars are days Blinkit overspent your budget"), ".")), /*#__PURE__*/React.createElement(Box, {
     accent: "#22c55e"
-  }, /*#__PURE__*/React.createElement(H, null, "\u21C4 Reallocator \u2014 same money, more sales"), /*#__PURE__*/React.createElement(P, null, "Some campaigns have squeezed their market dry \u2014 giving them MORE money buys almost nothing extra. Others still convert every extra rupee well. The Reallocator finds both, using each campaign's own history, and says: ", /*#__PURE__*/React.createElement(Hi, null, "\"take \u20B9X/day from these (DONORS), give it to these (RECEIVERS)\""), " \u2014 with the new budget numbers written out."), /*#__PURE__*/React.createElement(P, null, "Hard rules it never breaks: money never crosses brands \xB7 Brand campaigns are never touched \xB7 only Gen Head / Gen Tail / Comp search campaigns play \xB7 max 15% moved from any campaign at a time \xB7 no budget goes below \u20B9500. Run it ", /*#__PURE__*/React.createElement(Hi, null, "once a week"), ": make the moves, let a week pass, run again."), /*#__PURE__*/React.createElement(P, null, "The key number is ", /*#__PURE__*/React.createElement(Hi, null, "Marginal ROAS"), " \u2014 what the NEXT rupee buys (different from average ROAS, which includes the easy first rupees). Donor at 0.6x + receiver at 3x = same money working 5x harder.")), /*#__PURE__*/React.createElement(Box, null, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDCD6 Words, translated"), /*#__PURE__*/React.createElement(Word, {
+  }, /*#__PURE__*/React.createElement(H, null, "\u21C4 Reallocator \u2014 same money, more sales"), /*#__PURE__*/React.createElement(P, null, "Some campaigns have squeezed their market dry \u2014 giving them MORE money buys almost nothing extra. Others still convert every extra rupee well. The Reallocator finds both, using each campaign's own history, and says: ", /*#__PURE__*/React.createElement(Hi, null, "\"take \u20B9X/day from these (DONORS), give it to these (RECEIVERS)\""), " \u2014 with the new budget numbers written out."), /*#__PURE__*/React.createElement(P, null, "Hard rules it never breaks: money never crosses brands \xB7 Brand campaigns are never touched \xB7 only Gen Head / Gen Tail / Comp search campaigns play \xB7 max 15% moved from any campaign at a time \xB7 no budget goes below \u20B9500. Run it ", /*#__PURE__*/React.createElement(Hi, null, "once a week"), ": make the moves, let a week pass, run again."), /*#__PURE__*/React.createElement(P, null, "The key number is ", /*#__PURE__*/React.createElement(Hi, null, "Marginal ROAS"), " \u2014 what the NEXT rupee buys (different from average ROAS, which includes the easy first rupees). Donor at 0.6x + receiver at 3x = same money working 5x harder.")), /*#__PURE__*/React.createElement(Box, {
+    accent: "#ef4444"
+  }, /*#__PURE__*/React.createElement(H, null, "\u2694 Comp Tracker \xB7 \uD83D\uDCD2 Change Impact \xB7 \uD83D\uDCA1 Opportunities"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, "\u2694 Comp Tracker"), " \u2014 one heat score per category: are competitors pushing? Heat combines rising CPMs on competitor keywords, our rank slipping, and new customers lost. Red (60+) = active bid war \u2014 defend your hero keywords. Green = quiet. Also shows ", /*#__PURE__*/React.createElement(Hi, null, "new customers gained per day"), " vs the previous 2 weeks."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#3b82f6"
+  }, "\uD83D\uDCD2 Change Impact"), " \u2014 every budget/CPM change anyone made (found automatically in the data), what happened in the 7 days after, and whether the dashboard had suggested it.", /*#__PURE__*/React.createElement(Hi, {
+    color: "#22c55e"
+  }, " \u2713 Aligned"), " = change matched the verdict. ", /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, "\u2717 Contrary"), " = went against it. Compare the average impact of each \u2014 that's the proof of whether following the system pays."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#22c55e"
+  }, "\uD83D\uDCA1 Opportunities"), " \u2014 built from real Blinkit search volume (the BK Import Search tab). Two lists: ", /*#__PURE__*/React.createElement(Hi, null, "Expansion"), " = people search it, we don't target it. ", /*#__PURE__*/React.createElement(Hi, null, "Underfed"), " = we target it, it converts great, but we barely spend on it. Both sorted so the biggest misses are on top."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\uD83C\uDF19 on an alert"), " = impressions dropped but rank and hours stayed flat \u2014 the ad probably served at night after competitor budgets died. Not a real loss yet; the alert is softened and waits one more day before escalating.")), /*#__PURE__*/React.createElement(Box, null, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDCD6 Words, translated"), /*#__PURE__*/React.createElement(Word, {
     w: "Spend/d"
   }, "Money spent per day, on average."), /*#__PURE__*/React.createElement(Word, {
     w: "D.ROAS"
@@ -10014,6 +11298,12 @@ function HelpView() {
   }, "P78 = this campaign beats 78% of its same-segment siblings on ROAS. Low P in a stable segment = campaign problem. Everyone low at once = market problem (look for \uD83C\uDF10)."), /*#__PURE__*/React.createElement(Word, {
     w: "\u21BA / \u23F3 on verdict"
   }, "\u21BA = budget/CPM was changed and the verdict judges only the days AFTER the change (the campaign as it is now). \u23F3 = changed less than 5 days ago \u2014 still settling, judgement reserved."), /*#__PURE__*/React.createElement(Word, {
+    w: "Heat (0\u2013100)"
+  }, "Competitor pressure on a category. CPM inflation + rank slips + customer loss, combined. 60+ = bid war."), /*#__PURE__*/React.createElement(Word, {
+    w: "Aligned / Contrary"
+  }, "Whether a budget/CPM change matched what the dashboard's verdict said at that moment. The Change Impact tab keeps score of which performs better."), /*#__PURE__*/React.createElement(Word, {
+    w: "Searches/d (drr)"
+  }, "How many times people search a keyword on Blinkit per day \u2014 from your BK Import Search sheet. Demand proof before money moves."), /*#__PURE__*/React.createElement(Word, {
     w: "Util %"
   }, "How much of the daily budget actually got spent. 95% = budget nearly finished \u2014 it's capping you. 40% = money sitting unused."), /*#__PURE__*/React.createElement(Word, {
     w: "Hrs Live/d"
@@ -10043,7 +11333,8 @@ function App() {
     allRows,
     ltvMap,
     campaignIndexMap,
-    salesAgg
+    salesAgg,
+    kwVolume
   }) => {
     const bounds = getDateBounds(allRows);
     const endDate = bounds.max;
@@ -10054,6 +11345,7 @@ function App() {
       ltvMap,
       campaignIndexMap: campaignIndexMap || {},
       salesAgg: salesAgg || {},
+      kwVolume: kwVolume || {},
       bounds,
       startDate: startDate < bounds.min ? bounds.min : startDate,
       endDate,
@@ -10244,14 +11536,43 @@ function App() {
     return aggregateKeywords(allRows, ltvMap, startDate, endDate, campaignIndexMap);
   }, [appState]);
 
+  // CPM ladder: category-level CPM→rank map from our own auctions (14d)
+  const cpmLadder = useMemo(() => {
+    if (!appState) return {};
+    return buildCpmLadder(appState.allRows, appState.bounds.max);
+  }, [appState]);
+
   // Sudden-change alerts — always on latest data date, not the selected period
   const alerts = useMemo(() => {
     if (!appState) return [];
-    return computeAlerts(appState.allRows, appState.bounds.max, appState.campaignIndexMap);
-  }, [appState]);
+    return computeAlerts(appState.allRows, appState.bounds.max, appState.campaignIndexMap, cpmLadder);
+  }, [appState, cpmLadder]);
   const kwAlerts = useMemo(() => {
     if (!appState) return [];
-    return computeKeywordAlerts(appState.allRows, appState.bounds.max);
+    return computeKeywordAlerts(appState.allRows, appState.bounds.max, cpmLadder, appState.kwVolume);
+  }, [appState, cpmLadder]);
+
+  // Change Ledger / Comp Tracker / Opportunities
+  const ledger = useMemo(() => {
+    if (!appState) return {
+      events: [],
+      summary: {}
+    };
+    return computeChangeLedger(appState.allRows, appState.ltvMap, appState.bounds.max);
+  }, [appState]);
+  const comp = useMemo(() => {
+    if (!appState) return {
+      rows: []
+    };
+    return computeCompTracker(appState.allRows, appState.bounds.max);
+  }, [appState]);
+  const opps = useMemo(() => {
+    if (!appState) return {
+      expansion: [],
+      underfed: [],
+      hasVolume: false
+    };
+    return computeOpportunities(appState.allRows, appState.kwVolume, appState.bounds.max);
   }, [appState]);
   const alertsMap = useMemo(() => {
     const m = {};
@@ -10359,6 +11680,15 @@ function App() {
   }, {
     id: 'realloc',
     label: '⇄ Reallocator'
+  }, {
+    id: 'comp',
+    label: '⚔ Comp Tracker'
+  }, {
+    id: 'ledger',
+    label: '📒 Change Impact'
+  }, {
+    id: 'opps',
+    label: '💡 Opportunities'
   }, {
     id: 'guide',
     label: '❓ Guide'
@@ -10613,6 +11943,12 @@ function App() {
   }), tab === 'realloc' && /*#__PURE__*/React.createElement(ReallocatorView, {
     allRows: allRows,
     endDate: bounds.max
+  }), tab === 'comp' && /*#__PURE__*/React.createElement(CompTrackerView, {
+    comp: comp
+  }), tab === 'ledger' && /*#__PURE__*/React.createElement(ChangeLedgerView, {
+    ledger: ledger
+  }), tab === 'opps' && /*#__PURE__*/React.createElement(OpportunitiesView, {
+    opps: opps
   }), tab === 'guide' && /*#__PURE__*/React.createElement(HelpView, null))));
 }
 class ErrorBoundary extends React.Component {
@@ -10654,7 +11990,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v6 reallocator + bleeders + since-change + peer + dow
+// build: v7 ledger + comp-tracker + cpm-ladder + opportunities + daypart
 
 </script>
 </body></html>
