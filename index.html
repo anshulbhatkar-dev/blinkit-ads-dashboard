@@ -4421,7 +4421,9 @@ function computeIgnored(allRows, opCampaigns, refDate) {
       lastChange: c.lastChange || null,
       roasFloor: bm.roasF,
       avgRoas: totSp > 0 ? totSa / totSp : null,
-      spendPerDay: c.drr?.spend || 0
+      spendPerDay: c.drr?.spend || 0,
+      currentDailyBudget: c.currentDailyBudget || null,
+      avgCpm: c.avgCpm || null
     });
   });
   return out.sort((a, b) => b.burned - a.burned);
@@ -4636,7 +4638,7 @@ function NoActionView({
       fontSize: 10,
       maxWidth: 200
     }
-  }, t.verdict === 'Cut' ? 'Pause it — verdict has said Cut while spend continued' : t.verdict === 'Reduce' ? 'Reduce budget 25% or lower CPM — breach persisting' : 'Lower CPM or fix conversion — floor breached daily'))), ignored.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+  }, t.verdict === 'Cut' ? 'Pause it — verdict has said Cut while spend continued' : t.currentDailyBudget != null && t.currentDailyBudget * 0.75 < 500 ? 'At ₹500 budget floor — cannot reduce; cut or fix conversion' : t.avgCpm != null && t.avgCpm <= 210 ? 'CPM at ₹200 floor — cannot lower; fix conversion or cut' : 'Reduce budget 25% or lower CPM — breach persisting'))), ignored.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
     colSpan: 10,
     style: {
       padding: 40,
@@ -7222,7 +7224,9 @@ function aggregateBudgetThreats(allRows, endDate) {
     const p75Idx = Math.floor(sortedSpends.length * 0.75);
     const p75Spend = sortedSpends.length > 0 ? sortedSpends[p75Idx] : null;
     const currentDailyBudget = monthDays[monthDays.length - 1]?.budget || 0;
-    const suggestedBudget = remainingDays > 0 ? (monthlyCap - cumulativeSpend) / remainingDays * 0.85 : 0;
+    const rawSuggested = remainingDays > 0 ? (monthlyCap - cumulativeSpend) / remainingDays * 0.85 : 0;
+    const suggestedBudget = rawSuggested > 0 ? Math.max(500, rawSuggested) : 0; // ₹500 platform floor
+
     results.push({
       campaign: name,
       brand,
@@ -7408,7 +7412,7 @@ function BudgetThreatView({
   const getRecalibrated = t => {
     const d = parseFloat(desiredSpend[t.campKey]);
     if (isNaN(d) || !d) return null;
-    return d + t.cumulativeSurplus / t.remainingDays;
+    return Math.max(500, d + t.cumulativeSurplus / t.remainingDays); // ₹500 platform floor
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7938,15 +7942,17 @@ function LoadingScreen({
 }
 
 // ─── DAILY BRIEF VIEW ────────────────────────────────────────────────────────
-// Landing tab: every action ranked by ₹ impact/day. No data diving — read top
-// to bottom, execute, check off. Excel export with one sheet per action type.
+// Landing tab: every action ranked by ₹ impact/day. Excel export with one sheet
+// per action type + filter-aware SUBTOTAL formula rows. All recommendations
+// respect platform constraints: budget floor ₹500/d, CPM floor ₹200.
 
 function DailyBriefView({
   campaigns,
   prevCampaigns,
   alerts,
   kwAlerts,
-  endDate
+  endDate,
+  kwCamp = []
 }) {
   const [done, setDone] = useState(new Set());
   const [copied, setCopied] = useState(false);
@@ -7962,10 +7968,16 @@ function DailyBriefView({
     });
     return m;
   }, [prevCampaigns]);
+  const alertSet = useMemo(() => new Set(alerts.map(a => a.campaign.toLowerCase())), [alerts]);
   const live = useMemo(() => campaigns.filter(c => !c.isInactive), [campaigns]);
   const cuts = useMemo(() => live.filter(c => c.verdict === 'Cut').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
   const reduces = useMemo(() => live.filter(c => c.verdict === 'Reduce').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
   const optimises = useMemo(() => live.filter(c => c.verdict === 'Optimise').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
+
+  // ONE Fix List: chronic underperformers (Cut/Reduce/Optimise), ranked by spend.
+  // UI shows only material campaigns (≥₹500/d); the full list lives in Excel.
+  const fixList = useMemo(() => [...cuts, ...reduces, ...optimises].sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [cuts, reduces, optimises]);
+  const uiFixList = useMemo(() => fixList.filter(c => (c.drr?.spend || 0) >= 500), [fixList]);
   const scales = useMemo(() => live.filter(c => c.verdict === 'Scale' && (c.drr?.spend || 0) > 0).sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
   const revertHikes = useMemo(() => live.filter(c => c.iRoas != null && c.iRoas < 0.8).sort((a, b) => (b.iRoasDeltaSpend || 0) - (a.iRoasDeltaSpend || 0)), [live]);
   const deteriorating = useMemo(() => live.filter(c => c.trend === 'deteriorating' && c.verdict !== 'Cut' && c.verdict !== 'Reduce').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
@@ -7974,8 +7986,8 @@ function DailyBriefView({
     prev: prevMap[c.campaign.toLowerCase()]
   })).filter(x => x.prev && x.prev.verdict !== x.c.verdict && (x.c.verdict === 'Cut' || x.c.verdict === 'Reduce') && ['Scale', 'Maintain', 'Optimise'].includes(x.prev.verdict)).sort((a, b) => (b.c.drr?.spend || 0) - (a.c.drr?.spend || 0)), [live, prevMap]);
 
-  // Sales-qty drops vs comparison period (same delta logic as Cat Sales ΔDQty/d,
-  // applied at campaign level): drop ≥30% AND baseline ≥5 units/d
+  // Qty drops vs comparison period: drop ≥30% AND baseline ≥5 units/d,
+  // ranked by absolute units/d lost (the quantum)
   const qtyDrops = useMemo(() => live.map(c => ({
     c,
     pv: prevMap[c.campaign.toLowerCase()]
@@ -7991,9 +8003,41 @@ function DailyBriefView({
   const cutSavings = cuts.reduce((s, c) => s + (c.drr?.spend || 0), 0);
   const reduceSavings = reduces.reduce((s, c) => s + (c.drr?.spend || 0) * 0.25, 0);
   const alertRisk = alerts.slice(0, 15).reduce((s, a) => s + a.severity, 0);
-  const totalActions = cuts.length + reduces.length + optimises.length + revertHikes.length + flips.length + qtyDrops.length + Math.min(alerts.length, 10) + Math.min(kwAlerts.length, 8);
+  const totalActions = uiFixList.length + revertHikes.length + flips.length + qtyDrops.length + Math.min(alerts.length, 10) + Math.min(kwAlerts.length, 8);
 
-  // Why raise budget? Hours-live tells you if the campaign goes dark mid-day.
+  // ── ACTION TEXT — constraint-aware (budget floor ₹500/d, CPM floor ₹200) ──
+
+  const breachList = c => {
+    const bm = BENCHMARKS[c.segment];
+    if (!bm) return '';
+    const b = [];
+    if (c.roas != null && c.roas < bm.roasF) b.push(`ROAS ${c.roas.toFixed(2)}x < floor ${bm.roasF}`);
+    if (c.nur != null && c.nur < bm.nurF) b.push(`NUR ${(c.nur * 100).toFixed(0)}% < floor ${(bm.nurF * 100).toFixed(0)}%`);
+    if (c.ltvCac != null && c.ltvCac < bm.ltvF) b.push(`LTV:CAC ${c.ltvCac.toFixed(2)}x < floor ${bm.ltvF}`);
+    return b.join('; ');
+  };
+  const reduceAction = c => {
+    const b = c.currentDailyBudget;
+    if (b != null && b <= 500) return `At ₹500 budget floor already — CANNOT reduce. Cut it or fix conversion. ${breachList(c)}`;
+    if (b != null && b * 0.75 < 500) return `Reduce to ₹500 (the floor — a full 25% cut would breach it). ${breachList(c)}`;
+    return `Reduce budget 25%${b != null ? ` to ₹${Math.round(Math.max(500, b * 0.75)).toLocaleString('en-IN')}` : ''} — saves ~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d. ${breachList(c)}`;
+  };
+  const optimiseAction = c => {
+    const bm = BENCHMARKS[c.segment];
+    if (!bm) return 'Review — no benchmarks for segment';
+    if (c.ltvCac != null && c.ltvCac < bm.ltvF) {
+      if (c.avgCpm != null && c.avgCpm <= 210) return `CPM already at ₹200 floor — CANNOT lower. LTV:CAC ${fmt(c.ltvCac, 'x')} < floor ${fmt(bm.ltvF, 'x')}: fix conversion or cut (CAC ${c.cac != null ? fmt(c.cac, 'rs') : '—'} vs LTV ₹${c.ltv || '—'})`;
+      return `LOWER CPM to ~₹${Math.round(Math.max(200, (c.avgCpm || 250) * 0.85))}: LTV:CAC ${fmt(c.ltvCac, 'x')} < floor ${fmt(bm.ltvF, 'x')} — paying too much per new user (CAC ${c.cac != null ? fmt(c.cac, 'rs') : '—'} vs LTV ₹${c.ltv || '—'})`;
+    }
+    if (c.roas != null && c.roas < bm.roasF) return `HOLD CPM, FIX CONVERSION: ROAS ${fmt(c.roas, 'x')} < floor ${fmt(bm.roasF, 'x')} — impressions fine, conversion weak; check price/pack/competitor offer`;
+    if (c.nur != null && c.nur < bm.nurF) return `NUR ${fmt(c.nur, '%')} < floor ${fmt(bm.nurF, '%')} — buying repeat customers; shift spend toward generic/comp terms for acquisition`;
+    return 'One metric near floor — monitor closely';
+  };
+  const fixAction = c => {
+    if (c.verdict === 'Cut') return `Pause — saves ${fmt(c.drr?.spend, 'rsk')}/d. ${breachList(c) || 'Score below cut line'}`;
+    if (c.verdict === 'Reduce') return reduceAction(c);
+    return optimiseAction(c);
+  };
   const scaleAction = c => {
     const hrs = c.hoursPerDay && c.hoursPerDay > 0 && c.hoursPerDay < 23.5 ? c.hoursPerDay : null;
     if (c.utilization != null && c.utilization >= 0.85) {
@@ -8008,16 +8052,6 @@ function DailyBriefView({
     const hrsTxt = hrs ? `, ${hrs.toFixed(0)}h/day live` : '';
     return `RAISE BUDGET +15–20%. Why: all metrics above floor, util ${c.utilization != null ? (c.utilization * 100).toFixed(0) + '%' : 'n/a'}${hrsTxt} — efficient headroom`;
   };
-
-  // Which single metric is breaching, and the specific fix
-  const optimiseAction = c => {
-    const bm = BENCHMARKS[c.segment];
-    if (!bm) return 'Review — no benchmarks for segment';
-    if (c.ltvCac != null && c.ltvCac < bm.ltvF) return `LOWER CPM: LTV:CAC ${fmt(c.ltvCac, 'x')} < floor ${fmt(bm.ltvF, 'x')} — paying too much per new user (CAC ${c.cac != null ? fmt(c.cac, 'rs') : '—'} vs LTV ₹${c.ltv || '—'})`;
-    if (c.roas != null && c.roas < bm.roasF) return `HOLD CPM, FIX CONVERSION: ROAS ${fmt(c.roas, 'x')} < floor ${fmt(bm.roasF, 'x')} — impressions fine, conversion weak; check price/pack/competitor offer`;
-    if (c.nur != null && c.nur < bm.nurF) return `NUR ${fmt(c.nur, '%')} < floor ${fmt(bm.nurF, '%')} — buying repeat customers; shift spend toward generic/comp terms for acquisition`;
-    return 'One metric near floor — monitor closely';
-  };
   const qtyDriver = (c, pv) => {
     const pi = pv.drr?.impressions || 0,
       ci = c.drr?.impressions || 0;
@@ -8029,51 +8063,87 @@ function DailyBriefView({
     if (ps > 0 && (ps - cs) / ps >= 0.2) return `spend cut: ${fmt(cs, 'rsk')}/d vs ${fmt(ps, 'rsk')}/d`;
     return 'mixed — open campaign detail';
   };
-  const breachList = c => {
-    const bm = BENCHMARKS[c.segment];
-    if (!bm) return '';
-    const b = [];
-    if (c.roas != null && c.roas < bm.roasF) b.push(`ROAS ${c.roas.toFixed(2)}x < floor ${bm.roasF}`);
-    if (c.nur != null && c.nur < bm.nurF) b.push(`NUR ${(c.nur * 100).toFixed(0)}% < floor ${(bm.nurF * 100).toFixed(0)}%`);
-    if (c.ltvCac != null && c.ltvCac < bm.ltvF) b.push(`LTV:CAC ${c.ltvCac.toFixed(2)}x < floor ${bm.ltvF}`);
-    return b.join('; ');
-  };
   const reasonFor = c => {
-    if (c.verdict === 'Cut') return `Pause immediately. ${breachList(c)}`;
-    if (c.verdict === 'Reduce') return `Reduce budget 25%. ${breachList(c)}`;
-    if (c.verdict === 'Optimise') return optimiseAction(c);
+    if (c.verdict === 'Cut' || c.verdict === 'Reduce' || c.verdict === 'Optimise') return fixAction(c);
     if (c.verdict === 'Scale') return scaleAction(c);
     if (c.verdict === 'Maintain') return 'Healthy — no action needed';
     return c.verdict;
   };
 
-  // ── EXCEL EXPORT — one sheet per action type, autofilter on all sheets ────
-  const metricRow = (c, reason) => ({
-    'Campaign': c.campaign,
-    'Action / Reason': reason,
-    'Brand': c.brand || '',
-    'Category': c.category || '',
-    'Segment': SEG_SHORT[c.segment] || c.segment || '',
-    'Verdict': c.verdict,
-    'Spend/d': Math.round(c.drr?.spend || 0),
-    'Sales/d': Math.round(c.drr?.directSales || 0),
-    'D.ROAS': c.roas != null ? +c.roas.toFixed(2) : null,
-    'NUR %': c.nur != null ? +(c.nur * 100).toFixed(1) : null,
-    'LTV:CAC': c.ltvCac != null ? +c.ltvCac.toFixed(2) : null,
-    'CAC': c.cac != null ? Math.round(c.cac) : null,
-    'Rank': c.avgPos != null ? +c.avgPos.toFixed(1) : null,
-    'CPM': c.avgCpm != null ? Math.round(c.avgCpm) : null,
-    'Impr/d': Math.round(c.drr?.impressions || 0),
-    'NU/d': +(c.drr?.newUsers || 0).toFixed(1),
-    'DQty/d': +(c.drr?.totalQty || 0).toFixed(1),
-    'Budget/d': c.currentDailyBudget != null ? Math.round(c.currentDailyBudget) : null,
-    'Util %': c.utilization != null ? +(c.utilization * 100).toFixed(0) : null,
-    'Hrs Live/d': c.hoursPerDay ? +c.hoursPerDay.toFixed(1) : null,
-    'Score': c.score != null ? Math.round(c.score) : null,
-    'Score 7d': c.score7 != null ? Math.round(c.score7) : null,
-    'Trend': c.trend || '',
-    'Days Live': c.daysLive
-  });
+  // ── EXCEL EXPORT ──────────────────────────────────────────────────────────
+  const metricRow = (c, reason) => {
+    const pv = prevMap[c.campaign.toLowerCase()];
+    return {
+      'Campaign': c.campaign,
+      'Action / Reason': reason,
+      'Brand': c.brand || '',
+      'Category': c.category || '',
+      'Segment': SEG_SHORT[c.segment] || c.segment || '',
+      'Verdict': c.verdict,
+      'Spend/d': Math.round(c.drr?.spend || 0),
+      'Sales/d': Math.round(c.drr?.directSales || 0),
+      'D.ROAS': c.roas != null ? +c.roas.toFixed(2) : null,
+      'NUR %': c.nur != null ? +(c.nur * 100).toFixed(1) : null,
+      'LTV:CAC': c.ltvCac != null ? +c.ltvCac.toFixed(2) : null,
+      'CAC': c.cac != null ? Math.round(c.cac) : null,
+      'Rank': c.avgPos != null ? +c.avgPos.toFixed(1) : null,
+      'CPM': c.avgCpm != null ? Math.round(c.avgCpm) : null,
+      'Impr/d': Math.round(c.drr?.impressions || 0),
+      'NU/d': +(c.drr?.newUsers || 0).toFixed(1),
+      'DQty/d': +(c.drr?.totalQty || 0).toFixed(1),
+      'ΔDQty/d': pv ? +((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1) : null,
+      'ΔSpend/d': pv ? Math.round((c.drr?.spend || 0) - (pv.drr?.spend || 0)) : null,
+      'ΔSales/d': pv ? Math.round((c.drr?.directSales || 0) - (pv.drr?.directSales || 0)) : null,
+      'Budget/d': c.currentDailyBudget != null ? Math.round(c.currentDailyBudget) : null,
+      'Util %': c.utilization != null ? +(c.utilization * 100).toFixed(0) : null,
+      'Hrs Live/d': c.hoursPerDay ? +c.hoursPerDay.toFixed(1) : null,
+      'Score': c.score != null ? Math.round(c.score) : null,
+      'Score 7d': c.score7 != null ? Math.round(c.score7) : null,
+      'Trend': c.trend || '',
+      'Days Live': c.daysLive,
+      'CPMxImpr': c.avgCpm != null && c.drr?.impressions ? Math.round(c.avgCpm * c.drr.impressions) : null,
+      'RankxImpr': c.avgPos != null && c.drr?.impressions ? Math.round(c.avgPos * c.drr.impressions) : null
+    };
+  };
+
+  // Filter-aware blended subtotals for campaign-grain sheets
+  const CAMP_SPEC = {
+    'Spend/d': 'sum',
+    'Sales/d': 'sum',
+    'Impr/d': 'sum',
+    'NU/d': 'sum',
+    'DQty/d': 'sum',
+    'ΔDQty/d': 'sum',
+    'ΔSpend/d': 'sum',
+    'ΔSales/d': 'sum',
+    'Budget/d': 'sum',
+    'D.ROAS': {
+      num: 'Sales/d',
+      den: 'Spend/d'
+    },
+    'NUR %': {
+      num: 'NU/d',
+      den: 'DQty/d',
+      scale: 100
+    },
+    'CAC': {
+      num: 'Spend/d',
+      den: 'NU/d'
+    },
+    'Util %': {
+      num: 'Spend/d',
+      den: 'Budget/d',
+      scale: 100
+    },
+    'CPM': {
+      num: 'CPMxImpr',
+      den: 'Impr/d'
+    },
+    'Rank': {
+      num: 'RankxImpr',
+      den: 'Impr/d'
+    }
+  };
   const exportExcel = () => {
     const X = window.XLSX;
     if (!X) {
@@ -8081,15 +8151,61 @@ function DailyBriefView({
       return;
     }
     const wb = X.utils.book_new();
+    const colLetter = i => {
+      let s = '';
+      i++;
+      while (i > 0) {
+        s = String.fromCharCode(65 + (i - 1) % 26) + s;
+        i = Math.floor((i - 1) / 26);
+      }
+      return s;
+    };
+    const colWidths = rows => Object.keys(rows[0]).map(k => ({
+      wch: Math.min(50, Math.max(10, k.length + 2, ...rows.slice(0, 60).map(r => String(r[k] ?? '').length + 1)))
+    }));
+
+    // simple sheet: header row 1, autofilter, data from row 2
     const addSheet = (name, rows) => {
       if (!rows || rows.length === 0) return;
       const ws = X.utils.json_to_sheet(rows);
       ws['!autofilter'] = {
         ref: ws['!ref']
-      }; // enables sort + filter in Excel
-      ws['!cols'] = Object.keys(rows[0]).map(k => ({
-        wch: Math.min(50, Math.max(10, k.length + 2, ...rows.slice(0, 60).map(r => String(r[k] ?? '').length + 1)))
-      }));
+      };
+      ws['!cols'] = colWidths(rows);
+      X.utils.book_append_sheet(wb, ws, name.slice(0, 31));
+    };
+
+    // sheet with live SUBTOTAL formula row on top (row1=formulas, row2=headers, data row3+)
+    // SUBTOTAL(9,...) recalculates on filtering; ratios divide the subtotals (true blends)
+    const addSheetSub = (name, rows, spec) => {
+      if (!rows || rows.length === 0) return;
+      const headers = Object.keys(rows[0]);
+      const dataStart = 3,
+        dataEnd = rows.length + 2;
+      const subRow = headers.map((h, i) => {
+        const sp = spec[h];
+        const L = colLetter(i);
+        if (sp === 'sum') return {
+          t: 'n',
+          f: `SUBTOTAL(9,${L}${dataStart}:${L}${dataEnd})`
+        };
+        if (sp && sp.num !== undefined) {
+          const nL = colLetter(headers.indexOf(sp.num)),
+            dL = colLetter(headers.indexOf(sp.den));
+          const expr = `SUBTOTAL(9,${nL}${dataStart}:${nL}${dataEnd})/SUBTOTAL(9,${dL}${dataStart}:${dL}${dataEnd})`;
+          return {
+            t: 'n',
+            f: `IFERROR(${sp.scale ? sp.scale + '*' : ''}${expr},"")`
+          };
+        }
+        return i === 0 ? 'FILTERED TOTAL →' : '';
+      });
+      const aoa = [subRow, headers, ...rows.map(r => headers.map(h => r[h]))];
+      const ws = X.utils.aoa_to_sheet(aoa);
+      ws['!autofilter'] = {
+        ref: `A2:${colLetter(headers.length - 1)}${dataEnd}`
+      };
+      ws['!cols'] = colWidths(rows);
       X.utils.book_append_sheet(wb, ws, name.slice(0, 31));
     };
     addSheet('Alerts', alerts.map(a => ({
@@ -8116,9 +8232,7 @@ function DailyBriefView({
       'Spend/d baseline': Math.round(a.baseSpend),
       'Spend/d now': Math.round(a.recSpend)
     })));
-    addSheet('Cut', cuts.map(c => metricRow(c, `Pause — saves ${fmt(c.drr?.spend, 'rsk')}/d. ${breachList(c)}`)));
-    addSheet('Reduce', reduces.map(c => metricRow(c, `Reduce budget 25% — saves ~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d. ${breachList(c)}`)));
-    addSheet('Optimise', optimises.map(c => metricRow(c, optimiseAction(c))));
+    addSheetSub('Fix List', fixList.map(c => metricRow(c, fixAction(c))), CAMP_SPEC);
     addSheet('Revert Hikes', revertHikes.map(c => ({
       ...metricRow(c, `Revert budget hike — extra spend returning only ${fmt(c.iRoas, 'x')} incremental`),
       'Hike Date': c.lastBudgetChange ? toISODate(c.lastBudgetChange) : '',
@@ -8126,15 +8240,23 @@ function DailyBriefView({
       'Extra Sales/d': Math.round(c.iRoasDeltaSales || 0),
       'Incremental ROAS': c.iRoas != null ? +c.iRoas.toFixed(2) : null
     })));
+    // Qty Drops: quantum columns up front so impact-sorting is one click
     addSheet('Qty Drops', qtyDrops.map(({
       c,
       pv
-    }) => ({
-      ...metricRow(c, `Qty fell ${Math.round(((pv.drr?.totalQty || 0) - (c.drr?.totalQty || 0)) / (pv.drr?.totalQty || 1) * 100)}% vs prev period. Driver: ${qtyDriver(c, pv)}`),
-      'DQty/d prev': +(pv.drr?.totalQty || 0).toFixed(1),
-      'DQty/d now': +(c.drr?.totalQty || 0).toFixed(1),
-      'Δ units/d': +((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1)
-    })));
+    }) => {
+      const m = metricRow(c, '');
+      delete m['Action / Reason'];
+      return {
+        'Campaign': c.campaign,
+        'Δ units/d': +((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1),
+        'DQty/d prev': +(pv.drr?.totalQty || 0).toFixed(1),
+        'DQty/d now': +(c.drr?.totalQty || 0).toFixed(1),
+        'Drop %': +(((pv.drr?.totalQty || 0) - (c.drr?.totalQty || 0)) / (pv.drr?.totalQty || 1) * 100).toFixed(0),
+        'Driver': qtyDriver(c, pv),
+        ...m
+      };
+    }));
     addSheet('Deteriorating', deteriorating.map(c => metricRow(c, `7d score ${Math.round(c.score7)} vs period ${Math.round(c.score)} — collapsing this week, verdict hasn't flipped yet`)));
     addSheet('Verdict Flips', flips.map(({
       c,
@@ -8144,7 +8266,53 @@ function DailyBriefView({
       'Prev Verdict': prev.verdict
     })));
     addSheet('Scale', scales.map(c => metricRow(c, scaleAction(c))));
-    addSheet('All Live Campaigns', live.map(c => metricRow(c, reasonFor(c))));
+    addSheetSub('All Campaigns', live.map(c => metricRow(c, reasonFor(c))), CAMP_SPEC);
+
+    // Keyword × Campaign grain (Search), selected period, with formula subtotals
+    if (kwCamp && kwCamp.length) {
+      const kwRows = kwCamp.slice(0, 15000).map(k => ({
+        'Keyword': k.keyword,
+        'Campaign': k.campaign,
+        'Brand': k.brand || '',
+        'Category': k.category || '',
+        'Segment': SEG_SHORT[k.segment] || k.segment || '',
+        'Spend/d': Math.round(k.drr?.spend || 0),
+        'Sales/d': Math.round(k.drr?.directSales || 0),
+        'D.ROAS': k.roas != null ? +k.roas.toFixed(2) : null,
+        'NUR %': k.nur != null ? +(k.nur * 100).toFixed(1) : null,
+        'Rank': k.avgPos != null ? +k.avgPos.toFixed(1) : null,
+        'CPM': k.avgCpm != null ? Math.round(k.avgCpm) : null,
+        'Impr/d': Math.round(k.drr?.impressions || 0),
+        'NU/d': +(k.drr?.newUsers || 0).toFixed(1),
+        'DQty/d': +(k.drr?.totalQty || 0).toFixed(1),
+        'CPMxImpr': k.avgCpm != null && k.drr?.impressions ? Math.round(k.avgCpm * k.drr.impressions) : null,
+        'RankxImpr': k.avgPos != null && k.drr?.impressions ? Math.round(k.avgPos * k.drr.impressions) : null
+      }));
+      addSheetSub('KW x Campaign', kwRows, {
+        'Spend/d': 'sum',
+        'Sales/d': 'sum',
+        'Impr/d': 'sum',
+        'NU/d': 'sum',
+        'DQty/d': 'sum',
+        'D.ROAS': {
+          num: 'Sales/d',
+          den: 'Spend/d'
+        },
+        'NUR %': {
+          num: 'NU/d',
+          den: 'DQty/d',
+          scale: 100
+        },
+        'CPM': {
+          num: 'CPMxImpr',
+          den: 'Impr/d'
+        },
+        'Rank': {
+          num: 'RankxImpr',
+          den: 'Impr/d'
+        }
+      });
+    }
     X.writeFile(wb, `Blinkit_Daily_Brief_${endDate ? toISODate(endDate) : 'export'}.xlsx`);
   };
 
@@ -8163,17 +8331,9 @@ function DailyBriefView({
       L.push('', '— KEYWORD ALERTS —');
       kwAlerts.slice(0, 8).forEach(a => L.push(`[ ] "${a.keyword}" (${a.campaign || ''}) · ${a.flags.map(f => f.label).join(', ')}${a.cause ? ' · ' + a.cause : ''}`));
     }
-    if (cuts.length) {
-      L.push('', '— CUT (pause) —');
-      cuts.forEach(c => L.push(`[ ] ${c.campaign} · saves ${fmt(c.drr?.spend, 'rsk')}/d`));
-    }
-    if (reduces.length) {
-      L.push('', '— REDUCE budget 25% —');
-      reduces.forEach(c => L.push(`[ ] ${c.campaign} · saves ~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d`));
-    }
-    if (optimises.length) {
-      L.push('', '— OPTIMISE —');
-      optimises.slice(0, 12).forEach(c => L.push(`[ ] ${c.campaign} · ${optimiseAction(c)}`));
+    if (uiFixList.length) {
+      L.push('', '— FIX LIST (Cut / Reduce / Optimise) —');
+      uiFixList.slice(0, 20).forEach(c => L.push(`[ ] [${c.verdict.toUpperCase()}] ${c.campaign} · ${fixAction(c)}`));
     }
     if (revertHikes.length) {
       L.push('', '— REVERT BUDGET HIKES (incremental ROAS < 0.8x) —');
@@ -8184,7 +8344,7 @@ function DailyBriefView({
       qtyDrops.slice(0, 10).forEach(({
         c,
         pv
-      }) => L.push(`[ ] ${c.campaign} · ${(pv.drr?.totalQty || 0).toFixed(1)} → ${(c.drr?.totalQty || 0).toFixed(1)} units/d · ${qtyDriver(c, pv)}`));
+      }) => L.push(`[ ] ${c.campaign} · ${((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1)} units/d (${(pv.drr?.totalQty || 0).toFixed(1)} → ${(c.drr?.totalQty || 0).toFixed(1)}) · ${qtyDriver(c, pv)}`));
     }
     if (scales.length) {
       L.push('', '— SCALE —');
@@ -8251,7 +8411,9 @@ function DailyBriefView({
     impact,
     impactColor,
     action,
-    meta
+    meta,
+    badge,
+    warn
   }) => {
     const isDone = done.has(id);
     return /*#__PURE__*/React.createElement("div", {
@@ -8293,7 +8455,15 @@ function DailyBriefView({
         gap: 6,
         flexWrap: 'wrap'
       }
-    }, /*#__PURE__*/React.createElement("span", {
+    }, warn && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444',
+        fontSize: 10
+      }
+    }, "\u26A0"), badge && /*#__PURE__*/React.createElement(VBadge, {
+      verdict: badge,
+      sm: true
+    }), /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#e5e7eb',
         fontSize: 11,
@@ -8438,72 +8608,41 @@ function DailyBriefView({
     impactColor: "#f97316",
     action: a.flags.map(f => f.label).join('  ·  '),
     meta: a.cause || a.flags[0]?.detail
-  }))), /*#__PURE__*/React.createElement("div", {
+  }))), uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\uD83D\uDEE0",
+    title: "Fix List \u2014 Cut \xB7 Reduce \xB7 Optimise",
+    accent: "#ef4444",
+    count: uiFixList.length,
+    sub: `chronic breaches ≥₹500/d spend · ${fixList.length - uiFixList.length} smaller in Excel · saves up to ${fmt(cutSavings + reduceSavings, 'rsk')}/d`
+  }, uiFixList.slice(0, 15).map(c => /*#__PURE__*/React.createElement(Row, {
+    key: 'fix_' + c.campaign,
+    id: 'fix_' + c.campaign,
+    badge: c.verdict,
+    warn: alertSet.has(c.campaign.toLowerCase()),
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `${fmt(c.drr?.spend, 'rsk')}/d`,
+    impactColor: "#ef4444",
+    action: fixAction(c),
+    meta: alertSet.has(c.campaign.toLowerCase()) ? 'also firing a sudden-change alert above' : null
+  })), uiFixList.length > 15 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      padding: '2px 8px'
+    }
+  }, "+", uiFixList.length - 15, " more \u2014 see Excel export")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
       gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
       gap: 14
     }
-  }, cuts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\u2702",
-    title: "Cut Now",
-    accent: "#ef4444",
-    count: cuts.length,
-    sub: `saves ${fmt(cutSavings, 'rsk')}/d`
-  }, cuts.slice(0, 10).map(c => /*#__PURE__*/React.createElement(Row, {
-    key: 'cut_' + c.campaign,
-    id: 'cut_' + c.campaign,
-    name: c.campaign,
-    tag: SEG_SHORT[c.segment] || c.segment,
-    impact: `saves ${fmt(c.drr?.spend, 'rsk')}/d`,
-    impactColor: "#22c55e",
-    action: `Pause. ${breachList(c) || 'Score below cut line'}`
-  })), cuts.length > 10 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#4b5563',
-      fontSize: 9,
-      padding: '2px 8px'
-    }
-  }, "+", cuts.length - 10, " more \u2014 see Excel export")), reduces.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\u2B07",
-    title: "Reduce Budget 25%",
-    accent: "#f97316",
-    count: reduces.length,
-    sub: `saves ~${fmt(reduceSavings, 'rsk')}/d`
-  }, reduces.slice(0, 10).map(c => /*#__PURE__*/React.createElement(Row, {
-    key: 'red_' + c.campaign,
-    id: 'red_' + c.campaign,
-    name: c.campaign,
-    tag: SEG_SHORT[c.segment] || c.segment,
-    impact: `~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d`,
-    impactColor: "#22c55e",
-    action: `${breachList(c) || '2 metric breaches'} · spend ${fmt(c.drr?.spend, 'rsk')}/d`
-  }))), optimises.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83D\uDD27",
-    title: "Optimise",
-    accent: "#f59e0b",
-    count: optimises.length,
-    sub: "one metric breaching \u2014 specific fix per campaign"
-  }, optimises.slice(0, 10).map(c => /*#__PURE__*/React.createElement(Row, {
-    key: 'opt_' + c.campaign,
-    id: 'opt_' + c.campaign,
-    name: c.campaign,
-    tag: SEG_SHORT[c.segment] || c.segment,
-    impact: `${fmt(c.drr?.spend, 'rsk')}/d`,
-    impactColor: "#f59e0b",
-    action: optimiseAction(c)
-  })), optimises.length > 10 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#4b5563',
-      fontSize: 9,
-      padding: '2px 8px'
-    }
-  }, "+", optimises.length - 10, " more \u2014 see Excel export")), qtyDrops.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, qtyDrops.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDCE6",
     title: "Qty Drops vs Prev Period",
     accent: "#ef4444",
     count: qtyDrops.length,
-    sub: "units/d down \u226530% \xB7 driver attached"
+    sub: "ranked by units/d lost \xB7 driver attached"
   }, qtyDrops.slice(0, 10).map(({
     c,
     pv
@@ -8512,9 +8651,9 @@ function DailyBriefView({
     id: 'qd_' + c.campaign,
     name: c.campaign,
     tag: SEG_SHORT[c.segment] || c.segment,
-    impact: `${(pv.drr?.totalQty || 0).toFixed(1)} → ${(c.drr?.totalQty || 0).toFixed(1)}/d`,
+    impact: `${((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1)} units/d`,
     impactColor: "#ef4444",
-    action: `▼${Math.round(((pv.drr?.totalQty || 0) - (c.drr?.totalQty || 0)) / (pv.drr?.totalQty || 1) * 100)}% units. Driver: ${qtyDriver(c, pv)}`
+    action: `${(pv.drr?.totalQty || 0).toFixed(1)} → ${(c.drr?.totalQty || 0).toFixed(1)}/d (▼${Math.round(((pv.drr?.totalQty || 0) - (c.drr?.totalQty || 0)) / (pv.drr?.totalQty || 1) * 100)}%). Driver: ${qtyDriver(c, pv)}`
   }))), revertHikes.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDCB8",
     title: "Revert Budget Hikes",
@@ -8793,6 +8932,19 @@ function App() {
     } = appState;
     return aggregateKeywordsByKw(allRows, ltvMap, r.pStart, r.pEnd, campaignIndexMap);
   }, [appState, getPrevRange]);
+
+  // Keyword × campaign grain for the Excel export (selected period)
+  const kwCamp = useMemo(() => {
+    if (!appState) return [];
+    const {
+      allRows,
+      ltvMap,
+      campaignIndexMap,
+      startDate,
+      endDate
+    } = appState;
+    return aggregateKeywords(allRows, ltvMap, startDate, endDate, campaignIndexMap);
+  }, [appState]);
 
   // Sudden-change alerts — always on latest data date, not the selected period
   const alerts = useMemo(() => {
@@ -9099,7 +9251,8 @@ function App() {
     prevCampaigns: prevCampaigns,
     alerts: alerts,
     kwAlerts: kwAlerts,
-    endDate: bounds.max
+    endDate: bounds.max,
+    kwCamp: kwCamp
   }), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns
@@ -9167,7 +9320,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v2 excel-export + noaction + qty-drops + merged-brief
+// build: v3 fixlist + formula-subtotals + kw-x-campaign + constraints
 
 </script>
 </body></html>
