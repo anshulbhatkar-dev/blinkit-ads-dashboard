@@ -490,6 +490,67 @@ function extractRow(row, type) {
   return null;
 }
 
+// ─── INDEXEDDB CACHE ─────────────────────────────────────────────────────────
+// localStorage caps at ~5MB — the Search sheet CSV (40MB+) silently failed to
+// cache, so every load re-downloaded it. IndexedDB has no practical size cap.
+
+const IDB_NAME = 'blinkit_dash',
+  IDB_STORE = 'sheets';
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(IDB_NAME, 1);
+    r.onupgradeneeded = e => {
+      e.target.result.createObjectStore(IDB_STORE);
+    };
+    r.onsuccess = e => res(e.target.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbGet(key) {
+  try {
+    const db = await idbOpen();
+    return await new Promise(res => {
+      const tx = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+      tx.onsuccess = () => {
+        res(tx.result);
+        db.close();
+      };
+      tx.onerror = () => {
+        res(null);
+        db.close();
+      };
+    });
+  } catch (e) {
+    return null;
+  }
+}
+async function idbSet(key, val) {
+  try {
+    const db = await idbOpen();
+    await new Promise(res => {
+      const tx = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).put(val, key);
+      tx.onsuccess = res;
+      tx.onerror = res;
+    });
+    db.close();
+  } catch (e) {}
+}
+async function clearSheetCache() {
+  try {
+    const db = await idbOpen();
+    await new Promise(res => {
+      const tx = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).clear();
+      tx.onsuccess = res;
+      tx.onerror = res;
+    });
+    db.close();
+  } catch (e) {}
+  // also clear legacy localStorage keys (frees the old quota)
+  try {
+    Object.keys(localStorage).filter(k => k.startsWith('blinkit_sheet_')).forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
+}
+
 // ─── DATA FETCH ──────────────────────────────────────────────────────────────
 
 async function fetchAllDataFromSheets() {
@@ -497,27 +558,21 @@ async function fetchAllDataFromSheets() {
   const cutoffDate = new Date(today.getFullYear(), today.getMonth() - 3, 1);
   const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours in ms
 
+  // one-time: free legacy localStorage quota
+  try {
+    Object.keys(localStorage).filter(k => k.startsWith('blinkit_sheet_')).forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
   const fetchWithCache = async gid => {
     const cacheKey = `blinkit_sheet_${gid}`;
-    try {
-      const cached = localStorage.getItem(cacheKey);
-      if (cached) {
-        const {
-          ts,
-          data
-        } = JSON.parse(cached);
-        if (Date.now() - ts < CACHE_TTL) return data;
-      }
-    } catch (e) {}
+    const cached = await idbGet(cacheKey);
+    if (cached && cached.ts && Date.now() - cached.ts < CACHE_TTL) return cached.data;
     const r = await fetch(SHEET_BASE + gid);
     if (!r.ok) throw new Error(`Sheet ${gid} returned ${r.status}`);
     const text = await r.text();
-    try {
-      localStorage.setItem(cacheKey, JSON.stringify({
-        ts: Date.now(),
-        data: text
-      }));
-    } catch (e) {}
+    idbSet(cacheKey, {
+      ts: Date.now(),
+      data: text
+    }); // fire-and-forget
     return text;
   };
   const [condText, idxText, salesText, ...rawTexts] = await Promise.all([fetchWithCache(CONDITIONS_GID), fetchWithCache(CAMPAIGN_IDX_GID), fetchWithCache(SALES_IMPORT_GID), ...RAW_SHEET_CFGS.map(c => fetchWithCache(c.gid))]);
@@ -636,12 +691,17 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     groups[key].rows.push(r);
   });
 
-  // Also compute total historical days for isInsuf check
+  // Also compute total historical days + cumulative spend for isInsuf check
   const histDays = {};
+  const histSpend = {};
   allRows.forEach(r => {
     const key = r.campaign.toLowerCase();
-    if (!histDays[key]) histDays[key] = new Set();
+    if (!histDays[key]) {
+      histDays[key] = new Set();
+      histSpend[key] = 0;
+    }
     if (r.date) histDays[key].add(r.date.toDateString());
+    histSpend[key] += r.spend || 0;
   });
 
   // Check last activity for inactive (across all data)
@@ -707,10 +767,14 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       if (!dailyMeta[dk]) dailyMeta[dk] = {
         date: r.date,
         cpm: 0,
-        budget: 0
+        budget: 0,
+        spend: 0,
+        sales: 0
       };
       dailyMeta[dk].cpm = Math.max(dailyMeta[dk].cpm, r.cpm || 0);
       dailyMeta[dk].budget = Math.max(dailyMeta[dk].budget, r.budget || 0);
+      dailyMeta[dk].spend += r.spend || 0;
+      dailyMeta[dk].sales += r.directSales || 0;
     });
     const dailyList = Object.values(dailyMeta).sort((a, b) => a.date - b.date);
     let lastCpmChange = null,
@@ -738,6 +802,29 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     const currentDailyBudget = dailyList.length > 0 ? dailyList[dailyList.length - 1].budget || null : null;
     const lastChange = lastCpmChange || lastBudgetChange ? [lastCpmChange, lastBudgetChange].filter(Boolean).reduce((a, b) => a > b ? a : b) : null;
 
+    // Incremental ROAS after last budget hike — did the extra spend actually buy sales?
+    // pre = up to 5 days before the change, post = up to 7 days from the change.
+    let iRoas = null,
+      iRoasDeltaSpend = null,
+      iRoasDeltaSales = null,
+      iRoasPostDays = null;
+    if (lastBudgetChange) {
+      const pre = dailyList.filter(d => d.date < lastBudgetChange).slice(-5);
+      const post = dailyList.filter(d => d.date >= lastBudgetChange).slice(0, 7);
+      if (pre.length >= 2 && post.length >= 2) {
+        const avg = (arr, f) => arr.reduce((s, d) => s + f(d), 0) / arr.length;
+        const dSp = avg(post, d => d.spend) - avg(pre, d => d.spend);
+        const dSa = avg(post, d => d.sales) - avg(pre, d => d.sales);
+        if (dSp > 200) {
+          // only meaningful hikes
+          iRoas = dSa / dSp;
+          iRoasDeltaSpend = dSp;
+          iRoasDeltaSales = dSa;
+          iRoasPostDays = post.length;
+        }
+      }
+    }
+
     // Daily run rate (DRR) — absolute metrics divided by period length
     const drr = {
       spend: totSpend / numDays,
@@ -764,7 +851,9 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     const lastDateAll = allRows.filter(r => r.campaign.toLowerCase() === key).reduce((m, r) => r.date > m ? r.date : m, new Date(0));
     const daysSinceLive = daysBetween(lastDateAll, globalMaxDate);
     const isInactive = daysSinceLive > 1;
-    const isInsuf = allDates.size < 10;
+    // q-comm verdicts shouldn't wait 10 days if the campaign has already burned real money:
+    // insufficient only if BOTH <10 days live AND <₹3K cumulative historical spend
+    const isInsuf = allDates.size < 10 && (histSpend[key] || 0) < 3000;
     const bm = BENCHMARKS[segment] || null;
     let roasScore = null,
       nurScore = null,
@@ -775,6 +864,32 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       nurScore = nur !== null ? metricScore(nur, bm.nurF, bm.nurH, bm.nurS) : null;
       ltvScore = ltvCac !== null ? metricScore(ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null;
       if (roasScore !== null && nurScore !== null && ltvScore !== null) score = roasScore * bm.roasWt + nurScore * bm.nurWt + ltvScore * bm.ltvWt;
+    }
+
+    // 7-day trend score: same composite on just the last 7 days of the window.
+    // Catches campaigns collapsing this week that period averages still mask.
+    let score7 = null,
+      trend = null;
+    if (bm && hasMetrics && numDays >= 10) {
+      const t7start = new Date(endDate.getTime() - 6 * 864e5);
+      const rows7 = rows.filter(r => r.date >= t7start);
+      if (rows7.length > 0) {
+        const s7 = rows7.reduce((s, r) => s + r.spend, 0);
+        const ds7 = rows7.reduce((s, r) => s + r.directSales, 0);
+        const nu7 = rows7.reduce((s, r) => s + r.newUsers, 0);
+        const q7 = rows7.reduce((s, r) => s + r.directQty + r.indirectQty, 0);
+        const roas7 = s7 > 0 ? ds7 / s7 : null;
+        const nur7 = q7 > 0 ? nu7 / q7 : null;
+        const cac7 = nu7 > 0 ? s7 / nu7 : null;
+        const ltvCac7 = ltv && cac7 ? ltv / cac7 : null;
+        const rs = roas7 !== null ? metricScore(roas7, bm.roasF, bm.roasH, bm.roasS) : null;
+        const ns = nur7 !== null ? metricScore(nur7, bm.nurF, bm.nurH, bm.nurS) : null;
+        const ls = ltvCac7 !== null ? metricScore(ltvCac7, bm.ltvF, bm.ltvH, bm.ltvS) : null;
+        if (rs !== null && ns !== null && ls !== null) score7 = rs * bm.roasWt + ns * bm.nurWt + ls * bm.ltvWt;
+      }
+      if (score !== null && score7 !== null && totSpend / numDays >= 300) {
+        if (score7 <= score - 20) trend = 'deteriorating';else if (score7 >= score + 20) trend = 'improving';
+      }
     }
     const verdict = hasMetrics ? computeVerdict(roas, nur, ltvCac, score, bm, isInactive, isInsuf) : 'Insufficient Data';
     campaigns.push({
@@ -816,6 +931,12 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       nurScore,
       ltvScore,
       score,
+      score7,
+      trend,
+      iRoas,
+      iRoasDeltaSpend,
+      iRoasDeltaSales,
+      iRoasPostDays,
       verdict,
       daysLive: allDates.size,
       windowDays: winDates.length,
@@ -1277,6 +1398,316 @@ function getDateBounds(allRows) {
     min,
     max
   };
+}
+
+// ─── SUDDEN-CHANGE ALERT ENGINE ──────────────────────────────────────────────
+// Last 2 days vs prior 7-day baseline. Catches bid intensification, budget
+// choke, conversion breaks. Always runs on the latest data date (bounds.max),
+// independent of the selected analysis period.
+
+function computeAlerts(allRows, refDate, campaignIndexMap = {}) {
+  if (!refDate) return [];
+  const DAY = 864e5;
+  const dayKey = d => d.toDateString();
+  const recentKeys = [dayKey(new Date(refDate.getTime() - DAY)), dayKey(refDate)];
+  const baseKeys = [];
+  for (let i = 8; i >= 2; i--) baseKeys.push(dayKey(new Date(refDate.getTime() - i * DAY)));
+
+  // per-campaign per-day stats + per-brand×category daily impressions
+  const camps = {};
+  const catImp = {};
+  allRows.forEach(r => {
+    if (!r.date) return;
+    const dk = dayKey(r.date);
+    const ck = r.campaign.toLowerCase();
+    if (!camps[ck]) camps[ck] = {
+      name: r.campaign,
+      brand: r.brand,
+      category: r.category,
+      segment: null,
+      hasMetrics: r.hasMetrics,
+      days: {}
+    };
+    if (r.hasMetrics) camps[ck].hasMetrics = true;
+    if (!camps[ck].segment && r.segment) camps[ck].segment = r.segment;
+    const c = camps[ck];
+    if (!c.days[dk]) c.days[dk] = {
+      impr: 0,
+      spend: 0,
+      sales: 0,
+      qty: 0,
+      nu: 0,
+      posN: 0,
+      posI: 0,
+      cpmN: 0,
+      cpmI: 0,
+      hours: 0,
+      budget: 0
+    };
+    const d = c.days[dk];
+    d.impr += r.impressions || 0;
+    d.spend += r.spend || 0;
+    d.sales += r.directSales || 0;
+    d.qty += (r.directQty || 0) + (r.indirectQty || 0);
+    d.nu += r.newUsers || 0;
+    if (r.position > 0 && r.impressions > 0) {
+      d.posN += r.position * r.impressions;
+      d.posI += r.impressions;
+    }
+    if (r.cpm > 0 && r.impressions > 0) {
+      d.cpmN += r.cpm * r.impressions;
+      d.cpmI += r.impressions;
+    }
+    d.hours = Math.max(d.hours, r.hoursLive || 0);
+    d.budget = Math.max(d.budget, r.budget || 0);
+    const catK = `${r.brand || ''}||${r.category || ''}`;
+    if (!catImp[catK]) catImp[catK] = {};
+    catImp[catK][dk] = (catImp[catK][dk] || 0) + (r.impressions || 0);
+  });
+  const alerts = [];
+  Object.entries(camps).forEach(([ck, c]) => {
+    // must be live now (spend in last 2 days)
+    if (!recentKeys.some(k => c.days[k] && c.days[k].spend > 0)) return;
+    // need a stable baseline: ≥4 of 7 baseline days with activity
+    const baseDataDays = baseKeys.filter(k => c.days[k] && (c.days[k].impr > 0 || c.days[k].spend > 0));
+    if (baseDataDays.length < 4) return;
+    const B = f => baseDataDays.reduce((s, k) => s + f(c.days[k]), 0) / baseDataDays.length;
+    const R = f => recentKeys.reduce((s, k) => s + (c.days[k] ? f(c.days[k]) : 0), 0) / recentKeys.length;
+    const wavgB = (nf, df) => {
+      let n = 0,
+        i = 0;
+      baseDataDays.forEach(k => {
+        n += nf(c.days[k]);
+        i += df(c.days[k]);
+      });
+      return i > 0 ? n / i : null;
+    };
+    const wavgR = (nf, df) => {
+      let n = 0,
+        i = 0;
+      recentKeys.forEach(k => {
+        const d = c.days[k];
+        if (d) {
+          n += nf(d);
+          i += df(d);
+        }
+      });
+      return i > 0 ? n / i : null;
+    };
+    const baseSpend = B(d => d.spend);
+    if (baseSpend < 500) return; // materiality floor — ignore long tail
+
+    const baseImpr = B(d => d.impr),
+      recImpr = R(d => d.impr);
+    const baseSales = B(d => d.sales),
+      recSales = R(d => d.sales);
+    const baseHours = B(d => d.hours),
+      recHours = R(d => d.hours);
+    const baseBudget = B(d => d.budget),
+      recBudget = R(d => d.budget);
+    const recSpend = R(d => d.spend);
+    const baseQty = B(d => d.qty),
+      recQty = R(d => d.qty);
+    const baseNu = B(d => d.nu),
+      recNu = R(d => d.nu);
+    const baseRoas = baseSpend > 0 ? baseSales / baseSpend : null;
+    const recRoas = recSpend > 0 ? recSales / recSpend : null;
+    const baseNur = baseQty > 0 ? baseNu / baseQty : null;
+    const recNur = recQty > 0 ? recNu / recQty : null;
+    const baseRank = wavgB(d => d.posN, d => d.posI),
+      recRank = wavgR(d => d.posN, d => d.posI);
+    const baseCpm = wavgB(d => d.cpmN, d => d.cpmI),
+      recCpm = wavgR(d => d.cpmN, d => d.cpmI);
+
+    // drop metrics require BOTH recent days to individually breach — kills one-day noise
+    const bothBelow = (f, frac, baseVal) => baseVal > 0 && recentKeys.every(k => (c.days[k] ? f(c.days[k]) : 0) < baseVal * frac);
+    const flags = [];
+    const imprDrop = bothBelow(d => d.impr, 0.70, baseImpr);
+    if (imprDrop) flags.push({
+      metric: 'impressions',
+      pct: 1 - recImpr / baseImpr,
+      label: `Impr ▼${Math.round((1 - recImpr / baseImpr) * 100)}%`,
+      detail: `${Math.round(recImpr).toLocaleString('en-IN')}/d vs ${Math.round(baseImpr).toLocaleString('en-IN')}/d baseline`
+    });
+    const rankWorse = baseRank != null && recRank != null && recRank - baseRank >= 1.5;
+    if (rankWorse) flags.push({
+      metric: 'rank',
+      pct: Math.min(1, (recRank - baseRank) / Math.max(baseRank, 1)),
+      label: `Rank ${baseRank.toFixed(1)}→${recRank.toFixed(1)}`,
+      detail: 'avg position slipped'
+    });
+    const budgetFlat = baseBudget > 0 ? recBudget >= baseBudget * 0.95 : true;
+    const spendDrop = bothBelow(d => d.spend, 0.70, baseSpend) && budgetFlat;
+    if (spendDrop) flags.push({
+      metric: 'spend',
+      pct: 1 - recSpend / baseSpend,
+      label: `Spend ▼${Math.round((1 - recSpend / baseSpend) * 100)}%`,
+      detail: 'budget unchanged — not winning auctions'
+    });
+    if (c.hasMetrics && baseRoas > 0 && baseSales >= 500 && recRoas != null && recRoas < baseRoas * 0.6) flags.push({
+      metric: 'roas',
+      pct: 1 - recRoas / baseRoas,
+      label: `ROAS ${baseRoas.toFixed(1)}x→${recRoas.toFixed(1)}x`,
+      detail: 'conversion broke — check price / OOS / competitor offer'
+    });
+    if (c.hasMetrics && baseSales >= 500 && bothBelow(d => d.sales, 0.60, baseSales) && !imprDrop && recImpr >= baseImpr * 0.85) flags.push({
+      metric: 'sales',
+      pct: 1 - recSales / baseSales,
+      label: `Sales ▼${Math.round((1 - recSales / baseSales) * 100)}%`,
+      detail: 'impressions flat — CTR/conversion problem, not visibility'
+    });
+    if (c.hasMetrics && baseNur != null && recNur != null && baseQty >= 10 && baseNur - recNur >= 0.15) flags.push({
+      metric: 'nur',
+      pct: baseNur - recNur,
+      label: `NUR ${(baseNur * 100).toFixed(0)}%→${(recNur * 100).toFixed(0)}%`,
+      detail: 'new-user share dropped'
+    });
+    if (flags.length === 0) return;
+
+    // cause diagnosis for visibility drops
+    let cause = null;
+    if (imprDrop || spendDrop || rankWorse) {
+      const cd = catImp[`${c.brand || ''}||${c.category || ''}`] || {};
+      const cbArr = baseKeys.map(k => cd[k]).filter(v => v > 0);
+      const catBase = cbArr.length ? cbArr.reduce((s, v) => s + v, 0) / cbArr.length : null;
+      const catRec = recentKeys.reduce((s, k) => s + (cd[k] || 0), 0) / recentKeys.length;
+      if (baseHours > 0 && recHours < baseHours * 0.7) cause = 'Hours live dropped — budget exhausting early → raise budget';else if (rankWorse && baseCpm != null && recCpm != null && recCpm <= baseCpm * 1.05) cause = 'Outbid — rank slipped at flat CPM → competitor intensified, raise CPM';else if (catBase && catRec < catBase * 0.8) cause = 'Category-wide impression dip — demand issue, hold bids';else cause = 'No single cause — check delisting / serving status in Blinkit panel';
+    }
+    alerts.push({
+      campaign: c.name,
+      brand: c.brand,
+      category: c.category,
+      segment: campaignIndexMap[ck] || c.segment || null,
+      flags,
+      cause,
+      baseSpend,
+      recSpend,
+      baseImpr,
+      recImpr,
+      severity: Math.max(...flags.map(f => f.pct)) * baseSpend
+    });
+  });
+  return alerts.sort((a, b) => b.severity - a.severity);
+}
+
+// Keyword-level: same 2d vs 7d logic on Search rows grouped by keyword.
+// Bid wars show up here first — a head-term rank slip hides inside campaign aggregates.
+function computeKeywordAlerts(allRows, refDate) {
+  if (!refDate) return [];
+  const DAY = 864e5;
+  const dayKey = d => d.toDateString();
+  const recentKeys = [dayKey(new Date(refDate.getTime() - DAY)), dayKey(refDate)];
+  const baseKeys = [];
+  for (let i = 8; i >= 2; i--) baseKeys.push(dayKey(new Date(refDate.getTime() - i * DAY)));
+  const kws = {};
+  allRows.forEach(r => {
+    if (!r.date || r.type !== 'Search' || !r.keyword) return;
+    const dk = dayKey(r.date);
+    const kk = r.keyword.toLowerCase();
+    if (!kws[kk]) kws[kk] = {
+      keyword: r.keyword,
+      campSpend: {},
+      brand: r.brand,
+      category: r.category,
+      days: {}
+    };
+    const g = kws[kk];
+    if (!g.days[dk]) g.days[dk] = {
+      impr: 0,
+      spend: 0,
+      posN: 0,
+      posI: 0,
+      cpmN: 0,
+      cpmI: 0
+    };
+    const d = g.days[dk];
+    d.impr += r.impressions || 0;
+    d.spend += r.spend || 0;
+    if (r.position > 0 && r.impressions > 0) {
+      d.posN += r.position * r.impressions;
+      d.posI += r.impressions;
+    }
+    if (r.cpm > 0 && r.impressions > 0) {
+      d.cpmN += r.cpm * r.impressions;
+      d.cpmI += r.impressions;
+    }
+    g.campSpend[r.campaign] = (g.campSpend[r.campaign] || 0) + (r.spend || 0);
+  });
+  const alerts = [];
+  Object.values(kws).forEach(g => {
+    if (!recentKeys.some(k => g.days[k] && g.days[k].spend > 0)) return;
+    const baseDataDays = baseKeys.filter(k => g.days[k] && (g.days[k].impr > 0 || g.days[k].spend > 0));
+    if (baseDataDays.length < 4) return;
+    const B = f => baseDataDays.reduce((s, k) => s + f(g.days[k]), 0) / baseDataDays.length;
+    const R = f => recentKeys.reduce((s, k) => s + (g.days[k] ? f(g.days[k]) : 0), 0) / recentKeys.length;
+    const baseSpend = B(d => d.spend);
+    if (baseSpend < 200) return;
+    const baseImpr = B(d => d.impr),
+      recImpr = R(d => d.impr);
+    const recSpend = R(d => d.spend);
+    const wavgB = (nf, df) => {
+      let n = 0,
+        i = 0;
+      baseDataDays.forEach(k => {
+        n += nf(g.days[k]);
+        i += df(g.days[k]);
+      });
+      return i > 0 ? n / i : null;
+    };
+    const wavgR = (nf, df) => {
+      let n = 0,
+        i = 0;
+      recentKeys.forEach(k => {
+        const d = g.days[k];
+        if (d) {
+          n += nf(d);
+          i += df(d);
+        }
+      });
+      return i > 0 ? n / i : null;
+    };
+    const baseRank = wavgB(d => d.posN, d => d.posI),
+      recRank = wavgR(d => d.posN, d => d.posI);
+    const baseCpm = wavgB(d => d.cpmN, d => d.cpmI),
+      recCpm = wavgR(d => d.cpmN, d => d.cpmI);
+    const bothBelow = (f, frac, baseVal) => baseVal > 0 && recentKeys.every(k => (g.days[k] ? f(g.days[k]) : 0) < baseVal * frac);
+    const flags = [];
+    if (bothBelow(d => d.impr, 0.70, baseImpr)) flags.push({
+      metric: 'impressions',
+      pct: 1 - recImpr / baseImpr,
+      label: `Impr ▼${Math.round((1 - recImpr / baseImpr) * 100)}%`,
+      detail: `${Math.round(recImpr).toLocaleString('en-IN')}/d vs ${Math.round(baseImpr).toLocaleString('en-IN')}/d`
+    });
+    const rankWorse = baseRank != null && recRank != null && recRank - baseRank >= 1.5;
+    if (rankWorse) flags.push({
+      metric: 'rank',
+      pct: Math.min(1, (recRank - baseRank) / Math.max(baseRank, 1)),
+      label: `Rank ${baseRank.toFixed(1)}→${recRank.toFixed(1)}`,
+      detail: 'position slipped'
+    });
+    if (bothBelow(d => d.spend, 0.70, baseSpend)) flags.push({
+      metric: 'spend',
+      pct: 1 - recSpend / baseSpend,
+      label: `Spend ▼${Math.round((1 - recSpend / baseSpend) * 100)}%`,
+      detail: 'not winning auctions'
+    });
+    if (flags.length === 0) return;
+    let cause = null;
+    if (rankWorse && baseCpm != null && recCpm != null && recCpm <= baseCpm * 1.05) cause = 'Outbid at flat CPM — competitor pushed this keyword';
+    const topCamp = Object.entries(g.campSpend).sort((a, b) => b[1] - a[1])[0];
+    alerts.push({
+      keyword: g.keyword,
+      brand: g.brand,
+      category: g.category,
+      campaign: topCamp ? topCamp[0] : null,
+      flags,
+      cause,
+      baseSpend,
+      recSpend,
+      severity: Math.max(...flags.map(f => f.pct)) * baseSpend
+    });
+  });
+  return alerts.sort((a, b) => b.severity - a.severity);
 }
 
 // ─── UI ATOMS ────────────────────────────────────────────────────────────────
@@ -2247,7 +2678,7 @@ function CampaignDetail({
       gap: 8,
       marginBottom: 12
     }
-  }, mBox('Spend/day', fmt(campaign.drr?.spend, 'rsk'), `Total ${fmt(campaign.spend, 'rsk')} · ${numDays}d`, null, prevCampaign?.drr?.spend), mBox('Sales/day', fmt(campaign.drr?.directSales, 'rsk'), campaign.roas != null ? `D.ROAS ${fmt(campaign.roas, 'x')}` : null, campaign.roas != null && bm ? mColor(campaign.roas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.drr?.directSales), mBox('Total ROAS', campaign.avgTotalRoas != null ? `${campaign.avgTotalRoas.toFixed(2)}x` : '—', 'Direct+Indirect', campaign.avgTotalRoas != null && bm ? mColor(campaign.avgTotalRoas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.avgTotalRoas), mBox('New Users/day', fmt(campaign.drr?.newUsers, 'int'), campaign.nur != null ? `NUR ${fmt(campaign.nur, '%')}` : null, campaign.nur != null && bm ? mColor(campaign.nur, bm.nurF, bm.nurH, bm.nurS) : null, prevCampaign?.drr?.newUsers), mBox('LTV:CAC', campaign.ltvCac != null ? fmt(campaign.ltvCac, 'x') : '—', campaign.cac != null ? `CAC ${fmt(campaign.cac, 'rs')}` : null, campaign.ltvCac != null && bm ? mColor(campaign.ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null, prevCampaign?.ltvCac), mBox('Impressions/day', fmt(campaign.drr?.impressions, 'int'), campaign.avgPos ? `Rank ${campaign.avgPos.toFixed(1)}` : null, null, prevCampaign?.drr?.impressions), mBox('Orders/day', fmt(campaign.drr?.totalQty, 'int'), `Dir ${fmt(campaign.drr?.directSales && campaign.drr?.totalQty ? campaign.directSales / (campaign.totalQty || 1) : 0, 'rs')}/order`, null, prevCampaign?.drr?.totalQty), campaign.avgCpm != null && mBox('Avg CPM', fmt(campaign.avgCpm, 'rs'), null, null, prevCampaign?.avgCpm), campaign.utilization != null && mBox('Utilization', `${(campaign.utilization * 100).toFixed(0)}%`, campaign.utilization >= 0.9 ? '⚠ Near/over budget' : campaign.utilization >= 0.7 ? '✓ Healthy' : '↓ Under-utilizing', campaign.utilization >= 0.9 ? '#ef4444' : campaign.utilization >= 0.7 ? '#22c55e' : '#f59e0b', prevCampaign?.utilization), mBox('Score', campaign.score != null ? Math.round(campaign.score) : '—', `${campaign.daysLive} days live`, null, prevCampaign?.score)), dailyData.length >= 2 && /*#__PURE__*/React.createElement("div", {
+  }, mBox('Spend/day', fmt(campaign.drr?.spend, 'rsk'), `Total ${fmt(campaign.spend, 'rsk')} · ${numDays}d`, null, prevCampaign?.drr?.spend), mBox('Sales/day', fmt(campaign.drr?.directSales, 'rsk'), campaign.roas != null ? `D.ROAS ${fmt(campaign.roas, 'x')}` : null, campaign.roas != null && bm ? mColor(campaign.roas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.drr?.directSales), mBox('Total ROAS', campaign.avgTotalRoas != null ? `${campaign.avgTotalRoas.toFixed(2)}x` : '—', 'Direct+Indirect', campaign.avgTotalRoas != null && bm ? mColor(campaign.avgTotalRoas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.avgTotalRoas), mBox('New Users/day', fmt(campaign.drr?.newUsers, 'int'), campaign.nur != null ? `NUR ${fmt(campaign.nur, '%')}` : null, campaign.nur != null && bm ? mColor(campaign.nur, bm.nurF, bm.nurH, bm.nurS) : null, prevCampaign?.drr?.newUsers), mBox('LTV:CAC', campaign.ltvCac != null ? fmt(campaign.ltvCac, 'x') : '—', campaign.cac != null ? `CAC ${fmt(campaign.cac, 'rs')}` : null, campaign.ltvCac != null && bm ? mColor(campaign.ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null, prevCampaign?.ltvCac), mBox('Impressions/day', fmt(campaign.drr?.impressions, 'int'), campaign.avgPos ? `Rank ${campaign.avgPos.toFixed(1)}` : null, null, prevCampaign?.drr?.impressions), mBox('Orders/day', fmt(campaign.drr?.totalQty, 'int'), `Dir ${fmt(campaign.drr?.directSales && campaign.drr?.totalQty ? campaign.directSales / (campaign.totalQty || 1) : 0, 'rs')}/order`, null, prevCampaign?.drr?.totalQty), campaign.avgCpm != null && mBox('Avg CPM', fmt(campaign.avgCpm, 'rs'), null, null, prevCampaign?.avgCpm), campaign.utilization != null && mBox('Utilization', `${(campaign.utilization * 100).toFixed(0)}%`, campaign.utilization >= 0.9 ? '⚠ Near/over budget' : campaign.utilization >= 0.7 ? '✓ Healthy' : '↓ Under-utilizing', campaign.utilization >= 0.9 ? '#ef4444' : campaign.utilization >= 0.7 ? '#22c55e' : '#f59e0b', prevCampaign?.utilization), mBox('Score', campaign.score != null ? Math.round(campaign.score) : '—', `${campaign.daysLive} days live`, null, prevCampaign?.score), campaign.iRoas != null && mBox('Incr. ROAS (last hike)', fmt(campaign.iRoas, 'x'), `+${fmt(campaign.iRoasDeltaSpend, 'rsk')}/d spend → +${fmt(campaign.iRoasDeltaSales, 'rsk')}/d sales`, campaign.iRoas < 0.8 ? '#ef4444' : campaign.iRoas < 1.5 ? '#f59e0b' : '#22c55e'), campaign.score7 != null && mBox('7d Score', Math.round(campaign.score7), campaign.trend === 'deteriorating' ? '▼ collapsing vs period' : campaign.trend === 'improving' ? '▲ improving vs period' : 'stable', campaign.trend === 'deteriorating' ? '#ef4444' : campaign.trend === 'improving' ? '#22c55e' : null)), dailyData.length >= 2 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 20,
@@ -2780,7 +3211,8 @@ function ScorecardView({
   prevCampaigns,
   allRows,
   startDate,
-  endDate
+  endDate,
+  alertsMap = {}
 }) {
   const [search, setSearch] = useState('');
   const [searchMode, setSearchMode] = useState('contains');
@@ -3457,7 +3889,14 @@ function ScorecardView({
         marginRight: 5,
         fontSize: 8
       }
-    }, isExp ? '▼' : '▶'), c.campaign), /*#__PURE__*/React.createElement("td", {
+    }, isExp ? '▼' : '▶'), alertsMap[c.campaign.toLowerCase()] && /*#__PURE__*/React.createElement("span", {
+      title: alertsMap[c.campaign.toLowerCase()].flags.map(f => f.label).join(' · ') + (alertsMap[c.campaign.toLowerCase()].cause ? ' — ' + alertsMap[c.campaign.toLowerCase()].cause : ''),
+      style: {
+        color: '#ef4444',
+        marginRight: 4,
+        fontSize: 10
+      }
+    }, "\u26A0"), c.campaign), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         color: BRAND_COLORS[c.brand] || '#6b7280',
@@ -3661,12 +4100,27 @@ function ScorecardView({
       score: c.score
     })), /*#__PURE__*/React.createElement("td", {
       style: {
-        padding: '6px 8px'
+        padding: '6px 8px',
+        whiteSpace: 'nowrap'
       }
     }, /*#__PURE__*/React.createElement(VBadge, {
       verdict: c.verdict,
       sm: true
-    })), /*#__PURE__*/React.createElement("td", {
+    }), c.trend === 'deteriorating' && /*#__PURE__*/React.createElement("span", {
+      title: `7d score ${Math.round(c.score7)} vs period ${Math.round(c.score)} — collapsing this week`,
+      style: {
+        color: '#ef4444',
+        fontSize: 10,
+        marginLeft: 3
+      }
+    }, "\u25BC"), c.trend === 'improving' && /*#__PURE__*/React.createElement("span", {
+      title: `7d score ${Math.round(c.score7)} vs period ${Math.round(c.score)} — improving this week`,
+      style: {
+        color: '#22c55e',
+        fontSize: 10,
+        marginLeft: 3
+      }
+    }, "\u25B2")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         textAlign: 'right',
@@ -3919,7 +4373,8 @@ function ActionQueueView({
   campaigns,
   prevCampaigns,
   allRows,
-  endDate
+  endDate,
+  alertsMap = {}
 }) {
   const [verdictF, setVerdictF] = useState('All');
   const [sortBy, setSortBy] = useState('spend');
@@ -4084,11 +4539,12 @@ function ActionQueueView({
     const pv = prevMap[c.campaign.toLowerCase()];
     const budgetConsumption = c.currentDailyBudget > 0 ? (c.drr?.spend || 0) / c.currentDailyBudget : null;
     const cfg = VERDICT_CFG[c.verdict] || VERDICT_CFG['Inactive'];
+    const camAlert = alertsMap[c.campaign.toLowerCase()];
     return /*#__PURE__*/React.createElement("div", {
       key: c.campaign,
       style: {
         background: '#0d1117',
-        border: `1px solid ${cfg.border}`,
+        border: `1px solid ${camAlert ? 'rgba(239,68,68,0.45)' : cfg.border}`,
         borderRadius: 8,
         padding: '12px 14px'
       }
@@ -4113,12 +4569,37 @@ function ActionQueueView({
         marginBottom: 2,
         wordBreak: 'break-word'
       }
-    }, c.campaign), /*#__PURE__*/React.createElement("div", {
+    }, camAlert && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444',
+        marginRight: 4
+      }
+    }, "\u26A0"), c.campaign), /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#4b5563',
         fontSize: 10
       }
-    }, actionText(c))), /*#__PURE__*/React.createElement(VBadge, {
+    }, actionText(c)), camAlert && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 4,
+        background: 'rgba(239,68,68,0.07)',
+        border: '1px solid rgba(239,68,68,0.2)',
+        borderRadius: 5,
+        padding: '4px 8px'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444',
+        fontSize: 9,
+        fontWeight: 700
+      }
+    }, camAlert.flags.map(f => f.label).join(' · ')), camAlert.cause && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#f59e0b',
+        fontSize: 9,
+        marginLeft: 6
+      }
+    }, camAlert.cause))), /*#__PURE__*/React.createElement(VBadge, {
       verdict: c.verdict,
       sm: true
     })), /*#__PURE__*/React.createElement("div", {
@@ -7448,14 +7929,8 @@ function LoadingScreen({
   const [status, setStatus] = useState('loading');
   const [step, setStep] = useState('Connecting to Google Sheets…');
   const [err, setErr] = useState('');
-  const clearCache = () => {
-    try {
-      const keys = Object.keys(localStorage).filter(k => k.startsWith('blinkit_sheet_'));
-      keys.forEach(k => localStorage.removeItem(k));
-    } catch (e) {}
-  };
   const doLoad = useCallback(async (forceRefresh = false) => {
-    if (forceRefresh) clearCache();
+    if (forceRefresh) await clearSheetCache();
     setStatus('loading');
     setErr('');
     try {
@@ -7620,11 +8095,444 @@ function LoadingScreen({
   }, "\u21BA Retry"))));
 }
 
+// ─── DAILY BRIEF VIEW ────────────────────────────────────────────────────────
+// Landing tab: every action ranked by ₹ impact/day. No data diving — read top
+// to bottom, execute, check off.
+
+function DailyBriefView({
+  campaigns,
+  prevCampaigns,
+  alerts,
+  kwAlerts,
+  endDate
+}) {
+  const [done, setDone] = useState(new Set());
+  const [copied, setCopied] = useState(false);
+  const toggleDone = id => setDone(p => {
+    const n = new Set(p);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+  const prevMap = useMemo(() => {
+    const m = {};
+    (prevCampaigns || []).forEach(c => {
+      m[c.campaign.toLowerCase()] = c;
+    });
+    return m;
+  }, [prevCampaigns]);
+  const live = useMemo(() => campaigns.filter(c => !c.isInactive), [campaigns]);
+  const cuts = useMemo(() => live.filter(c => c.verdict === 'Cut').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
+  const reduces = useMemo(() => live.filter(c => c.verdict === 'Reduce').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
+  const scales = useMemo(() => live.filter(c => c.verdict === 'Scale' && (c.drr?.spend || 0) > 0).sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
+  const revertHikes = useMemo(() => live.filter(c => c.iRoas != null && c.iRoas < 0.8).sort((a, b) => (b.iRoasDeltaSpend || 0) - (a.iRoasDeltaSpend || 0)), [live]);
+  const deteriorating = useMemo(() => live.filter(c => c.trend === 'deteriorating' && c.verdict !== 'Cut' && c.verdict !== 'Reduce').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
+  const flips = useMemo(() => live.map(c => ({
+    c,
+    prev: prevMap[c.campaign.toLowerCase()]
+  })).filter(x => x.prev && x.prev.verdict !== x.c.verdict && (x.c.verdict === 'Cut' || x.c.verdict === 'Reduce') && ['Scale', 'Maintain', 'Optimise'].includes(x.prev.verdict)).sort((a, b) => (b.c.drr?.spend || 0) - (a.c.drr?.spend || 0)), [live, prevMap]);
+  const cutSavings = cuts.reduce((s, c) => s + (c.drr?.spend || 0), 0);
+  const reduceSavings = reduces.reduce((s, c) => s + (c.drr?.spend || 0) * 0.25, 0);
+  const alertRisk = alerts.slice(0, 15).reduce((s, a) => s + a.severity, 0);
+  const totalActions = cuts.length + reduces.length + revertHikes.length + flips.length + Math.min(alerts.length, 10) + Math.min(kwAlerts.length, 8);
+  const scaleAction = c => {
+    if (c.utilization != null && c.utilization >= 0.85) {
+      const extra = (c.currentDailyBudget || c.drr?.spend || 0) * 0.2;
+      const est = (c.roas || 0) * extra;
+      return `Budget-capped (util ${(c.utilization * 100).toFixed(0)}%) → raise budget +20% ≈ +${fmt(est, 'rsk')}/d sales at ${fmt(c.roas, 'x')}`;
+    }
+    if (c.utilization != null && c.utilization < 0.7) {
+      const unspent = Math.max(0, (c.currentDailyBudget || 0) - (c.drr?.spend || 0));
+      return `Under-utilizing (${(c.utilization * 100).toFixed(0)}%) — budget won't help, raise CPM to capture ${fmt(unspent, 'rsk')}/d unspent`;
+    }
+    return 'All metrics above floor — increase budget';
+  };
+
+  // plain-text action list for execution in the Blinkit panel
+  const copyActions = () => {
+    const L = [];
+    L.push(`BLINKIT ACTIONS — ${endDate ? endDate.toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short'
+    }) : ''}`);
+    if (alerts.length) {
+      L.push('', '— SUDDEN CHANGES —');
+      alerts.slice(0, 10).forEach(a => L.push(`[ ] ${a.campaign} · ${a.flags.map(f => f.label).join(', ')}${a.cause ? ' · ' + a.cause : ''}`));
+    }
+    if (kwAlerts.length) {
+      L.push('', '— KEYWORD ALERTS —');
+      kwAlerts.slice(0, 8).forEach(a => L.push(`[ ] "${a.keyword}" (${a.campaign || ''}) · ${a.flags.map(f => f.label).join(', ')}${a.cause ? ' · ' + a.cause : ''}`));
+    }
+    if (cuts.length) {
+      L.push('', '— CUT (pause) —');
+      cuts.forEach(c => L.push(`[ ] ${c.campaign} · saves ${fmt(c.drr?.spend, 'rsk')}/d`));
+    }
+    if (reduces.length) {
+      L.push('', '— REDUCE budget 25% —');
+      reduces.forEach(c => L.push(`[ ] ${c.campaign} · saves ~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d`));
+    }
+    if (revertHikes.length) {
+      L.push('', '— REVERT BUDGET HIKES (incremental ROAS < 0.8x) —');
+      revertHikes.forEach(c => L.push(`[ ] ${c.campaign} · hike +${fmt(c.iRoasDeltaSpend, 'rsk')}/d returned ${fmt(c.iRoas, 'x')} incremental`));
+    }
+    if (scales.length) {
+      L.push('', '— SCALE —');
+      scales.slice(0, 10).forEach(c => L.push(`[ ] ${c.campaign} · ${scaleAction(c)}`));
+    }
+    try {
+      navigator.clipboard.writeText(L.join('\n'));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {}
+  };
+  const Sec = ({
+    icon,
+    title,
+    accent,
+    count,
+    children,
+    sub
+  }) => /*#__PURE__*/React.createElement(Card, {
+    accent: accent,
+    style: {
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13
+    }
+  }, icon), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, title), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: accent,
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, count), sub && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginLeft: 'auto'
+    }
+  }, sub)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4
+    }
+  }, children));
+  const Row = ({
+    id,
+    name,
+    tag,
+    impact,
+    impactColor,
+    action,
+    meta
+  }) => {
+    const isDone = done.has(id);
+    return /*#__PURE__*/React.createElement("div", {
+      onClick: () => toggleDone(id),
+      style: {
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 8,
+        padding: '6px 8px',
+        borderRadius: 6,
+        background: isDone ? 'rgba(34,197,94,0.04)' : 'rgba(255,255,255,0.015)',
+        cursor: 'pointer',
+        opacity: isDone ? 0.45 : 1
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 13,
+        height: 13,
+        marginTop: 1,
+        border: `1px solid ${isDone ? '#22c55e' : '#374151'}`,
+        borderRadius: 3,
+        background: isDone ? '#22c55e' : 'transparent',
+        flexShrink: 0,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: '#fff',
+        fontSize: 9
+      }
+    }, isDone ? '✓' : ''), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 6,
+        flexWrap: 'wrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        fontWeight: 600,
+        textDecoration: isDone ? 'line-through' : 'none',
+        wordBreak: 'break-word'
+      }
+    }, name), tag && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#6b7280',
+        fontSize: 9
+      }
+    }, tag), impact && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: impactColor || '#9ca3af',
+        fontSize: 10,
+        fontWeight: 700,
+        marginLeft: 'auto',
+        whiteSpace: 'nowrap'
+      }
+    }, impact)), action && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 10,
+        marginTop: 1
+      }
+    }, action), meta && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 9,
+        marginTop: 1
+      }
+    }, meta)));
+  };
+  const statBox = (label, val, color, sub) => /*#__PURE__*/React.createElement(Card, {
+    style: {
+      flex: 1,
+      minWidth: 140,
+      padding: 14
+    },
+    accent: color
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 9,
+      textTransform: 'uppercase',
+      letterSpacing: '0.05em',
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: color || '#f9fafb',
+      fontSize: 19,
+      fontWeight: 700
+    }
+  }, val), sub && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginTop: 2
+    }
+  }, sub));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap',
+      alignItems: 'stretch'
+    }
+  }, statBox('Actions Today', totalActions, '#3b82f6', `${done.size} done`), statBox('Savings Available', fmt(cutSavings + reduceSavings, 'rsk') + '/d', '#22c55e', `${cuts.length} cuts · ${reduces.length} reduces`), statBox('₹ At Risk (alerts)', fmt(alertRisk, 'rsk') + '/d', '#ef4444', `${alerts.length} campaign · ${kwAlerts.length} keyword alerts`), statBox('Scale Candidates', scales.length, '#8b5cf6', 'metrics above floor'), /*#__PURE__*/React.createElement("button", {
+    onClick: copyActions,
+    style: {
+      background: copied ? 'rgba(34,197,94,0.15)' : '#1e3a5f',
+      color: copied ? '#22c55e' : '#93c5fd',
+      border: `1px solid ${copied ? '#22c55e' : '#2563eb'}`,
+      borderRadius: 10,
+      padding: '0 18px',
+      fontSize: 11,
+      fontWeight: 700,
+      cursor: 'pointer',
+      whiteSpace: 'nowrap'
+    }
+  }, copied ? '✓ Copied' : '⧉ Copy action list')), alerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\u26A0",
+    title: "Sudden Changes \u2014 Campaigns",
+    accent: "#ef4444",
+    count: alerts.length,
+    sub: "last 2d vs prior 7d \xB7 ranked by \u20B9 severity"
+  }, alerts.slice(0, 10).map(a => /*#__PURE__*/React.createElement(Row, {
+    key: 'al_' + a.campaign,
+    id: 'al_' + a.campaign,
+    name: a.campaign,
+    tag: `${a.brand || ''} · ${a.category || ''}`,
+    impact: `${fmt(a.severity, 'rsk')}/d at risk`,
+    impactColor: "#ef4444",
+    action: a.flags.map(f => f.label).join('  ·  '),
+    meta: a.cause || a.flags[0]?.detail
+  })), alerts.length > 10 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      padding: '2px 8px'
+    }
+  }, "+", alerts.length - 10, " more lower-severity")), kwAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\uD83D\uDD11",
+    title: "Keyword Alerts (Search)",
+    accent: "#f97316",
+    count: kwAlerts.length,
+    sub: "bid wars surface here first"
+  }, kwAlerts.slice(0, 8).map(a => /*#__PURE__*/React.createElement(Row, {
+    key: 'kw_' + a.keyword,
+    id: 'kw_' + a.keyword,
+    name: `"${a.keyword}"`,
+    tag: a.campaign || '',
+    impact: `${fmt(a.severity, 'rsk')}/d`,
+    impactColor: "#f97316",
+    action: a.flags.map(f => f.label).join('  ·  '),
+    meta: a.cause || a.flags[0]?.detail
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
+      gap: 14
+    }
+  }, cuts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\u2702",
+    title: "Cut Now",
+    accent: "#ef4444",
+    count: cuts.length,
+    sub: `saves ${fmt(cutSavings, 'rsk')}/d`
+  }, cuts.slice(0, 10).map(c => /*#__PURE__*/React.createElement(Row, {
+    key: 'cut_' + c.campaign,
+    id: 'cut_' + c.campaign,
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `saves ${fmt(c.drr?.spend, 'rsk')}/d`,
+    impactColor: "#22c55e",
+    action: `Pause. ROAS ${c.roas != null ? fmt(c.roas, 'x') : '—'} · NUR ${c.nur != null ? fmt(c.nur, '%') : '—'} · LTV:CAC ${c.ltvCac != null ? fmt(c.ltvCac, 'x') : '—'}`
+  })), cuts.length > 10 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      padding: '2px 8px'
+    }
+  }, "+", cuts.length - 10, " more in Action Queue")), reduces.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\u2B07",
+    title: "Reduce Budget 25%",
+    accent: "#f97316",
+    count: reduces.length,
+    sub: `saves ~${fmt(reduceSavings, 'rsk')}/d`
+  }, reduces.slice(0, 10).map(c => /*#__PURE__*/React.createElement(Row, {
+    key: 'red_' + c.campaign,
+    id: 'red_' + c.campaign,
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d`,
+    impactColor: "#22c55e",
+    action: `2 metric breaches · spend ${fmt(c.drr?.spend, 'rsk')}/d`
+  }))), revertHikes.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\uD83D\uDCB8",
+    title: "Revert Budget Hikes",
+    accent: "#ef4444",
+    count: revertHikes.length,
+    sub: "hike didn't buy sales \u2014 incremental ROAS < 0.8x"
+  }, revertHikes.slice(0, 8).map(c => /*#__PURE__*/React.createElement(Row, {
+    key: 'rev_' + c.campaign,
+    id: 'rev_' + c.campaign,
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `iROAS ${fmt(c.iRoas, 'x')}`,
+    impactColor: "#ef4444",
+    action: `Hike on ${c.lastBudgetChange ? c.lastBudgetChange.toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short'
+    }) : '—'}: spend +${fmt(c.iRoasDeltaSpend, 'rsk')}/d → sales +${fmt(c.iRoasDeltaSales, 'rsk')}/d over ${c.iRoasPostDays}d`,
+    meta: "Revert to previous budget \u2014 the extra spend is buying air"
+  }))), deteriorating.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\uD83D\uDCC9",
+    title: "Deteriorating This Week",
+    accent: "#f59e0b",
+    count: deteriorating.length,
+    sub: "7d score \u226520pts below period score \u2014 verdict hasn't flipped yet"
+  }, deteriorating.slice(0, 8).map(c => /*#__PURE__*/React.createElement(Row, {
+    key: 'det_' + c.campaign,
+    id: 'det_' + c.campaign,
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `${Math.round(c.score)} → ${Math.round(c.score7)}`,
+    impactColor: "#f59e0b",
+    action: `Spend ${fmt(c.drr?.spend, 'rsk')}/d · verdict still "${c.verdict}" — investigate before it earns a Cut`
+  }))), flips.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\uD83D\uDD01",
+    title: "Verdict Flips vs Prev Period",
+    accent: "#8b5cf6",
+    count: flips.length,
+    sub: "were healthy, now Cut/Reduce"
+  }, flips.slice(0, 8).map(({
+    c,
+    prev
+  }) => /*#__PURE__*/React.createElement(Row, {
+    key: 'flip_' + c.campaign,
+    id: 'flip_' + c.campaign,
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `${prev.verdict} → ${c.verdict}`,
+    impactColor: "#ef4444",
+    action: `ROAS ${prev.roas != null ? fmt(prev.roas, 'x') : '—'} → ${c.roas != null ? fmt(c.roas, 'x') : '—'} · spend ${fmt(c.drr?.spend, 'rsk')}/d`
+  }))), scales.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\u2B06",
+    title: "Scale",
+    accent: "#22c55e",
+    count: scales.length,
+    sub: "ranked by spend \u2014 headroom-aware action"
+  }, scales.slice(0, 10).map(c => /*#__PURE__*/React.createElement(Row, {
+    key: 'sc_' + c.campaign,
+    id: 'sc_' + c.campaign,
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `${fmt(c.drr?.spend, 'rsk')}/d now`,
+    impactColor: "#22c55e",
+    action: scaleAction(c),
+    meta: c.trend === 'improving' ? '↗ improving on 7d trend' : null
+  })))), totalActions === 0 && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      textAlign: 'center',
+      padding: 48
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 26,
+      marginBottom: 8
+    }
+  }, "\u2705"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 13
+    }
+  }, "Nothing urgent. No alerts, no cuts pending, no broken hikes.")));
+}
+
 // ─── APP ─────────────────────────────────────────────────────────────────────
 
 function App() {
   const [appState, setAppState] = useState(null);
-  const [tab, setTab] = useState('portfolio');
+  const [tab, setTab] = useState('brief');
   const handleLoad = useCallback(({
     allRows,
     ltvMap,
@@ -7816,6 +8724,23 @@ function App() {
     } = appState;
     return aggregateKeywordsByKw(allRows, ltvMap, r.pStart, r.pEnd, campaignIndexMap);
   }, [appState, getPrevRange]);
+
+  // Sudden-change alerts — always on latest data date, not the selected period
+  const alerts = useMemo(() => {
+    if (!appState) return [];
+    return computeAlerts(appState.allRows, appState.bounds.max, appState.campaignIndexMap);
+  }, [appState]);
+  const kwAlerts = useMemo(() => {
+    if (!appState) return [];
+    return computeKeywordAlerts(appState.allRows, appState.bounds.max);
+  }, [appState]);
+  const alertsMap = useMemo(() => {
+    const m = {};
+    alerts.forEach(a => {
+      m[a.campaign.toLowerCase()] = a;
+    });
+    return m;
+  }, [alerts]);
   // ─────────────────────────────────────────────────────────────────────────
 
   // Conditional return only AFTER all hooks are declared
@@ -7848,6 +8773,9 @@ function App() {
     cmpStart = new Date(cmpEnd.getTime() - (periodLen - 1) * 864e5);
   }
   const tabs = [{
+    id: 'brief',
+    label: `⌁ Daily Brief${alerts.length ? ` (${alerts.length})` : ''}`
+  }, {
     id: 'portfolio',
     label: 'Portfolio'
   }, {
@@ -7944,10 +8872,8 @@ function App() {
       fontSize: 10
     }
   }, campaigns.length, " campaigns"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      try {
-        Object.keys(localStorage).filter(k => k.startsWith('blinkit_sheet_')).forEach(k => localStorage.removeItem(k));
-      } catch (e) {}
+    onClick: async () => {
+      await clearSheetCache();
       setAppState(null);
     },
     title: "Clear cache and re-fetch from Google Sheets",
@@ -8085,7 +9011,13 @@ function App() {
     }
   }, /*#__PURE__*/React.createElement("div", {
     className: "fade-in"
-  }, tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
+  }, tab === 'brief' && /*#__PURE__*/React.createElement(DailyBriefView, {
+    campaigns: campaigns,
+    prevCampaigns: prevCampaigns,
+    alerts: alerts,
+    kwAlerts: kwAlerts,
+    endDate: bounds.max
+  }), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns
   }), tab === 'scorecard' && /*#__PURE__*/React.createElement(ScorecardView, {
@@ -8093,7 +9025,8 @@ function App() {
     prevCampaigns: prevCampaigns,
     allRows: allRows,
     startDate: startDate,
-    endDate: endDate
+    endDate: endDate,
+    alertsMap: alertsMap
   }), tab === 'keywords' && /*#__PURE__*/React.createElement(KeywordScorecardView, {
     kwCurrent: kwCurrent,
     kwPrev: kwPrev
@@ -8109,7 +9042,8 @@ function App() {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns,
     allRows: allRows,
-    endDate: endDate
+    endDate: endDate,
+    alertsMap: alertsMap
   }), tab === 'budgetthreat' && /*#__PURE__*/React.createElement(BudgetThreatView, {
     allRows: allRows,
     endDate: endDate
@@ -8154,6 +9088,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
+// build: daily-brief + alerts + idb-cache
 
 </script>
 </body></html>
