@@ -7233,7 +7233,10 @@ function computeSpikeRadar(allRows, refDate) {
     let cls = null;
     if (drainingNow && surplus > curBudget) cls = 'RED';else if (surplus >= 3 * curBudget && remaining > 0 && hasCapacity && drainable && spikeStartIn <= 7) cls = 'ORANGE';else if (surplus > curBudget && !hasCapacity) cls = 'LAPSE';else if (ratioMTD < 0.85 && surplus > curBudget) cls = 'YELLOW';
     if (!cls) return;
-    const suggested = remaining > 0 ? Math.max(500, (capMTD + curBudget * remaining - cumSpend) / remaining * 0.85) : null;
+
+    // RED = already draining: smoothing is moot, floor the budget (matches action text).
+    // ORANGE/YELLOW = smoothing number: spread cap+surplus evenly with 15% haircut.
+    const suggested = cls === 'RED' ? 500 : remaining > 0 ? Math.max(500, (capMTD + curBudget * remaining - cumSpend) / remaining * 0.85) : null;
     rows.push({
       cls,
       campaign: c.name,
@@ -7281,6 +7284,8 @@ function computeSpikeRadar(allRows, refDate) {
       orange: rows.filter(r => r.cls === 'ORANGE').length,
       yellow: rows.filter(r => r.cls === 'YELLOW').length,
       lapse: rows.filter(r => r.cls === 'LAPSE').length,
+      count: rows.length,
+      totalBudget: rows.reduce((s, r) => s + (r.curBudget || 0), 0),
       totalSurplus: rows.filter(r => r.cls !== 'LAPSE').reduce((s, r) => s + Math.max(0, r.surplus), 0),
       lapseSurplus: rows.filter(r => r.cls === 'LAPSE').reduce((s, r) => s + Math.max(0, r.surplus), 0),
       totalDrawn: rows.reduce((s, r) => s + r.drawnMTD, 0)
@@ -7547,6 +7552,10 @@ function SpikeRadarView({
       flexWrap: 'wrap'
     }
   }, [{
+    label: 'Campaigns · Budget/d',
+    val: `${radar.summary.count || 0} · ${fmtRs(radar.summary.totalBudget)}`,
+    color: '#3b82f6'
+  }, {
     label: '🔴 Draining Now',
     val: radar.summary.red,
     color: '#ef4444'
@@ -7891,9 +7900,15 @@ function SpikeRadarView({
         padding: '6px 10px',
         textAlign: 'right',
         color: '#60a5fa',
-        fontWeight: 600
+        fontWeight: 600,
+        whiteSpace: 'nowrap'
       }
-    }, fmtRs(t.suggested)), /*#__PURE__*/React.createElement("td", {
+    }, t.cls === 'RED' && t.curBudget <= 500 ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#6b7280',
+        fontSize: 9
+      }
+    }, "at floor") : fmtRs(t.suggested)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right'
@@ -8949,6 +8964,224 @@ function DailyBriefView({
   }, "Nothing urgent. No alerts, no cuts pending, no broken hikes.")));
 }
 
+// ─── HOW-TO GUIDE (for newbies) ──────────────────────────────────────────────
+
+function HelpView() {
+  const H = ({
+    children
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 15,
+      fontWeight: 700,
+      marginBottom: 10
+    }
+  }, children);
+  const P = ({
+    children
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 12,
+      lineHeight: 1.7,
+      marginBottom: 8
+    }
+  }, children);
+  const Hi = ({
+    children,
+    color
+  }) => /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: color || '#93c5fd',
+      fontWeight: 700
+    }
+  }, children);
+  const Box = ({
+    children,
+    accent
+  }) => /*#__PURE__*/React.createElement(Card, {
+    accent: accent,
+    style: {
+      padding: '18px 22px'
+    }
+  }, children);
+  const Step = ({
+    n,
+    title,
+    children
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 12,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 26,
+      height: 26,
+      borderRadius: '50%',
+      background: '#1e3a5f',
+      color: '#93c5fd',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: 13,
+      fontWeight: 700,
+      flexShrink: 0
+    }
+  }, n), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#e5e7eb',
+      fontSize: 12,
+      fontWeight: 700,
+      marginBottom: 3
+    }
+  }, title), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      lineHeight: 1.6
+    }
+  }, children)));
+  const Word = ({
+    w,
+    children
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      padding: '7px 0',
+      borderBottom: '1px solid #111827'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#93c5fd',
+      fontSize: 11,
+      fontWeight: 700,
+      minWidth: 110,
+      flexShrink: 0
+    }
+  }, w), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      lineHeight: 1.5
+    }
+  }, children));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 16,
+      maxWidth: 900,
+      margin: '0 auto'
+    }
+  }, /*#__PURE__*/React.createElement(Box, {
+    accent: "#3b82f6"
+  }, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDC4B Read this once. You'll be fine."), /*#__PURE__*/React.createElement(P, null, "This dashboard does the thinking. You do two things every morning: open ", /*#__PURE__*/React.createElement(Hi, null, "\u2301 Daily Brief"), ", then glance at ", /*#__PURE__*/React.createElement(Hi, null, "Spike Radar"), ". Both tell you exactly what to do in plain words. Total time: ", /*#__PURE__*/React.createElement(Hi, {
+    color: "#22c55e"
+  }, "5 minutes"), ". Everything else in the dashboard is optional deep-diving \u2014 ignore it until you need it.")), /*#__PURE__*/React.createElement(Box, {
+    accent: "#22c55e"
+  }, /*#__PURE__*/React.createElement(H, null, "\u2600\uFE0F Your 5-minute morning"), /*#__PURE__*/React.createElement(Step, {
+    n: "1",
+    title: "Open the dashboard \u2014 it lands on Daily Brief"
+  }, "Read the boxes top to bottom. Each row is one campaign and tells you in words what to do \u2014 \"Pause this\", \"Reduce budget to \u20B9X\", \"Raise CPM\". The most expensive problems are always on top."), /*#__PURE__*/React.createElement(Step, {
+    n: "2",
+    title: "Do the actions in the Blinkit panel"
+  }, "Click ", /*#__PURE__*/React.createElement(Hi, null, "\u29C9 Copy list"), " \u2014 it copies all actions as a checklist you can paste anywhere. Make the changes in Blinkit, then come back and tick the checkboxes so you know what's done."), /*#__PURE__*/React.createElement(Step, {
+    n: "3",
+    title: "Open Spike Radar \u2014 look at \uD83D\uDD34 and \uD83D\uDFE0 rows only"
+  }, "These are budget problems about to happen. The fix is written on each row (click the row to see the full story). \uD83D\uDFE1 and \u26AA rows can wait for Friday.")), /*#__PURE__*/React.createElement(Box, {
+    accent: "#f59e0b"
+  }, /*#__PURE__*/React.createElement(H, null, "\u2301 Daily Brief \u2014 what each box means"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, "\u26A0 Sudden Changes"), " \u2014 something broke in the last 2 days. A campaign that was fine suddenly lost impressions, rank, or sales. The grey line under each row tells you the likely reason \u2014 e.g. ", /*#__PURE__*/React.createElement(Hi, null, "\"Outbid \u2014 raise CPM\""), " means a competitor raised their bid and is taking your spot."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#f97316"
+  }, "\uD83D\uDD11 Keyword Alerts"), " \u2014 same thing, but for a single search keyword instead of a whole campaign. This is where you spot a competitor attacking one specific keyword (like \"body wash\")."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, "\uD83D\uDEE0 Fix List"), " \u2014 campaigns that have been losing money for a while (not a sudden break \u2014 a slow leak). Each row has a badge: ", /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, "Cut"), " = pause it today. ", /*#__PURE__*/React.createElement(Hi, {
+    color: "#f97316"
+  }, "Reduce"), " = lower the budget (the exact number is written).", /*#__PURE__*/React.createElement(Hi, {
+    color: "#f59e0b"
+  }, " Optimise"), " = one thing is wrong, the row says exactly what to change."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, "\uD83D\uDCE6 Qty Drops"), " \u2014 campaigns selling fewer units than last month. The row tells you why: lost visibility, weaker conversion, or rank slipped."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, "\uD83D\uDCB8 Revert Budget Hikes"), " \u2014 you raised a budget recently, and the extra money is NOT bringing extra sales. Put the budget back to what it was."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#f59e0b"
+  }, "\uD83D\uDCC9 Deteriorating"), " \u2014 campaigns getting worse this week, but not bad enough to cut yet. Watch them."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#8b5cf6"
+  }, "\uD83D\uDD01 Verdict Flips"), " \u2014 campaigns that were healthy last month and turned bad this month. The real news."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#22c55e"
+  }, "\u2B06 Scale"), " \u2014 your winners. Each row says whether to raise the ", /*#__PURE__*/React.createElement(Hi, null, "budget"), " (money is the limit) or the ", /*#__PURE__*/React.createElement(Hi, null, "CPM"), " (visibility is the limit) \u2014 and why."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\u2B07 Export Excel"), " \u2014 everything above as a spreadsheet, one sheet per box, with filters. The top row of big sheets recalculates totals when you filter. Use it for deep dives or sharing.")), /*#__PURE__*/React.createElement(Box, {
+    accent: "#8b5cf6"
+  }, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDCE1 Spike Radar \u2014 the piggy bank story"), /*#__PURE__*/React.createElement(P, null, "Blinkit's billing has a quirk. If your budget is \u20B92,000/day and the campaign only spends \u20B91,200 today, the unspent ", /*#__PURE__*/React.createElement(Hi, null, "\u20B9800 doesn't disappear \u2014 it goes into a piggy bank"), " (called the surplus). Blinkit is allowed to break that piggy bank later and spend it ON TOP of your daily budget \u2014 usually at month end, and usually at worse returns. That's how months get overspent \"without anyone touching anything\"."), /*#__PURE__*/React.createElement(P, null, "Spike Radar watches every campaign's piggy bank and tells you what's about to happen, traffic-light style:"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      margin: '10px 0'
+    }
+  }, [['🔴 DRAINING NOW', '#ef4444', 'The piggy bank is being spent RIGHT NOW (spend went above budget in the last 2 days). You cannot get that money back. Action: set the budget to ₹500 (the minimum) so the bank stops growing.'], ['🟠 SPIKE ≤7 DAYS', '#f97316', 'The bank is big and the maths says Blinkit must start spending it within a week — the dates are in the "Spike Window" column. Action: set the budget to the "Suggested/d" number today. That drains the bank gently instead of a burst.'], ['🟡 BUILDING', '#f59e0b', 'The bank is filling up but there is time. Action: fix these once a week, same way — set the suggested budget.'], ['⚪ LIKELY LAPSES', '#6b7280', 'Big bank, but this campaign has never been able to spend that fast — there simply are not enough customers searching. The money will probably never leave your pocket. Action: none. Relax.']].map(([label, color, text]) => /*#__PURE__*/React.createElement("div", {
+    key: label,
+    style: {
+      display: 'flex',
+      gap: 10,
+      alignItems: 'flex-start'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color,
+      fontSize: 11,
+      fontWeight: 700,
+      minWidth: 130,
+      flexShrink: 0
+    }
+  }, label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      lineHeight: 1.6
+    }
+  }, text)))), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The calculator (last 2 columns):"), " type what you actually WANT to spend per day into ", /*#__PURE__*/React.createElement(Hi, null, "\"Desired/d\""), ". The ", /*#__PURE__*/React.createElement(Hi, null, "\"Set To\""), " column instantly shows the number to enter in Blinkit. Yes, it will be higher than what you typed \u2014 that's on purpose: the gap is where the piggy bank drains out gently. Trust the number."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Click any row"), " to see the story in one line (\"built \u20B938K surplus over 14 days, Blinkit took \u20B922K back\u2026\") plus a chart \u2014 grey bars are budget, blue bars are spend, ", /*#__PURE__*/React.createElement(Hi, {
+    color: "#ef4444"
+  }, "red bars are days Blinkit overspent your budget"), ".")), /*#__PURE__*/React.createElement(Box, null, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDCD6 Words, translated"), /*#__PURE__*/React.createElement(Word, {
+    w: "Spend/d"
+  }, "Money spent per day, on average."), /*#__PURE__*/React.createElement(Word, {
+    w: "D.ROAS"
+  }, "For every \u20B91 of ads, how many \u20B9 of sales came back. 2.0x = \u20B92 back per \u20B91 spent. Higher = better."), /*#__PURE__*/React.createElement(Word, {
+    w: "NUR"
+  }, "Out of everyone who bought, how many were NEW customers. 60% = 6 of 10 buyers never bought before."), /*#__PURE__*/React.createElement(Word, {
+    w: "CPM"
+  }, "What you pay for 1,000 people to see the ad. It's your bid \u2014 raise it to show up more / higher."), /*#__PURE__*/React.createElement(Word, {
+    w: "Rank"
+  }, "Your average position on the page. 1 = top. Bigger number = buried lower."), /*#__PURE__*/React.createElement(Word, {
+    w: "Util %"
+  }, "How much of the daily budget actually got spent. 95% = budget nearly finished \u2014 it's capping you. 40% = money sitting unused."), /*#__PURE__*/React.createElement(Word, {
+    w: "Hrs Live/d"
+  }, "Hours per day the campaign was actually running. 14h means the budget ran out mid-day and you were invisible all evening."), /*#__PURE__*/React.createElement(Word, {
+    w: "Surplus Bank"
+  }, "The piggy bank \u2014 unspent budget Blinkit can come back and spend later."), /*#__PURE__*/React.createElement(Word, {
+    w: "Landing Rate"
+  }, "What your real daily spend is heading towards if you change nothing (budget + piggy bank spread over remaining days)."), /*#__PURE__*/React.createElement(Word, {
+    w: "Drain Cap/d"
+  }, "The most this campaign has ever managed to spend in a day \u2014 proof of how fast the piggy bank CAN empty."), /*#__PURE__*/React.createElement(Word, {
+    w: "Score"
+  }, "Overall health, 0\u2013100. Above 70 = scale it. Below 35 = trouble."), /*#__PURE__*/React.createElement(Word, {
+    w: "Verdict"
+  }, "The dashboard's decision: Scale / Maintain / Optimise / Reduce / Cut. The Brief turns these into actions for you.")), /*#__PURE__*/React.createElement(Box, {
+    accent: "#22c55e"
+  }, /*#__PURE__*/React.createElement(H, null, "\uD83E\uDDE0 If you remember only one thing"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#22c55e"
+  }, "You never have to figure out what to do \u2014 it's written on every row."), " Daily Brief = what to fix today. Spike Radar = what's about to go wrong with budgets. \u23F3 No Action = what you've been ignoring (check Fridays). If a row ever confuses you, click it \u2014 the long explanation is inside.")));
+}
+
 // ─── APP ─────────────────────────────────────────────────────────────────────
 
 function App() {
@@ -9247,6 +9480,9 @@ function App() {
   }, {
     id: 'budgetthreat',
     label: 'Spike Radar'
+  }, {
+    id: 'guide',
+    label: '❓ Guide'
   }];
   const totalCut = campaigns.filter(c => c.verdict === 'Cut').length;
   const totalScale = campaigns.filter(c => c.verdict === 'Scale').length;
@@ -9492,7 +9728,7 @@ function App() {
   }), tab === 'budgetthreat' && /*#__PURE__*/React.createElement(SpikeRadarView, {
     allRows: allRows,
     endDate: bounds.max
-  }))));
+  }), tab === 'guide' && /*#__PURE__*/React.createElement(HelpView, null))));
 }
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -9533,7 +9769,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v4.1 demand-gated-radar + sort-filter
+// build: v4.4 newbie-guide-tab
 
 </script>
 </body></html>
