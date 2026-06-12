@@ -4,6 +4,7 @@
   <title>Blinkit Ads Dashboard — Mosaic Wellness</title>
   <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
     body{background:#070711;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#f9fafb;margin:0;}
     *{box-sizing:border-box;}
@@ -4367,66 +4368,117 @@ function SegmentHealthView({
   }));
 }
 
-// ─── ACTION QUEUE VIEW ───────────────────────────────────────────────────────
+// ─── NO ACTION TRACKER ───────────────────────────────────────────────────────
+// Campaigns breaching the ROAS floor day after day with zero operator response
+// (no budget or CPM change since the breach streak began) while spend continues.
+// Accountability view: the ₹-burned column is the cost of ignoring the data.
 
-function ActionQueueView({
-  campaigns,
-  prevCampaigns,
-  allRows,
-  endDate,
-  alertsMap = {}
-}) {
-  const [verdictF, setVerdictF] = useState('All');
-  const [sortBy, setSortBy] = useState('spend');
-  const actionText = c => {
+function computeIgnored(allRows, opCampaigns, refDate) {
+  if (!refDate) return [];
+  const DAY = 864e5;
+  const winStart = new Date(refDate.getTime() - 9 * DAY); // last 10 days
+
+  // per-campaign daily spend/sales over the window
+  const byCamp = {};
+  allRows.forEach(r => {
+    if (!r.date || r.date < winStart || r.date > refDate || !r.hasMetrics) return;
+    const ck = r.campaign.toLowerCase();
+    const dk = r.date.toDateString();
+    if (!byCamp[ck]) byCamp[ck] = {};
+    if (!byCamp[ck][dk]) byCamp[ck][dk] = {
+      date: r.date,
+      spend: 0,
+      sales: 0
+    };
+    byCamp[ck][dk].spend += r.spend || 0;
+    byCamp[ck][dk].sales += r.directSales || 0;
+  });
+  const out = [];
+  opCampaigns.forEach(c => {
+    if (c.isInactive) return;
     const bm = BENCHMARKS[c.segment];
-    const breaches = [];
-    if (bm && c.roas !== null && c.roas < bm.roasF) breaches.push(`ROAS ${fmt(c.roas, 'x')} < ${fmt(bm.roasF, 'x')}`);
-    if (bm && c.nur !== null && c.nur < bm.nurF) breaches.push(`NUR ${fmt(c.nur, '%')} < ${fmt(bm.nurF, '%')}`);
-    if (bm && c.ltvCac !== null && c.ltvCac < bm.ltvF) breaches.push(`LTV:CAC ${fmt(c.ltvCac, 'x')} < ${fmt(bm.ltvF, 'x')}`);
-    if (c.verdict === 'Cut') return `Pause immediately. ${breaches.join(' · ')}`;
-    if (c.verdict === 'Reduce') return `Reduce budget 25%. ${breaches.join(' · ')}`;
-    if (c.verdict === 'Optimise') {
-      if (c.ltvCac !== null && bm && c.ltvCac < bm.ltvF) return `Lower CPM — acquisition cost too high. ${breaches.join(' · ')}`;
-      if (c.roas !== null && bm && c.roas < bm.roasF) return `Hold CPM — ROAS weak but check conversion. ${breaches.join(' · ')}`;
-      return `Optimise: ${breaches.join(' · ')}`;
+    if (!bm) return;
+    const days = Object.values(byCamp[c.campaign.toLowerCase()] || {}).filter(d => d.spend > 0).sort((a, b) => a.date - b.date);
+    if (days.length < 7) return; // not enough active days
+    const breaches = days.filter(d => d.sales / d.spend < bm.roasF);
+    if (breaches.length < 7) return; // breaching ≥7 of last 10 active days
+    const streakStart = breaches[0].date;
+    const acted = c.lastChange && c.lastChange >= streakStart; // any budget/CPM response since flag?
+    if (acted) return;
+    const burned = days.filter(d => d.date >= streakStart).reduce((s, d) => s + d.spend, 0);
+    const totSp = days.reduce((s, d) => s + d.spend, 0);
+    const totSa = days.reduce((s, d) => s + d.sales, 0);
+    out.push({
+      campaign: c.campaign,
+      brand: c.brand,
+      category: c.category,
+      segment: c.segment,
+      verdict: c.verdict,
+      breachDays: breaches.length,
+      activeDays: days.length,
+      streakStart,
+      burned,
+      lastChange: c.lastChange || null,
+      roasFloor: bm.roasF,
+      avgRoas: totSp > 0 ? totSa / totSp : null,
+      spendPerDay: c.drr?.spend || 0
+    });
+  });
+  return out.sort((a, b) => b.burned - a.burned);
+}
+function NoActionView({
+  ignored
+}) {
+  const totalBurned = ignored.reduce((s, t) => s + t.burned, 0);
+  const dailyBleed = ignored.reduce((s, t) => s + t.spendPerDay, 0);
+  const statBox = (label, val, color, sub) => /*#__PURE__*/React.createElement(Card, {
+    style: {
+      flex: 1,
+      minWidth: 160,
+      padding: 14
+    },
+    accent: color
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 9,
+      textTransform: 'uppercase',
+      letterSpacing: '0.05em',
+      marginBottom: 4
     }
-    if (c.verdict === 'Scale') return `Increase budget${c.avgPos && bm?.posThr && c.avgPos > bm.posThr ? ' and raise CPM' : ''} — all metrics above floor.`;
-    if (c.verdict === 'Hold') return 'Hold — monitor closely.';
-    if (c.verdict === 'Monitor') return 'Monitor — no action needed yet.';
-    return '';
-  };
-
-  // Live campaigns: had spend on endDate
-  const maxDateStr = endDate.toDateString();
-  const liveCampKeys = useMemo(() => new Set(allRows.filter(r => r.date && r.date.toDateString() === maxDateStr && r.spend > 0).map(r => r.campaign.toLowerCase())), [allRows, maxDateStr]);
-  const liveCampaigns = useMemo(() => campaigns.filter(c => liveCampKeys.has(c.campaign.toLowerCase())), [campaigns, liveCampKeys]);
-  const prevMap = useMemo(() => {
-    if (!prevCampaigns) return {};
-    const m = {};
-    prevCampaigns.forEach(c => {
-      m[c.campaign.toLowerCase()] = c;
-    });
-    return m;
-  }, [prevCampaigns]);
-  const verdictCounts = useMemo(() => {
-    const counts = {};
-    liveCampaigns.forEach(c => {
-      counts[c.verdict] = (counts[c.verdict] || 0) + 1;
-    });
-    return counts;
-  }, [liveCampaigns]);
-  const displayed = useMemo(() => {
-    let out = liveCampaigns;
-    if (verdictF !== 'All') out = out.filter(c => c.verdict === verdictF);
-    if (sortBy === 'budget') out = [...out].sort((a, b) => (b.currentDailyBudget || 0) - (a.currentDailyBudget || 0));else if (sortBy === 'verdict') out = [...out].sort((a, b) => VERDICT_ORDER.indexOf(a.verdict) - VERDICT_ORDER.indexOf(b.verdict));else out = [...out].sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0));
-    return out;
-  }, [liveCampaigns, verdictF, sortBy]);
-  const totalSpendD = liveCampaigns.reduce((s, c) => s + (c.drr?.spend || 0), 0);
-  const cutCount = liveCampaigns.filter(c => c.verdict === 'Cut').length;
-  const scaleCount = liveCampaigns.filter(c => c.verdict === 'Scale').length;
-  const verdictPills = ['All', 'Cut', 'Scale', 'Optimise', 'Reduce', 'Hold', 'Monitor', 'Insufficient Data', 'Inactive'];
-  const availablePills = verdictPills.filter(v => v === 'All' || verdictCounts[v]);
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: color || '#f9fafb',
+      fontSize: 20,
+      fontWeight: 700
+    }
+  }, val), sub && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginTop: 2
+    }
+  }, sub));
+  const Th = ({
+    label,
+    right
+  }) => /*#__PURE__*/React.createElement("th", {
+    style: {
+      padding: '7px 10px',
+      textAlign: right ? 'right' : 'left',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      whiteSpace: 'nowrap',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      zIndex: 2,
+      borderBottom: '1px solid #1f2937'
+    }
+  }, label);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -4437,371 +4489,161 @@ function ActionQueueView({
     style: {
       display: 'flex',
       gap: 10,
-      flexWrap: 'wrap',
-      alignItems: 'center',
-      background: '#0d1117',
-      borderRadius: 8,
-      padding: '10px 14px',
-      border: '1px solid #1f2937'
+      flexWrap: 'wrap'
     }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#9ca3af',
-      fontSize: 11,
-      fontWeight: 600
-    }
-  }, liveCampaigns.length, " campaigns live"), /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#374151',
-      fontSize: 11
-    }
-  }, "\xB7"), cutCount > 0 && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#ef4444',
-      fontSize: 11
-    }
-  }, cutCount, " to cut"), scaleCount > 0 && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#22c55e',
-      fontSize: 11
-    }
-  }, scaleCount, " to scale"), /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#374151',
-      fontSize: 11
-    }
-  }, "\xB7"), /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#d1d5db',
-      fontSize: 11
-    }
-  }, "\u20B9", (totalSpendD / 1000).toFixed(0), "K spend/d"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginLeft: 'auto',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6
-    }
-  }, /*#__PURE__*/React.createElement("span", {
+  }, statBox('Issues Being Ignored', ignored.length, '#ef4444', 'breaching ≥7 of last 10 days, no response'), statBox('₹ Burned Since Flagged', fmt(totalBurned, 'rsk'), '#ef4444', 'spend during breach streak'), statBox('Still Bleeding', fmt(dailyBleed, 'rsk') + '/d', '#f97316', 'current daily spend on these campaigns')), /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4b5563',
       fontSize: 10
     }
-  }, "Sort:"), ['spend', 'budget', 'verdict'].map(s => /*#__PURE__*/React.createElement("button", {
-    key: s,
-    onClick: () => setSortBy(s),
+  }, "Detection: campaign live now \xB7 daily D.ROAS below segment floor on \u22657 of the last 10 active days \xB7 no budget or CPM change since the streak began. Act on it or kill it \u2014 every day here is paid for."), /*#__PURE__*/React.createElement("div", {
     style: {
-      background: sortBy === s ? '#1e3a5f' : 'transparent',
-      color: sortBy === s ? '#93c5fd' : '#4b5563',
-      border: `1px solid ${sortBy === s ? '#2563eb' : '#1f2937'}`,
-      borderRadius: 4,
-      padding: '2px 8px',
-      fontSize: 9,
-      cursor: 'pointer',
-      textTransform: 'capitalize'
+      overflowX: 'auto',
+      borderRadius: 10,
+      border: '1px solid #1f2937',
+      maxHeight: '70vh',
+      overflowY: 'auto'
     }
-  }, s === 'spend' ? 'Spend/d' : s === 'budget' ? 'Budget/d' : 'Verdict')))), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("table", {
     style: {
-      display: 'flex',
-      gap: 4,
-      flexWrap: 'wrap'
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
     }
-  }, availablePills.map(v => {
-    const cfg = v === 'All' ? null : VERDICT_CFG[v];
-    const active = verdictF === v;
-    const cnt = v === 'All' ? liveCampaigns.length : verdictCounts[v] || 0;
-    return /*#__PURE__*/React.createElement("button", {
-      key: v,
-      onClick: () => setVerdictF(v),
-      style: {
-        background: active ? cfg?.bg || 'rgba(59,130,246,0.1)' : 'transparent',
-        color: active ? cfg?.color || '#93c5fd' : '#6b7280',
-        border: `1px solid ${active ? cfg?.border || 'rgba(59,130,246,0.3)' : '#1f2937'}`,
-        borderRadius: 999,
-        padding: '3px 10px',
-        fontSize: 9,
-        cursor: 'pointer',
-        fontWeight: active ? 700 : 400
-      }
-    }, v === 'Insufficient Data' ? 'Insuf. Data' : v, " ", /*#__PURE__*/React.createElement("span", {
-      style: {
-        opacity: 0.7
-      }
-    }, cnt));
-  })), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement(Th, {
+    label: "Campaign"
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Brand"
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Segment"
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Verdict"
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Issue"
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Flagged",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "\u20B9 Burned",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Spend/d",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Last Change",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    label: "Do This"
+  }))), /*#__PURE__*/React.createElement("tbody", null, ignored.map(t => /*#__PURE__*/React.createElement("tr", {
+    key: t.campaign,
     style: {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 6
+      borderBottom: '1px solid #111827',
+      background: 'rgba(239,68,68,0.03)'
     }
-  }, displayed.map(c => {
-    const bm = BENCHMARKS[c.segment] || null;
-    const pv = prevMap[c.campaign.toLowerCase()];
-    const budgetConsumption = c.currentDailyBudget > 0 ? (c.drr?.spend || 0) / c.currentDailyBudget : null;
-    const cfg = VERDICT_CFG[c.verdict] || VERDICT_CFG['Inactive'];
-    const camAlert = alertsMap[c.campaign.toLowerCase()];
-    return /*#__PURE__*/React.createElement("div", {
-      key: c.campaign,
-      style: {
-        background: '#0d1117',
-        border: `1px solid ${camAlert ? 'rgba(239,68,68,0.45)' : cfg.border}`,
-        borderRadius: 8,
-        padding: '12px 14px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: 'flex',
-        alignItems: 'flex-start',
-        justifyContent: 'space-between',
-        marginBottom: 8
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        flex: 1,
-        minWidth: 0,
-        marginRight: 12
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#e5e7eb',
-        fontSize: 11,
-        fontWeight: 600,
-        marginBottom: 2,
-        wordBreak: 'break-word'
-      }
-    }, camAlert && /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#ef4444',
-        marginRight: 4
-      }
-    }, "\u26A0"), c.campaign), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 10
-      }
-    }, actionText(c)), camAlert && /*#__PURE__*/React.createElement("div", {
-      style: {
-        marginTop: 4,
-        background: 'rgba(239,68,68,0.07)',
-        border: '1px solid rgba(239,68,68,0.2)',
-        borderRadius: 5,
-        padding: '4px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#ef4444',
-        fontSize: 9,
-        fontWeight: 700
-      }
-    }, camAlert.flags.map(f => f.label).join(' · ')), camAlert.cause && /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#f59e0b',
-        fontSize: 9,
-        marginLeft: 6
-      }
-    }, camAlert.cause))), /*#__PURE__*/React.createElement(VBadge, {
-      verdict: c.verdict,
-      sm: true
-    })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))',
-        gap: 8
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        background: '#111827',
-        borderRadius: 6,
-        padding: '6px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 8,
-        textTransform: 'uppercase',
-        marginBottom: 2
-      }
-    }, "Spend/d"), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#e5e7eb',
-        fontSize: 11,
-        fontWeight: 600
-      }
-    }, fmt(c.drr?.spend, 'rsk')), pv && /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 8
-      }
-    }, /*#__PURE__*/React.createElement(PctChg, {
-      curr: c.drr?.spend,
-      prev: pv.drr?.spend
-    }))), /*#__PURE__*/React.createElement("div", {
-      style: {
-        background: '#111827',
-        borderRadius: 6,
-        padding: '6px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 8,
-        textTransform: 'uppercase',
-        marginBottom: 2
-      }
-    }, "Budget/d"), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#d1d5db',
-        fontSize: 11,
-        fontWeight: 600
-      }
-    }, c.currentDailyBudget != null ? fmt(c.currentDailyBudget, 'rs') : '—')), /*#__PURE__*/React.createElement("div", {
-      style: {
-        background: '#111827',
-        borderRadius: 6,
-        padding: '6px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 8,
-        textTransform: 'uppercase',
-        marginBottom: 2
-      }
-    }, "Consumption"), /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 11,
-        fontWeight: 700,
-        color: budgetConsumption == null ? '#374151' : budgetConsumption >= 0.9 ? '#ef4444' : budgetConsumption >= 0.7 ? '#22c55e' : '#f59e0b'
-      }
-    }, budgetConsumption != null ? (budgetConsumption * 100).toFixed(0) + '%' : '—')), /*#__PURE__*/React.createElement("div", {
-      style: {
-        background: '#111827',
-        borderRadius: 6,
-        padding: '6px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 8,
-        textTransform: 'uppercase',
-        marginBottom: 2
-      }
-    }, "CPM"), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#9ca3af',
-        fontSize: 11
-      }
-    }, c.avgCpm != null ? fmt(c.avgCpm, 'rs') : '—')), /*#__PURE__*/React.createElement("div", {
-      style: {
-        background: '#111827',
-        borderRadius: 6,
-        padding: '6px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 8,
-        textTransform: 'uppercase',
-        marginBottom: 2
-      }
-    }, "Hrs Live/d"), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#9ca3af',
-        fontSize: 11
-      }
-    }, c.hoursPerDay != null ? c.hoursPerDay.toFixed(1) : '—')), /*#__PURE__*/React.createElement("div", {
-      style: {
-        background: '#111827',
-        borderRadius: 6,
-        padding: '6px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 8,
-        textTransform: 'uppercase',
-        marginBottom: 2
-      }
-    }, "D.ROAS"), /*#__PURE__*/React.createElement(MCell, {
-      val: c.roas,
-      floor: bm?.roasF,
-      healthy: bm?.roasH,
-      strong: bm?.roasS,
-      type: "x"
-    })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        background: '#111827',
-        borderRadius: 6,
-        padding: '6px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 8,
-        textTransform: 'uppercase',
-        marginBottom: 2
-      }
-    }, "NUR"), /*#__PURE__*/React.createElement(MCell, {
-      val: c.nur,
-      floor: bm?.nurF,
-      healthy: bm?.nurH,
-      strong: bm?.nurS,
-      type: "%"
-    })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        background: '#111827',
-        borderRadius: 6,
-        padding: '6px 8px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 8,
-        textTransform: 'uppercase',
-        marginBottom: 2
-      }
-    }, "LTV:CAC"), /*#__PURE__*/React.createElement(MCell, {
-      val: c.ltvCac,
-      floor: bm?.ltvF,
-      healthy: bm?.ltvH,
-      strong: bm?.ltvS,
-      type: "x"
-    }))), (c.lastCpmChange || c.lastBudgetChange) && /*#__PURE__*/React.createElement("div", {
-      style: {
-        marginTop: 8,
-        display: 'flex',
-        gap: 12,
-        flexWrap: 'wrap'
-      }
-    }, c.lastCpmChange && c.prevCpmBefore && c.lastCpmValue && /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#f59e0b',
-        fontSize: 9,
-        background: 'rgba(245,158,11,0.08)',
-        padding: '2px 8px',
-        borderRadius: 4
-      }
-    }, "CPM: \u20B9", Math.round(c.prevCpmBefore), " \u2192 \u20B9", Math.round(c.lastCpmValue), " \xB7 ", c.lastCpmChange.toLocaleDateString('en-IN', {
-      day: '2-digit',
-      month: 'short'
-    })), c.lastBudgetChange && c.prevBudgetBefore && c.lastBudgetValue && /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#60a5fa',
-        fontSize: 9,
-        background: 'rgba(96,165,250,0.08)',
-        padding: '2px 8px',
-        borderRadius: 4
-      }
-    }, "Budget: \u20B9", Math.round(c.prevBudgetBefore), " \u2192 \u20B9", Math.round(c.lastBudgetValue), " \xB7 ", c.lastBudgetChange.toLocaleDateString('en-IN', {
-      day: '2-digit',
-      month: 'short'
-    }))));
-  }), displayed.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("td", {
     style: {
-      color: '#4b5563',
+      padding: '7px 10px',
+      color: '#e5e7eb',
+      fontWeight: 600,
+      maxWidth: 240
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    },
+    title: t.campaign
+  }, t.campaign), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 8
+    }
+  }, t.brand, " \xB7 ", t.category)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px',
+      color: BRAND_COLORS[t.brand] || '#6b7280',
+      fontSize: 10,
+      fontWeight: 600
+    }
+  }, t.brand || '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px',
+      color: '#6b7280',
+      fontSize: 10,
+      whiteSpace: 'nowrap'
+    }
+  }, SEG_SHORT[t.segment] || t.segment), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px'
+    }
+  }, /*#__PURE__*/React.createElement(VBadge, {
+    verdict: t.verdict,
+    sm: true
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px',
+      color: '#ef4444',
+      fontSize: 10,
+      whiteSpace: 'nowrap'
+    }
+  }, "ROAS ", t.avgRoas != null ? t.avgRoas.toFixed(2) + 'x' : '—', " vs floor ", t.roasFloor, "x", /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 9
+    }
+  }, t.breachDays, " of ", t.activeDays, " days below floor")), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px',
+      textAlign: 'right',
+      color: '#f59e0b',
+      fontSize: 10,
+      whiteSpace: 'nowrap'
+    }
+  }, "since ", t.streakStart.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short'
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px',
+      textAlign: 'right',
+      color: '#ef4444',
+      fontWeight: 700,
+      fontSize: 12
+    }
+  }, fmt(t.burned, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px',
+      textAlign: 'right',
+      color: '#d1d5db',
+      fontSize: 11
+    }
+  }, fmt(t.spendPerDay, 'rsk')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px',
+      textAlign: 'right',
+      color: t.lastChange ? '#9ca3af' : '#ef4444',
+      fontSize: 10,
+      whiteSpace: 'nowrap'
+    }
+  }, t.lastChange ? t.lastChange.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short'
+  }) : 'never in window'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '7px 10px',
+      color: '#9ca3af',
+      fontSize: 10,
+      maxWidth: 200
+    }
+  }, t.verdict === 'Cut' ? 'Pause it — verdict has said Cut while spend continued' : t.verdict === 'Reduce' ? 'Reduce budget 25% or lower CPM — breach persisting' : 'Lower CPM or fix conversion — floor breached daily'))), ignored.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    colSpan: 10,
+    style: {
+      padding: 40,
       textAlign: 'center',
-      padding: 40
+      color: '#4b5563'
     }
-  }, "No campaigns matching filter.")));
+  }, "\u2705 Clean \u2014 every persistent breach has had a budget/CPM response."))))));
 }
 
 // ─── KEYWORD SCORECARD VIEW ──────────────────────────────────────────────────
@@ -8097,7 +7939,7 @@ function LoadingScreen({
 
 // ─── DAILY BRIEF VIEW ────────────────────────────────────────────────────────
 // Landing tab: every action ranked by ₹ impact/day. No data diving — read top
-// to bottom, execute, check off.
+// to bottom, execute, check off. Excel export with one sheet per action type.
 
 function DailyBriefView({
   campaigns,
@@ -8123,6 +7965,7 @@ function DailyBriefView({
   const live = useMemo(() => campaigns.filter(c => !c.isInactive), [campaigns]);
   const cuts = useMemo(() => live.filter(c => c.verdict === 'Cut').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
   const reduces = useMemo(() => live.filter(c => c.verdict === 'Reduce').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
+  const optimises = useMemo(() => live.filter(c => c.verdict === 'Optimise').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
   const scales = useMemo(() => live.filter(c => c.verdict === 'Scale' && (c.drr?.spend || 0) > 0).sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
   const revertHikes = useMemo(() => live.filter(c => c.iRoas != null && c.iRoas < 0.8).sort((a, b) => (b.iRoasDeltaSpend || 0) - (a.iRoasDeltaSpend || 0)), [live]);
   const deteriorating = useMemo(() => live.filter(c => c.trend === 'deteriorating' && c.verdict !== 'Cut' && c.verdict !== 'Reduce').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
@@ -8130,24 +7973,182 @@ function DailyBriefView({
     c,
     prev: prevMap[c.campaign.toLowerCase()]
   })).filter(x => x.prev && x.prev.verdict !== x.c.verdict && (x.c.verdict === 'Cut' || x.c.verdict === 'Reduce') && ['Scale', 'Maintain', 'Optimise'].includes(x.prev.verdict)).sort((a, b) => (b.c.drr?.spend || 0) - (a.c.drr?.spend || 0)), [live, prevMap]);
+
+  // Sales-qty drops vs comparison period (same delta logic as Cat Sales ΔDQty/d,
+  // applied at campaign level): drop ≥30% AND baseline ≥5 units/d
+  const qtyDrops = useMemo(() => live.map(c => ({
+    c,
+    pv: prevMap[c.campaign.toLowerCase()]
+  })).filter(({
+    c,
+    pv
+  }) => {
+    if (!pv) return false;
+    const pq = pv.drr?.totalQty || 0,
+      cq = c.drr?.totalQty || 0;
+    return pq >= 5 && (pq - cq) / pq >= 0.3;
+  }).sort((a, b) => (b.pv.drr?.totalQty || 0) - (b.c.drr?.totalQty || 0) - ((a.pv.drr?.totalQty || 0) - (a.c.drr?.totalQty || 0))), [live, prevMap]);
   const cutSavings = cuts.reduce((s, c) => s + (c.drr?.spend || 0), 0);
   const reduceSavings = reduces.reduce((s, c) => s + (c.drr?.spend || 0) * 0.25, 0);
   const alertRisk = alerts.slice(0, 15).reduce((s, a) => s + a.severity, 0);
-  const totalActions = cuts.length + reduces.length + revertHikes.length + flips.length + Math.min(alerts.length, 10) + Math.min(kwAlerts.length, 8);
+  const totalActions = cuts.length + reduces.length + optimises.length + revertHikes.length + flips.length + qtyDrops.length + Math.min(alerts.length, 10) + Math.min(kwAlerts.length, 8);
+
+  // Why raise budget? Hours-live tells you if the campaign goes dark mid-day.
   const scaleAction = c => {
+    const hrs = c.hoursPerDay && c.hoursPerDay > 0 && c.hoursPerDay < 23.5 ? c.hoursPerDay : null;
     if (c.utilization != null && c.utilization >= 0.85) {
       const extra = (c.currentDailyBudget || c.drr?.spend || 0) * 0.2;
       const est = (c.roas || 0) * extra;
-      return `Budget-capped (util ${(c.utilization * 100).toFixed(0)}%) → raise budget +20% ≈ +${fmt(est, 'rsk')}/d sales at ${fmt(c.roas, 'x')}`;
+      return `RAISE BUDGET +20% (est. +${fmt(est, 'rsk')}/d sales at ${fmt(c.roas, 'x')}). Why: util ${(c.utilization * 100).toFixed(0)}%${hrs ? `, live only ${hrs.toFixed(0)}h/day — budget exhausts early, campaign goes dark rest of day` : ' — budget is the binding constraint, demand exceeds cap'}`;
     }
     if (c.utilization != null && c.utilization < 0.7) {
       const unspent = Math.max(0, (c.currentDailyBudget || 0) - (c.drr?.spend || 0));
-      return `Under-utilizing (${(c.utilization * 100).toFixed(0)}%) — budget won't help, raise CPM to capture ${fmt(unspent, 'rsk')}/d unspent`;
+      return `RAISE CPM, NOT BUDGET. Why: util only ${(c.utilization * 100).toFixed(0)}% — ${fmt(unspent, 'rsk')}/d budget already going unspent; visibility (rank ${c.avgPos != null ? c.avgPos.toFixed(1) : '—'}) is the constraint, not money`;
     }
-    return 'All metrics above floor — increase budget';
+    const hrsTxt = hrs ? `, ${hrs.toFixed(0)}h/day live` : '';
+    return `RAISE BUDGET +15–20%. Why: all metrics above floor, util ${c.utilization != null ? (c.utilization * 100).toFixed(0) + '%' : 'n/a'}${hrsTxt} — efficient headroom`;
   };
 
-  // plain-text action list for execution in the Blinkit panel
+  // Which single metric is breaching, and the specific fix
+  const optimiseAction = c => {
+    const bm = BENCHMARKS[c.segment];
+    if (!bm) return 'Review — no benchmarks for segment';
+    if (c.ltvCac != null && c.ltvCac < bm.ltvF) return `LOWER CPM: LTV:CAC ${fmt(c.ltvCac, 'x')} < floor ${fmt(bm.ltvF, 'x')} — paying too much per new user (CAC ${c.cac != null ? fmt(c.cac, 'rs') : '—'} vs LTV ₹${c.ltv || '—'})`;
+    if (c.roas != null && c.roas < bm.roasF) return `HOLD CPM, FIX CONVERSION: ROAS ${fmt(c.roas, 'x')} < floor ${fmt(bm.roasF, 'x')} — impressions fine, conversion weak; check price/pack/competitor offer`;
+    if (c.nur != null && c.nur < bm.nurF) return `NUR ${fmt(c.nur, '%')} < floor ${fmt(bm.nurF, '%')} — buying repeat customers; shift spend toward generic/comp terms for acquisition`;
+    return 'One metric near floor — monitor closely';
+  };
+  const qtyDriver = (c, pv) => {
+    const pi = pv.drr?.impressions || 0,
+      ci = c.drr?.impressions || 0;
+    if (pi > 0 && (pi - ci) / pi >= 0.2) return `visibility: impr ${fmt(ci, 'int')}/d vs ${fmt(pi, 'int')}/d (▼${Math.round((pi - ci) / pi * 100)}%)`;
+    if (pv.roas != null && c.roas != null && pv.roas > 0 && (pv.roas - c.roas) / pv.roas >= 0.2) return `conversion: ROAS ${pv.roas.toFixed(1)}x → ${c.roas.toFixed(1)}x`;
+    if (pv.avgPos != null && c.avgPos != null && c.avgPos - pv.avgPos >= 1) return `rank slipped ${pv.avgPos.toFixed(1)} → ${c.avgPos.toFixed(1)}`;
+    const ps = pv.drr?.spend || 0,
+      cs = c.drr?.spend || 0;
+    if (ps > 0 && (ps - cs) / ps >= 0.2) return `spend cut: ${fmt(cs, 'rsk')}/d vs ${fmt(ps, 'rsk')}/d`;
+    return 'mixed — open campaign detail';
+  };
+  const breachList = c => {
+    const bm = BENCHMARKS[c.segment];
+    if (!bm) return '';
+    const b = [];
+    if (c.roas != null && c.roas < bm.roasF) b.push(`ROAS ${c.roas.toFixed(2)}x < floor ${bm.roasF}`);
+    if (c.nur != null && c.nur < bm.nurF) b.push(`NUR ${(c.nur * 100).toFixed(0)}% < floor ${(bm.nurF * 100).toFixed(0)}%`);
+    if (c.ltvCac != null && c.ltvCac < bm.ltvF) b.push(`LTV:CAC ${c.ltvCac.toFixed(2)}x < floor ${bm.ltvF}`);
+    return b.join('; ');
+  };
+  const reasonFor = c => {
+    if (c.verdict === 'Cut') return `Pause immediately. ${breachList(c)}`;
+    if (c.verdict === 'Reduce') return `Reduce budget 25%. ${breachList(c)}`;
+    if (c.verdict === 'Optimise') return optimiseAction(c);
+    if (c.verdict === 'Scale') return scaleAction(c);
+    if (c.verdict === 'Maintain') return 'Healthy — no action needed';
+    return c.verdict;
+  };
+
+  // ── EXCEL EXPORT — one sheet per action type, autofilter on all sheets ────
+  const metricRow = (c, reason) => ({
+    'Campaign': c.campaign,
+    'Action / Reason': reason,
+    'Brand': c.brand || '',
+    'Category': c.category || '',
+    'Segment': SEG_SHORT[c.segment] || c.segment || '',
+    'Verdict': c.verdict,
+    'Spend/d': Math.round(c.drr?.spend || 0),
+    'Sales/d': Math.round(c.drr?.directSales || 0),
+    'D.ROAS': c.roas != null ? +c.roas.toFixed(2) : null,
+    'NUR %': c.nur != null ? +(c.nur * 100).toFixed(1) : null,
+    'LTV:CAC': c.ltvCac != null ? +c.ltvCac.toFixed(2) : null,
+    'CAC': c.cac != null ? Math.round(c.cac) : null,
+    'Rank': c.avgPos != null ? +c.avgPos.toFixed(1) : null,
+    'CPM': c.avgCpm != null ? Math.round(c.avgCpm) : null,
+    'Impr/d': Math.round(c.drr?.impressions || 0),
+    'NU/d': +(c.drr?.newUsers || 0).toFixed(1),
+    'DQty/d': +(c.drr?.totalQty || 0).toFixed(1),
+    'Budget/d': c.currentDailyBudget != null ? Math.round(c.currentDailyBudget) : null,
+    'Util %': c.utilization != null ? +(c.utilization * 100).toFixed(0) : null,
+    'Hrs Live/d': c.hoursPerDay ? +c.hoursPerDay.toFixed(1) : null,
+    'Score': c.score != null ? Math.round(c.score) : null,
+    'Score 7d': c.score7 != null ? Math.round(c.score7) : null,
+    'Trend': c.trend || '',
+    'Days Live': c.daysLive
+  });
+  const exportExcel = () => {
+    const X = window.XLSX;
+    if (!X) {
+      alert('Excel library not loaded — check internet connection and reload.');
+      return;
+    }
+    const wb = X.utils.book_new();
+    const addSheet = (name, rows) => {
+      if (!rows || rows.length === 0) return;
+      const ws = X.utils.json_to_sheet(rows);
+      ws['!autofilter'] = {
+        ref: ws['!ref']
+      }; // enables sort + filter in Excel
+      ws['!cols'] = Object.keys(rows[0]).map(k => ({
+        wch: Math.min(50, Math.max(10, k.length + 2, ...rows.slice(0, 60).map(r => String(r[k] ?? '').length + 1)))
+      }));
+      X.utils.book_append_sheet(wb, ws, name.slice(0, 31));
+    };
+    addSheet('Alerts', alerts.map(a => ({
+      'Campaign': a.campaign,
+      'Flags': a.flags.map(f => f.label).join(' | '),
+      'Diagnosis': a.cause || a.flags[0]?.detail || '',
+      'Severity Rs-d': Math.round(a.severity),
+      'Brand': a.brand || '',
+      'Category': a.category || '',
+      'Segment': a.segment ? SEG_SHORT[a.segment] || a.segment : '',
+      'Spend/d baseline': Math.round(a.baseSpend),
+      'Spend/d now': Math.round(a.recSpend),
+      'Impr/d baseline': Math.round(a.baseImpr),
+      'Impr/d now': Math.round(a.recImpr)
+    })));
+    addSheet('KW Alerts', kwAlerts.map(a => ({
+      'Keyword': a.keyword,
+      'Top Campaign': a.campaign || '',
+      'Flags': a.flags.map(f => f.label).join(' | '),
+      'Diagnosis': a.cause || a.flags[0]?.detail || '',
+      'Severity Rs-d': Math.round(a.severity),
+      'Brand': a.brand || '',
+      'Category': a.category || '',
+      'Spend/d baseline': Math.round(a.baseSpend),
+      'Spend/d now': Math.round(a.recSpend)
+    })));
+    addSheet('Cut', cuts.map(c => metricRow(c, `Pause — saves ${fmt(c.drr?.spend, 'rsk')}/d. ${breachList(c)}`)));
+    addSheet('Reduce', reduces.map(c => metricRow(c, `Reduce budget 25% — saves ~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d. ${breachList(c)}`)));
+    addSheet('Optimise', optimises.map(c => metricRow(c, optimiseAction(c))));
+    addSheet('Revert Hikes', revertHikes.map(c => ({
+      ...metricRow(c, `Revert budget hike — extra spend returning only ${fmt(c.iRoas, 'x')} incremental`),
+      'Hike Date': c.lastBudgetChange ? toISODate(c.lastBudgetChange) : '',
+      'Extra Spend/d': Math.round(c.iRoasDeltaSpend || 0),
+      'Extra Sales/d': Math.round(c.iRoasDeltaSales || 0),
+      'Incremental ROAS': c.iRoas != null ? +c.iRoas.toFixed(2) : null
+    })));
+    addSheet('Qty Drops', qtyDrops.map(({
+      c,
+      pv
+    }) => ({
+      ...metricRow(c, `Qty fell ${Math.round(((pv.drr?.totalQty || 0) - (c.drr?.totalQty || 0)) / (pv.drr?.totalQty || 1) * 100)}% vs prev period. Driver: ${qtyDriver(c, pv)}`),
+      'DQty/d prev': +(pv.drr?.totalQty || 0).toFixed(1),
+      'DQty/d now': +(c.drr?.totalQty || 0).toFixed(1),
+      'Δ units/d': +((c.drr?.totalQty || 0) - (pv.drr?.totalQty || 0)).toFixed(1)
+    })));
+    addSheet('Deteriorating', deteriorating.map(c => metricRow(c, `7d score ${Math.round(c.score7)} vs period ${Math.round(c.score)} — collapsing this week, verdict hasn't flipped yet`)));
+    addSheet('Verdict Flips', flips.map(({
+      c,
+      prev
+    }) => ({
+      ...metricRow(c, `Was ${prev.verdict}, now ${c.verdict}. ROAS ${prev.roas != null ? prev.roas.toFixed(2) + 'x' : '—'} → ${c.roas != null ? c.roas.toFixed(2) + 'x' : '—'}`),
+      'Prev Verdict': prev.verdict
+    })));
+    addSheet('Scale', scales.map(c => metricRow(c, scaleAction(c))));
+    addSheet('All Live Campaigns', live.map(c => metricRow(c, reasonFor(c))));
+    X.writeFile(wb, `Blinkit_Daily_Brief_${endDate ? toISODate(endDate) : 'export'}.xlsx`);
+  };
+
+  // plain-text action list for the Blinkit panel
   const copyActions = () => {
     const L = [];
     L.push(`BLINKIT ACTIONS — ${endDate ? endDate.toLocaleDateString('en-IN', {
@@ -8170,9 +8171,20 @@ function DailyBriefView({
       L.push('', '— REDUCE budget 25% —');
       reduces.forEach(c => L.push(`[ ] ${c.campaign} · saves ~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d`));
     }
+    if (optimises.length) {
+      L.push('', '— OPTIMISE —');
+      optimises.slice(0, 12).forEach(c => L.push(`[ ] ${c.campaign} · ${optimiseAction(c)}`));
+    }
     if (revertHikes.length) {
       L.push('', '— REVERT BUDGET HIKES (incremental ROAS < 0.8x) —');
       revertHikes.forEach(c => L.push(`[ ] ${c.campaign} · hike +${fmt(c.iRoasDeltaSpend, 'rsk')}/d returned ${fmt(c.iRoas, 'x')} incremental`));
+    }
+    if (qtyDrops.length) {
+      L.push('', '— QTY DROPS vs PREV —');
+      qtyDrops.slice(0, 10).forEach(({
+        c,
+        pv
+      }) => L.push(`[ ] ${c.campaign} · ${(pv.drr?.totalQty || 0).toFixed(1)} → ${(c.drr?.totalQty || 0).toFixed(1)} units/d · ${qtyDriver(c, pv)}`));
     }
     if (scales.length) {
       L.push('', '— SCALE —');
@@ -8357,20 +8369,40 @@ function DailyBriefView({
       flexWrap: 'wrap',
       alignItems: 'stretch'
     }
-  }, statBox('Actions Today', totalActions, '#3b82f6', `${done.size} done`), statBox('Savings Available', fmt(cutSavings + reduceSavings, 'rsk') + '/d', '#22c55e', `${cuts.length} cuts · ${reduces.length} reduces`), statBox('₹ At Risk (alerts)', fmt(alertRisk, 'rsk') + '/d', '#ef4444', `${alerts.length} campaign · ${kwAlerts.length} keyword alerts`), statBox('Scale Candidates', scales.length, '#8b5cf6', 'metrics above floor'), /*#__PURE__*/React.createElement("button", {
-    onClick: copyActions,
+  }, statBox('Actions Today', totalActions, '#3b82f6', `${done.size} done`), statBox('Savings Available', fmt(cutSavings + reduceSavings, 'rsk') + '/d', '#22c55e', `${cuts.length} cuts · ${reduces.length} reduces`), statBox('₹ At Risk (alerts)', fmt(alertRisk, 'rsk') + '/d', '#ef4444', `${alerts.length} campaign · ${kwAlerts.length} keyword alerts`), statBox('Scale Candidates', scales.length, '#8b5cf6', 'metrics above floor'), /*#__PURE__*/React.createElement("div", {
     style: {
-      background: copied ? 'rgba(34,197,94,0.15)' : '#1e3a5f',
-      color: copied ? '#22c55e' : '#93c5fd',
-      border: `1px solid ${copied ? '#22c55e' : '#2563eb'}`,
-      borderRadius: 10,
-      padding: '0 18px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6,
+      justifyContent: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: exportExcel,
+    style: {
+      background: '#14532d',
+      color: '#4ade80',
+      border: '1px solid #16a34a',
+      borderRadius: 8,
+      padding: '7px 16px',
       fontSize: 11,
       fontWeight: 700,
       cursor: 'pointer',
       whiteSpace: 'nowrap'
     }
-  }, copied ? '✓ Copied' : '⧉ Copy action list')), alerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, "\u2B07 Export Excel"), /*#__PURE__*/React.createElement("button", {
+    onClick: copyActions,
+    style: {
+      background: copied ? 'rgba(34,197,94,0.15)' : '#1e3a5f',
+      color: copied ? '#22c55e' : '#93c5fd',
+      border: `1px solid ${copied ? '#22c55e' : '#2563eb'}`,
+      borderRadius: 8,
+      padding: '7px 16px',
+      fontSize: 11,
+      fontWeight: 700,
+      cursor: 'pointer',
+      whiteSpace: 'nowrap'
+    }
+  }, copied ? '✓ Copied' : '⧉ Copy list'))), alerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\u26A0",
     title: "Sudden Changes \u2014 Campaigns",
     accent: "#ef4444",
@@ -8391,7 +8423,7 @@ function DailyBriefView({
       fontSize: 9,
       padding: '2px 8px'
     }
-  }, "+", alerts.length - 10, " more lower-severity")), kwAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, "+", alerts.length - 10, " more \u2014 see Excel export")), kwAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDD11",
     title: "Keyword Alerts (Search)",
     accent: "#f97316",
@@ -8425,14 +8457,14 @@ function DailyBriefView({
     tag: SEG_SHORT[c.segment] || c.segment,
     impact: `saves ${fmt(c.drr?.spend, 'rsk')}/d`,
     impactColor: "#22c55e",
-    action: `Pause. ROAS ${c.roas != null ? fmt(c.roas, 'x') : '—'} · NUR ${c.nur != null ? fmt(c.nur, '%') : '—'} · LTV:CAC ${c.ltvCac != null ? fmt(c.ltvCac, 'x') : '—'}`
+    action: `Pause. ${breachList(c) || 'Score below cut line'}`
   })), cuts.length > 10 && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       padding: '2px 8px'
     }
-  }, "+", cuts.length - 10, " more in Action Queue")), reduces.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, "+", cuts.length - 10, " more \u2014 see Excel export")), reduces.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\u2B07",
     title: "Reduce Budget 25%",
     accent: "#f97316",
@@ -8445,7 +8477,44 @@ function DailyBriefView({
     tag: SEG_SHORT[c.segment] || c.segment,
     impact: `~${fmt((c.drr?.spend || 0) * 0.25, 'rsk')}/d`,
     impactColor: "#22c55e",
-    action: `2 metric breaches · spend ${fmt(c.drr?.spend, 'rsk')}/d`
+    action: `${breachList(c) || '2 metric breaches'} · spend ${fmt(c.drr?.spend, 'rsk')}/d`
+  }))), optimises.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\uD83D\uDD27",
+    title: "Optimise",
+    accent: "#f59e0b",
+    count: optimises.length,
+    sub: "one metric breaching \u2014 specific fix per campaign"
+  }, optimises.slice(0, 10).map(c => /*#__PURE__*/React.createElement(Row, {
+    key: 'opt_' + c.campaign,
+    id: 'opt_' + c.campaign,
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `${fmt(c.drr?.spend, 'rsk')}/d`,
+    impactColor: "#f59e0b",
+    action: optimiseAction(c)
+  })), optimises.length > 10 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      padding: '2px 8px'
+    }
+  }, "+", optimises.length - 10, " more \u2014 see Excel export")), qtyDrops.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\uD83D\uDCE6",
+    title: "Qty Drops vs Prev Period",
+    accent: "#ef4444",
+    count: qtyDrops.length,
+    sub: "units/d down \u226530% \xB7 driver attached"
+  }, qtyDrops.slice(0, 10).map(({
+    c,
+    pv
+  }) => /*#__PURE__*/React.createElement(Row, {
+    key: 'qd_' + c.campaign,
+    id: 'qd_' + c.campaign,
+    name: c.campaign,
+    tag: SEG_SHORT[c.segment] || c.segment,
+    impact: `${(pv.drr?.totalQty || 0).toFixed(1)} → ${(c.drr?.totalQty || 0).toFixed(1)}/d`,
+    impactColor: "#ef4444",
+    action: `▼${Math.round(((pv.drr?.totalQty || 0) - (c.drr?.totalQty || 0)) / (pv.drr?.totalQty || 1) * 100)}% units. Driver: ${qtyDriver(c, pv)}`
   }))), revertHikes.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDCB8",
     title: "Revert Budget Hikes",
@@ -8500,7 +8569,7 @@ function DailyBriefView({
     title: "Scale",
     accent: "#22c55e",
     count: scales.length,
-    sub: "ranked by spend \u2014 headroom-aware action"
+    sub: "reason for budget vs CPM attached to each"
   }, scales.slice(0, 10).map(c => /*#__PURE__*/React.createElement(Row, {
     key: 'sc_' + c.campaign,
     id: 'sc_' + c.campaign,
@@ -8741,6 +8810,20 @@ function App() {
     });
     return m;
   }, [alerts]);
+
+  // Persistent breaches with no operator response — "No Action" tab
+  const ignored = useMemo(() => {
+    if (!appState) return [];
+    const {
+      allRows,
+      ltvMap,
+      campaignIndexMap,
+      bounds
+    } = appState;
+    const s = new Date(bounds.max.getTime() - 13 * 864e5);
+    const opCampaigns = aggregateCampaigns(allRows, ltvMap, s < bounds.min ? bounds.min : s, bounds.max, campaignIndexMap);
+    return computeIgnored(allRows, opCampaigns, bounds.max);
+  }, [appState]);
   // ─────────────────────────────────────────────────────────────────────────
 
   // Conditional return only AFTER all hooks are declared
@@ -8794,8 +8877,8 @@ function App() {
     id: 'segment',
     label: 'Segment Health'
   }, {
-    id: 'actions',
-    label: 'Action Queue'
+    id: 'noaction',
+    label: `⏳ No Action${ignored.length ? ` (${ignored.length})` : ''}`
   }, {
     id: 'budgetthreat',
     label: 'Budget Threat'
@@ -9038,12 +9121,8 @@ function App() {
     sfPrev: sfPrev
   }), tab === 'segment' && /*#__PURE__*/React.createElement(SegmentHealthView, {
     campaigns: campaigns
-  }), tab === 'actions' && /*#__PURE__*/React.createElement(ActionQueueView, {
-    campaigns: campaigns,
-    prevCampaigns: prevCampaigns,
-    allRows: allRows,
-    endDate: endDate,
-    alertsMap: alertsMap
+  }), tab === 'noaction' && /*#__PURE__*/React.createElement(NoActionView, {
+    ignored: ignored
   }), tab === 'budgetthreat' && /*#__PURE__*/React.createElement(BudgetThreatView, {
     allRows: allRows,
     endDate: endDate
@@ -9088,7 +9167,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: daily-brief + alerts + idb-cache
+// build: v2 excel-export + noaction + qty-drops + merged-brief
 
 </script>
 </body></html>
