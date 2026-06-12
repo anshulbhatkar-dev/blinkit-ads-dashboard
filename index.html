@@ -425,7 +425,8 @@ function extractRow(row, type) {
     newUsers: n(11),
     directSales: n(12),
     spend: n(14),
-    budget: 0,
+    budget: n(7),
+    cpm: n(6),
     segment: ASSET_TO_SEG[s(4).toLowerCase()] || s(4) || null,
     brand: s(22),
     category: s(23),
@@ -444,7 +445,8 @@ function extractRow(row, type) {
     newUsers: n(14),
     directSales: n(15),
     spend: n(21),
-    budget: 0,
+    budget: n(9),
+    cpm: n(8),
     segment: LAYOUT_TO_SEG[s(5).toLowerCase()] || null,
     brand: s(23),
     category: s(24),
@@ -463,7 +465,8 @@ function extractRow(row, type) {
     newUsers: n(12),
     directSales: n(13),
     spend: n(17),
-    budget: 0,
+    budget: n(8),
+    cpm: n(7),
     segment: 'Category Display Direct shelf',
     brand: s(23),
     category: s(24),
@@ -482,7 +485,8 @@ function extractRow(row, type) {
     newUsers: 0,
     directSales: 0,
     spend: n(13),
-    budget: 0,
+    budget: n(8),
+    cpm: n(7),
     segment: null,
     brand: s(15),
     category: s(16),
@@ -7126,139 +7130,139 @@ function SalesFlowView({
   }))), /*#__PURE__*/React.createElement("tbody", null, tableRows))));
 }
 
-// ─── BUDGET THREAT MONITOR ───────────────────────────────────────────────────
+// ─── BUDGET SPIKE RADAR ──────────────────────────────────────────────────────
+// Predicts surplus drawdown BEFORE it lands. Blinkit billing: unspent daily
+// budget rolls into a surplus bank; Blinkit can spend above the daily budget
+// any day, drawing the bank down — often in month-end spikes at ~17% worse
+// ROAS (backtested Apr–May 2026). Drain capacity calibrated from data:
+// overspend days run median 1.3x, p90 ~2.5x of set budget → plan at 1.5x.
 
-function aggregateBudgetThreats(allRows, endDate) {
-  const monthStart = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
-  const daysInMonth = new Date(endDate.getFullYear(), endDate.getMonth() + 1, 0).getDate();
-  const remainingDays = daysInMonth - endDate.getDate() + 1;
-  const activeCampaigns = new Set(allRows.filter(r => r.date && r.date.toDateString() === endDate.toDateString() && r.spend > 0).map(r => r.campaign.toLowerCase()));
-  const campDayMap = {};
+function computeSpikeRadar(allRows, refDate) {
+  if (!refDate) return {
+    rows: [],
+    summary: {}
+  };
+  const y = refDate.getFullYear(),
+    m = refDate.getMonth();
+  const monthStart = new Date(y, m, 1);
+  const daysInMonth = new Date(y, m + 1, 0).getDate();
+  const dom = refDate.getDate();
+  const remaining = daysInMonth - dom; // full days after the latest data day
+
+  const camps = {};
   allRows.forEach(r => {
-    if (!r.date || !r.campaign) return;
-    const campKey = r.campaign.toLowerCase();
-    if (!activeCampaigns.has(campKey)) return;
-    const dk = r.date.toDateString();
-    if (!campDayMap[campKey]) campDayMap[campKey] = {
+    if (!r.date || r.date < monthStart || r.date > refDate) return;
+    const ck = r.campaign.toLowerCase();
+    if (!camps[ck]) camps[ck] = {
       name: r.campaign,
       brand: r.brand,
       category: r.category,
+      type: r.type,
       days: {}
     };
-    if (!campDayMap[campKey].days[dk]) campDayMap[campKey].days[dk] = {
+    const dk = r.date.getDate();
+    const c = camps[ck];
+    if (!c.days[dk]) c.days[dk] = {
       date: r.date,
       budget: 0,
       spend: 0,
-      impressions: 0
+      sales: 0
     };
-    campDayMap[campKey].days[dk].budget = Math.max(campDayMap[campKey].days[dk].budget, r.budget || 0);
-    campDayMap[campKey].days[dk].spend += r.spend || 0;
-    campDayMap[campKey].days[dk].impressions += r.impressions || 0;
+    c.days[dk].budget = Math.max(c.days[dk].budget, r.budget || 0);
+    c.days[dk].spend += r.spend || 0;
+    c.days[dk].sales += r.directSales || 0;
   });
-  const results = [];
-  Object.entries(campDayMap).forEach(([campKey, campData]) => {
-    const {
-      name,
-      brand,
-      category,
-      days
-    } = campData;
-    const allDays = Object.values(days).sort((a, b) => a.date - b.date);
-    const monthDays = allDays.filter(d => d.date >= monthStart && d.date <= endDate);
-    if (monthDays.length === 0) return;
-    const monthlyCap = monthDays.reduce((s, d) => s + (d.budget || 0), 0);
-    const cumulativeSpend = monthDays.reduce((s, d) => s + (d.spend || 0), 0);
-    const cumulativeSurplus = monthlyCap - cumulativeSpend;
-    if (cumulativeSurplus <= 0) return;
-    const spendRatios = monthDays.filter(d => d.budget > 0).map(d => d.spend / d.budget);
-    const avgSpendRatio = spendRatios.length > 0 ? spendRatios.reduce((s, v) => s + v, 0) / spendRatios.length : null;
-    if (avgSpendRatio === null || avgSpendRatio >= 0.85) return;
+  const rows = [];
+  Object.values(camps).forEach(c => {
+    const days = Object.values(c.days).sort((a, b) => a.date - b.date);
+    if (days.length < 3) return;
+    if (days[days.length - 1].date.getDate() < dom - 1) return; // not live
+    const budgetDays = days.filter(d => d.budget > 0);
+    if (budgetDays.length < 3) return; // no usable budget data
 
-    // Preferred: per-keyword impressions (same campaign only)
-    const kwImpByDay = {};
-    allRows.filter(r => r.campaign?.toLowerCase() === campKey && r.keyword).forEach(r => {
-      if (!r.date) return;
-      const dk = r.date.toDateString();
-      const kwk = (r.keyword || '').toLowerCase();
-      if (!kwImpByDay[kwk]) kwImpByDay[kwk] = {};
-      kwImpByDay[kwk][dk] = (kwImpByDay[kwk][dk] || 0) + (r.impressions || 0);
+    const capMTD = days.reduce((s, d) => s + d.budget, 0);
+    const cumSpend = days.reduce((s, d) => s + d.spend, 0);
+    const surplus = capMTD - cumSpend;
+    const curBudget = [...days].reverse().find(d => d.budget > 0)?.budget || 0;
+    if (curBudget <= 0) return;
+    const last7 = days.slice(-7);
+    const spend7 = last7.reduce((s, d) => s + d.spend, 0) / last7.length;
+    const ratios = budgetDays.map(d => d.spend / d.budget);
+    const ratioMTD = ratios.reduce((s, v) => s + v, 0) / ratios.length;
+    const drawDays = budgetDays.filter(d => d.spend > d.budget * 1.1);
+    const buildDays = budgetDays.filter(d => d.spend < d.budget * 0.9);
+    const drawnMTD = budgetDays.reduce((s, d) => s + Math.max(0, d.spend - d.budget), 0);
+    const maxMult = drawDays.length ? Math.max(...drawDays.map(d => d.spend / d.budget)) : null;
+    const drainingNow = days.slice(-2).some(d => d.budget > 0 && d.spend > d.budget * 1.1);
+
+    // ROAS: drawdown days vs normal days (this month)
+    const dSp = drawDays.reduce((s, d) => s + d.spend, 0),
+      dSa = drawDays.reduce((s, d) => s + d.sales, 0);
+    const nList = days.filter(d => !(d.budget > 0 && d.spend > d.budget * 1.1));
+    const nSp = nList.reduce((s, d) => s + d.spend, 0),
+      nSa = nList.reduce((s, d) => s + d.sales, 0);
+    const roasDraw = dSp > 0 ? dSa / dSp : null;
+    const roasNorm = nSp > 0 ? nSa / nSp : null;
+
+    // Forward projection (assumes current budget persists)
+    const landingRate = remaining > 0 ? curBudget + Math.max(0, surplus) / remaining : curBudget + Math.max(0, surplus);
+    const spikeRatio = landingRate / curBudget;
+    const daysToDrain = surplus > 0 ? surplus / (0.5 * curBudget) : 0; // excess drain ≈ 0.5x budget/day (1.5x total)
+    const drainable = daysToDrain <= Math.max(remaining, 1);
+    const spikeStartIn = Math.max(0, remaining - daysToDrain); // days until drain must begin
+    const spikeStart = surplus > 0 && remaining > 0 ? new Date(y, m, Math.min(daysInMonth, Math.max(dom + 1, Math.round(daysInMonth - daysToDrain + 1)))) : null;
+    let cls = null;
+    if (drainingNow && surplus > curBudget) cls = 'RED';else if (surplus >= 3 * curBudget && remaining > 0 && drainable && spikeStartIn <= 7) cls = 'ORANGE';else if (ratioMTD < 0.85 && surplus > curBudget) cls = 'YELLOW';
+    if (!cls) return;
+
+    // suggested budget to land smoothly (15% haircut, ₹500 platform floor)
+    const suggested = remaining > 0 ? Math.max(500, (capMTD + curBudget * remaining - cumSpend) / remaining * 0.85) : null;
+    rows.push({
+      cls,
+      campaign: c.name,
+      brand: c.brand,
+      category: c.category,
+      type: c.type,
+      campKey: c.name.toLowerCase(),
+      surplus,
+      curBudget,
+      spend7,
+      ratioMTD,
+      drawnMTD,
+      drawDayCount: drawDays.length,
+      buildDayCount: buildDays.length,
+      maxMult,
+      landingRate,
+      spikeRatio,
+      daysToDrain,
+      remaining,
+      spikeStart,
+      monthEnd: new Date(y, m, daysInMonth),
+      roasDraw,
+      roasNorm,
+      drainingNow,
+      capMTD,
+      cumSpend,
+      days,
+      suggested
     });
-    let avgDailyImpressions;
-    if (Object.keys(kwImpByDay).length > 0) {
-      avgDailyImpressions = Object.values(kwImpByDay).reduce((total, dayMap) => {
-        const days = Object.values(dayMap);
-        const avg = days.reduce((s, v) => s + v, 0) / days.length;
-        return total + avg;
-      }, 0);
-    } else {
-      const impByDay = {};
-      allRows.filter(r => r.campaign?.toLowerCase() === campKey).forEach(r => {
-        if (!r.date) return;
-        const dk = r.date.toDateString();
-        impByDay[dk] = (impByDay[dk] || 0) + (r.impressions || 0);
-      });
-      avgDailyImpressions = Object.keys(impByDay).length > 0 ? Object.values(impByDay).reduce((s, v) => s + v, 0) / Object.keys(impByDay).length : 0;
+  });
+  const order = {
+    RED: 0,
+    ORANGE: 1,
+    YELLOW: 2
+  };
+  rows.sort((a, b) => order[a.cls] - order[b.cls] || b.surplus - a.surplus);
+  return {
+    rows,
+    summary: {
+      red: rows.filter(r => r.cls === 'RED').length,
+      orange: rows.filter(r => r.cls === 'ORANGE').length,
+      yellow: rows.filter(r => r.cls === 'YELLOW').length,
+      totalSurplus: rows.reduce((s, r) => s + Math.max(0, r.surplus), 0),
+      totalDrawn: rows.reduce((s, r) => s + r.drawnMTD, 0)
     }
-
-    // Per-day avg spend and surplus
-    const daysElapsed = monthDays.length;
-    const avgDailySpend = daysElapsed > 0 ? cumulativeSpend / daysElapsed : 0;
-    const avgDailySurplus = daysElapsed > 0 ? cumulativeSurplus / daysElapsed : 0;
-
-    // Historic peak and P75 spend (all historical data)
-    const allSpendByDay = {};
-    allRows.filter(r => r.campaign?.toLowerCase() === campKey).forEach(r => {
-      if (!r.date) return;
-      const dk = r.date.toDateString();
-      if (!allSpendByDay[dk]) allSpendByDay[dk] = {
-        date: r.date,
-        spend: 0
-      };
-      allSpendByDay[dk].spend += r.spend || 0;
-    });
-    const dailySpends = Object.values(allSpendByDay).sort((a, b) => b.spend - a.spend);
-    const peakSpendDay = dailySpends.length > 0 ? dailySpends[0] : null;
-    const historicPeakSpend = peakSpendDay?.spend || null;
-    const historicPeakDate = peakSpendDay?.date || null;
-    const sortedSpends = [...dailySpends].sort((a, b) => a.spend - b.spend).map(d => d.spend);
-    const p75Idx = Math.floor(sortedSpends.length * 0.75);
-    const p75Spend = sortedSpends.length > 0 ? sortedSpends[p75Idx] : null;
-    const currentDailyBudget = monthDays[monthDays.length - 1]?.budget || 0;
-    const rawSuggested = remainingDays > 0 ? (monthlyCap - cumulativeSpend) / remainingDays * 0.85 : 0;
-    const suggestedBudget = rawSuggested > 0 ? Math.max(500, rawSuggested) : 0; // ₹500 platform floor
-
-    results.push({
-      campaign: name,
-      brand,
-      category,
-      campKey,
-      monthlyCap,
-      cumulativeSpend,
-      cumulativeSurplus,
-      avgSpendRatio,
-      avgDailyImpressions,
-      remainingDays,
-      currentDailyBudget,
-      suggestedBudget,
-      daysElapsed,
-      avgDailySpend,
-      avgDailySurplus,
-      historicPeakSpend,
-      historicPeakDate,
-      p75Spend,
-      monthDays
-    });
-  });
-  const sortedImps = [...results].map(r => r.avgDailyImpressions).sort((a, b) => a - b);
-  const medianImp = sortedImps.length > 0 ? sortedImps[Math.floor(sortedImps.length / 2)] : 0;
-  results.forEach(r => {
-    r.impressionTier = r.avgDailyImpressions > medianImp ? 'HIGH' : 'LOW';
-    r.priority = r.avgSpendRatio < 0.85 && r.impressionTier === 'HIGH' ? 'P0' : 'P1';
-  });
-  return results.sort((a, b) => {
-    if (a.priority !== b.priority) return a.priority < b.priority ? -1 : 1;
-    return b.cumulativeSurplus - a.cumulativeSurplus;
-  });
+  };
 }
 function BudgetSpendChart({
   monthDays,
@@ -7288,7 +7292,6 @@ function BudgetSpendChart({
     const budgetH = Math.round(d.budget / maxVal * 72);
     const spendH = Math.round(d.spend / maxVal * 72);
     const isOver = d.spend > d.budget;
-    const dateStr = d.date.getDate();
     return /*#__PURE__*/React.createElement("div", {
       key: i,
       style: {
@@ -7324,7 +7327,7 @@ function BudgetSpendChart({
         fontSize: 7,
         marginTop: 2
       }
-    }, dateStr));
+    }, d.date.getDate()));
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -7385,34 +7388,69 @@ function BudgetSpendChart({
       color: '#6b7280',
       fontSize: 9
     }
-  }, "Overspend day"))));
+  }, "Drawdown day (spend > budget)"))));
 }
-function BudgetThreatView({
+function SpikeRadarView({
   allRows,
   endDate
 }) {
-  const threats = useMemo(() => aggregateBudgetThreats(allRows, endDate), [allRows, endDate]);
+  const radar = useMemo(() => computeSpikeRadar(allRows, endDate), [allRows, endDate]);
   const [desiredSpend, setDesiredSpend] = useState({});
-  const [expandedCamp, setExpandedCamp] = useState(null);
+  const [expanded, setExpanded] = useState(null);
   const [brandF, setBrandF] = useState([]);
-  const [catF, setCatF] = useState([]);
-  const brands = useMemo(() => [...new Set(threats.map(t => t.brand).filter(Boolean))].sort(), [threats]);
-  const cats = useMemo(() => [...new Set(threats.map(t => t.category).filter(Boolean))].sort(), [threats]);
+  const [clsF, setClsF] = useState('All');
+  const brands = useMemo(() => [...new Set(radar.rows.map(t => t.brand).filter(Boolean))].sort(), [radar]);
   const filtered = useMemo(() => {
-    let out = threats;
+    let out = radar.rows;
     if (brandF.length) out = out.filter(t => brandF.includes(t.brand));
-    if (catF.length) out = out.filter(t => catF.includes(t.category));
+    if (clsF !== 'All') out = out.filter(t => t.cls === clsF);
     return out;
-  }, [threats, brandF, catF]);
-  const p0Count = filtered.filter(t => t.priority === 'P0').length;
-  const p1Count = filtered.filter(t => t.priority === 'P1').length;
-  const totalSurplus = filtered.reduce((s, t) => s + t.cumulativeSurplus, 0);
+  }, [radar, brandF, clsF]);
   const fmtRs = n => n == null ? '—' : n >= 100000 ? '₹' + (n / 100000).toFixed(1) + 'L' : n >= 1000 ? '₹' + (n / 1000).toFixed(1) + 'K' : '₹' + Math.round(n);
-  const fmtPct = n => n == null ? '—' : (n * 100).toFixed(1) + '%';
+  const fmtD = d => d ? d.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short'
+  }) : '—';
+  const CLS_CFG = {
+    RED: {
+      label: '🔴 DRAINING NOW',
+      color: '#ef4444',
+      bg: 'rgba(239,68,68,0.06)'
+    },
+    ORANGE: {
+      label: '🟠 SPIKE ≤7D',
+      color: '#f97316',
+      bg: 'rgba(249,115,22,0.05)'
+    },
+    YELLOW: {
+      label: '🟡 BUILDING',
+      color: '#f59e0b',
+      bg: 'transparent'
+    }
+  };
+  const actionText = t => {
+    if (t.cls === 'RED') return `Surplus draining through this campaign NOW (drew ${fmtRs(t.drawnMTD)} over budget MTD${t.maxMult ? `, peaks at ${t.maxMult.toFixed(1)}x budget` : ''}). Cutting budget cannot claw the surplus back — drop budget to floor ₹500 to stop the cap growing, and expect ~${fmtRs(Math.max(0, t.surplus))} more to drain by ${fmtD(t.monthEnd)}.`;
+    if (t.cls === 'ORANGE') return `Spike projected to start ~${fmtD(t.spikeStart)}: effective spend heading to ${fmtRs(t.landingRate)}/d vs ${fmtRs(t.curBudget)}/d set (${t.spikeRatio.toFixed(1)}x). Set budget to ${fmtRs(t.suggested)} today to smooth the landing — or do nothing and take the spike at ~17% worse ROAS.`;
+    return `Surplus building (spend ratio ${(t.ratioMTD * 100).toFixed(0)}%). Cheap to fix now: recalibrate to ${fmtRs(t.suggested)}/d before the bank gets dangerous.`;
+  };
   const getRecalibrated = t => {
     const d = parseFloat(desiredSpend[t.campKey]);
-    if (isNaN(d) || !d) return null;
-    return Math.max(500, d + t.cumulativeSurplus / t.remainingDays); // ₹500 platform floor
+    if (isNaN(d) || !d || t.remaining <= 0) return null;
+    const capForward = t.capMTD + t.curBudget * t.remaining;
+    return Math.max(500, (capForward - t.cumSpend - d * t.remaining) / t.remaining + d);
+  };
+
+  // drawdown ledger narrative for expanded row
+  const ledgerNarrative = t => {
+    const built = t.days.filter(d => d.budget > 0 && d.spend < d.budget * 0.9);
+    const drawn = t.days.filter(d => d.budget > 0 && d.spend > d.budget * 1.1);
+    const builtAmt = built.reduce((s, d) => s + (d.budget - d.spend), 0);
+    const drawnAmt = drawn.reduce((s, d) => s + (d.spend - d.budget), 0);
+    const parts = [];
+    if (built.length) parts.push(`Built ${fmtRs(builtAmt)} surplus across ${built.length} underspend days (${fmtD(built[0].date)}–${fmtD(built[built.length - 1].date)})`);
+    if (drawn.length) parts.push(`Blinkit drew ${fmtRs(drawnAmt)} back across ${drawn.length} days${t.maxMult ? ` at up to ${t.maxMult.toFixed(1)}x budget` : ''}${t.roasDraw != null && t.roasNorm != null ? ` — drawdown ROAS ${t.roasDraw.toFixed(2)}x vs ${t.roasNorm.toFixed(2)}x normal` : ''}`);
+    if (!drawn.length && t.surplus > 0) parts.push(`None drawn yet — ${fmtRs(t.surplus)} still loaded`);
+    return parts.join('. ') + '.';
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7423,24 +7461,29 @@ function BudgetThreatView({
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
-      gap: 10
+      gap: 10,
+      flexWrap: 'wrap'
     }
   }, [{
-    label: 'Flagged Campaigns',
-    val: filtered.length,
-    color: '#f59e0b'
-  }, {
-    label: 'P0 Critical',
-    val: p0Count,
+    label: '🔴 Draining Now',
+    val: radar.summary.red,
     color: '#ef4444'
   }, {
-    label: 'P1 Monitor',
-    val: p1Count,
+    label: '🟠 Spike ≤7 Days',
+    val: radar.summary.orange,
+    color: '#f97316'
+  }, {
+    label: '🟡 Building',
+    val: radar.summary.yellow,
     color: '#f59e0b'
   }, {
-    label: 'Total Surplus',
-    val: fmtRs(totalSurplus),
-    color: '#22c55e'
+    label: 'Surplus Loaded',
+    val: fmtRs(radar.summary.totalSurplus),
+    color: '#8b5cf6'
+  }, {
+    label: 'Drawn Over Budget MTD',
+    val: fmtRs(radar.summary.totalDrawn),
+    color: '#ef4444'
   }].map(({
     label,
     val,
@@ -7449,6 +7492,7 @@ function BudgetThreatView({
     key: label,
     style: {
       flex: 1,
+      minWidth: 140,
       background: '#0d1117',
       border: '1px solid #1f2937',
       borderRadius: 8,
@@ -7475,40 +7519,36 @@ function BudgetThreatView({
       alignItems: 'center',
       flexWrap: 'wrap'
     }
-  }, /*#__PURE__*/React.createElement(MultiSelect, {
+  }, ['All', 'RED', 'ORANGE', 'YELLOW'].map(c => /*#__PURE__*/React.createElement("button", {
+    key: c,
+    onClick: () => setClsF(c),
+    style: {
+      background: clsF === c ? '#1e3a5f' : 'transparent',
+      color: clsF === c ? '#93c5fd' : '#6b7280',
+      border: `1px solid ${clsF === c ? '#2563eb' : '#1f2937'}`,
+      borderRadius: 999,
+      padding: '3px 12px',
+      fontSize: 10,
+      cursor: 'pointer',
+      fontWeight: clsF === c ? 700 : 400
+    }
+  }, c === 'All' ? `All (${radar.rows.length})` : CLS_CFG[c].label)), /*#__PURE__*/React.createElement(MultiSelect, {
     values: brandF,
     onChange: setBrandF,
     options: brands,
     placeholder: "All Brands"
-  }), /*#__PURE__*/React.createElement(MultiSelect, {
-    values: catF,
-    onChange: setCatF,
-    options: cats,
-    placeholder: "All Categories"
-  }), brandF.length || catF.length ? /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setBrandF([]);
-      setCatF([]);
-    },
-    style: {
-      color: '#6b7280',
-      fontSize: 10,
-      background: 'transparent',
-      border: 'none',
-      cursor: 'pointer'
-    }
-  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("span", {
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "Blinkit billing: unspent budget rolls over \u2014 underspending now = overspend risk later")), /*#__PURE__*/React.createElement("div", {
+  }, "billing: unspent budget banks as surplus \xB7 Blinkit draws it above daily budget \xB7 drain modelled at 1.5x budget/day (p90 backtest)")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
       border: '1px solid #1f2937',
-      maxHeight: '65vh',
+      maxHeight: '68vh',
       overflowY: 'auto'
     }
   }, /*#__PURE__*/React.createElement("table", {
@@ -7521,7 +7561,7 @@ function BudgetThreatView({
     style: {
       borderBottom: '1px solid #1f2937'
     }
-  }, ['Priority', 'Campaign', 'Impr Tier', 'Avg Daily Impr', 'Monthly Cap', 'Avg Spend/d', 'Avg Surplus/d', 'Peak Spend (date)', 'P75 Spend/d', 'Avg Spend Ratio', 'Days Left', 'Daily Budget/d', 'Suggested Budget/d', 'Desired Spend/d', 'Daily Budget to Set'].map(h => /*#__PURE__*/React.createElement("th", {
+  }, ['Risk', 'Campaign', 'Surplus Bank', 'Budget/d', 'Spend/d (7d)', 'Ratio MTD', 'Drawn Over MTD', 'Landing Rate', 'Spike', 'Spike Window', 'ROAS Draw vs Norm', 'Suggested/d', 'Desired/d', 'Set To'].map(h => /*#__PURE__*/React.createElement("th", {
     key: h,
     style: {
       padding: '7px 10px',
@@ -7533,38 +7573,36 @@ function BudgetThreatView({
       position: 'sticky',
       top: 0,
       zIndex: 2,
-      textAlign: h === 'Priority' || h === 'Campaign' || h === 'Impr Tier' ? 'left' : 'right',
+      textAlign: ['Risk', 'Campaign'].includes(h) ? 'left' : 'right',
       whiteSpace: 'nowrap'
     }
   }, h)))), /*#__PURE__*/React.createElement("tbody", null, filtered.map(t => {
+    const cfg = CLS_CFG[t.cls];
     const recalib = getRecalibrated(t);
     const desiredVal = parseFloat(desiredSpend[t.campKey]);
-    const capExceeded = !isNaN(desiredVal) && desiredVal * t.remainingDays > t.monthlyCap - t.cumulativeSpend;
-    const isExpanded = expandedCamp === t.campKey;
+    const capExceeded = !isNaN(desiredVal) && t.remaining > 0 && desiredVal * t.remaining > t.capMTD + t.curBudget * t.remaining - t.cumSpend;
+    const isExp = expanded === t.campKey;
     return /*#__PURE__*/React.createElement(React.Fragment, {
       key: t.campKey
     }, /*#__PURE__*/React.createElement("tr", {
-      onClick: () => setExpandedCamp(isExpanded ? null : t.campKey),
+      onClick: () => setExpanded(isExp ? null : t.campKey),
       style: {
         borderBottom: '1px solid #111827',
         cursor: 'pointer',
-        background: isExpanded ? 'rgba(30,58,95,0.2)' : t.priority === 'P0' ? 'rgba(239,68,68,0.04)' : 'transparent'
+        background: isExp ? 'rgba(30,58,95,0.2)' : cfg.bg
       }
     }, /*#__PURE__*/React.createElement("td", {
       style: {
-        padding: '6px 10px'
+        padding: '6px 10px',
+        whiteSpace: 'nowrap'
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: {
-        background: t.priority === 'P0' ? 'rgba(239,68,68,0.15)' : 'rgba(245,158,11,0.15)',
-        color: t.priority === 'P0' ? '#ef4444' : '#f59e0b',
-        border: `1px solid ${t.priority === 'P0' ? '#7f1d1d' : '#78350f'}`,
-        padding: '1px 6px',
-        borderRadius: 999,
+        color: cfg.color,
         fontSize: 9,
         fontWeight: 700
       }
-    }, t.priority)), /*#__PURE__*/React.createElement("td", {
+    }, cfg.label)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         maxWidth: 220
@@ -7584,121 +7622,108 @@ function BudgetThreatView({
         color: '#374151',
         fontSize: 8
       }
-    }, t.brand, " \xB7 ", t.category)), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: t.impressionTier === 'HIGH' ? '#22c55e' : '#6b7280',
-        fontSize: 10,
-        fontWeight: 600
-      }
-    }, t.impressionTier)), /*#__PURE__*/React.createElement("td", {
+    }, t.brand, " \xB7 ", t.category, " \xB7 ", t.type)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
-        color: '#9ca3af',
-        fontSize: 11
+        color: '#8b5cf6',
+        fontWeight: 700,
+        fontSize: 12
       }
-    }, Math.round(t.avgDailyImpressions).toLocaleString('en-IN')), /*#__PURE__*/React.createElement("td", {
+    }, fmtRs(t.surplus)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
-        color: '#9ca3af',
-        fontSize: 11
+        color: '#d1d5db'
       }
-    }, /*#__PURE__*/React.createElement("div", null, fmtRs(t.monthlyCap))), /*#__PURE__*/React.createElement("td", {
+    }, fmtRs(t.curBudget)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
-        color: '#9ca3af',
-        fontSize: 11
+        color: '#9ca3af'
       }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontWeight: 600
-      }
-    }, fmtRs(t.avgDailySpend)), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#374151',
-        fontSize: 8
-      }
-    }, "total ", fmtRs(t.cumulativeSpend))), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        color: '#22c55e',
-        fontSize: 11,
-        fontWeight: 600
-      }
-    }, /*#__PURE__*/React.createElement("div", null, fmtRs(t.avgDailySurplus)), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#374151',
-        fontSize: 8
-      }
-    }, "total ", fmtRs(t.cumulativeSurplus))), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        color: '#f59e0b',
-        fontSize: 11,
-        fontWeight: 600
-      }
-    }, /*#__PURE__*/React.createElement("div", null, fmtRs(t.historicPeakSpend)), t.historicPeakDate && /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#374151',
-        fontSize: 8
-      }
-    }, t.historicPeakDate.toLocaleDateString('en-IN', {
-      day: '2-digit',
-      month: 'short'
-    }))), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        color: '#9ca3af',
-        fontSize: 11
-      }
-    }, /*#__PURE__*/React.createElement("div", null, fmtRs(t.p75Spend)), /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#374151',
-        fontSize: 8
-      }
-    }, "75th pct")), /*#__PURE__*/React.createElement("td", {
+    }, fmtRs(t.spend7)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right'
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: {
-        color: t.avgSpendRatio < 0.7 ? '#ef4444' : '#f59e0b',
-        fontWeight: 600,
-        fontSize: 11
+        color: t.ratioMTD < 0.7 ? '#ef4444' : t.ratioMTD < 0.85 ? '#f59e0b' : '#22c55e',
+        fontWeight: 600
       }
-    }, fmtPct(t.avgSpendRatio))), /*#__PURE__*/React.createElement("td", {
+    }, (t.ratioMTD * 100).toFixed(0), "%")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
-        color: '#9ca3af',
-        fontSize: 11
+        color: t.drawnMTD > 0 ? '#ef4444' : '#374151',
+        fontWeight: 600
       }
-    }, t.remainingDays), /*#__PURE__*/React.createElement("td", {
+    }, t.drawnMTD > 0 ? fmtRs(t.drawnMTD) : '—', t.drawDayCount > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 8
+      }
+    }, t.drawDayCount, " days")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
-        color: '#d1d5db',
-        fontSize: 11
+        color: '#f59e0b',
+        fontWeight: 600
       }
-    }, fmtRs(t.currentDailyBudget)), /*#__PURE__*/React.createElement("td", {
+    }, fmtRs(t.landingRate)), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: t.spikeRatio >= 2 ? '#ef4444' : t.spikeRatio >= 1.5 ? '#f97316' : '#9ca3af',
+        fontWeight: 700
+      }
+    }, t.spikeRatio.toFixed(1), "x")), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        color: '#f97316',
+        fontSize: 10,
+        whiteSpace: 'nowrap'
+      }
+    }, t.cls === 'RED' ? 'live now' : t.spikeStart ? `${fmtD(t.spikeStart)} → ${fmtD(t.monthEnd)}` : '—'), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '6px 10px',
+        textAlign: 'right',
+        fontSize: 10,
+        whiteSpace: 'nowrap'
+      }
+    }, t.roasDraw != null ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444'
+      }
+    }, t.roasDraw.toFixed(2), "x") : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#374151'
+      }
+    }, "\u2014"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#4b5563'
+      }
+    }, " vs "), t.roasNorm != null ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#22c55e'
+      }
+    }, t.roasNorm.toFixed(2), "x") : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#374151'
+      }
+    }, "\u2014")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
         color: '#60a5fa',
-        fontSize: 11,
         fontWeight: 600
       }
-    }, fmtRs(t.suggestedBudget)), /*#__PURE__*/React.createElement("td", {
+    }, fmtRs(t.suggested)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right'
@@ -7710,9 +7735,9 @@ function BudgetThreatView({
         ...prev,
         [t.campKey]: e.target.value
       })),
-      placeholder: "\u20B9 desired",
+      placeholder: "\u20B9",
       style: {
-        width: 80,
+        width: 70,
         background: '#111827',
         border: '1px solid #374151',
         color: '#e5e7eb',
@@ -7735,36 +7760,54 @@ function BudgetThreatView({
     }, "Exceeds cap") : recalib != null ? /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#22c55e',
-        fontWeight: 700,
-        fontSize: 11
+        fontWeight: 700
       }
     }, fmtRs(recalib)) : /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#374151'
       }
-    }, "\u2014"))), isExpanded && /*#__PURE__*/React.createElement("tr", {
-      key: t.campKey + '_chart',
+    }, "\u2014"))), isExp && /*#__PURE__*/React.createElement("tr", {
       style: {
         borderBottom: '1px solid #1f2937',
         background: '#070b11'
       }
     }, /*#__PURE__*/React.createElement("td", {
-      colSpan: 15,
+      colSpan: 14,
       style: {
-        padding: '12px 16px'
+        padding: '14px 16px'
       }
-    }, /*#__PURE__*/React.createElement(BudgetSpendChart, {
-      monthDays: t.monthDays,
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: 'rgba(245,158,11,0.06)',
+        border: '1px solid rgba(245,158,11,0.2)',
+        borderRadius: 6,
+        padding: '8px 12px',
+        marginBottom: 10
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#f59e0b',
+        fontSize: 10,
+        fontWeight: 700,
+        marginBottom: 3
+      }
+    }, "\u26A1 ", actionText(t)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 10
+      }
+    }, "\uD83D\uDCDC Ledger: ", ledgerNarrative(t))), /*#__PURE__*/React.createElement(BudgetSpendChart, {
+      monthDays: t.days,
       campaign: t.campaign
     }))));
   }), filtered.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
-    colSpan: 15,
+    colSpan: 14,
     style: {
       padding: 40,
       textAlign: 'center',
       color: '#4b5563'
     }
-  }, "No campaigns at risk \u2014 all campaigns spending \u2265 85% of daily budget"))))));
+  }, "No spike risk \u2014 surplus banks under control across the portfolio."))))));
 }
 
 // ─── LOADING SCREEN ──────────────────────────────────────────────────────────
@@ -9033,7 +9076,7 @@ function App() {
     label: `⏳ No Action${ignored.length ? ` (${ignored.length})` : ''}`
   }, {
     id: 'budgetthreat',
-    label: 'Budget Threat'
+    label: 'Spike Radar'
   }];
   const totalCut = campaigns.filter(c => c.verdict === 'Cut').length;
   const totalScale = campaigns.filter(c => c.verdict === 'Scale').length;
@@ -9276,9 +9319,9 @@ function App() {
     campaigns: campaigns
   }), tab === 'noaction' && /*#__PURE__*/React.createElement(NoActionView, {
     ignored: ignored
-  }), tab === 'budgetthreat' && /*#__PURE__*/React.createElement(BudgetThreatView, {
+  }), tab === 'budgetthreat' && /*#__PURE__*/React.createElement(SpikeRadarView, {
     allRows: allRows,
-    endDate: endDate
+    endDate: bounds.max
   }))));
 }
 class ErrorBoundary extends React.Component {
@@ -9320,7 +9363,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v3 fixlist + formula-subtotals + kw-x-campaign + constraints
+// build: v4 spike-radar + all-type-budgets
 
 </script>
 </body></html>
