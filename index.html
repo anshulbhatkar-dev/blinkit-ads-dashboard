@@ -8511,6 +8511,71 @@ function DailyBriefView({
     return m;
   }, [prevCampaigns]);
   const alertSet = useMemo(() => new Set(alerts.map(a => a.campaign.toLowerCase())), [alerts]);
+
+  // Merge campaign + keyword alerts, de-duplicated. A keyword alert whose campaign
+  // already has a campaign-level alert of the SAME cause-family is folded into that
+  // campaign row as a "driver keyword" (one row per real problem, ₹ counted once).
+  // Keyword alerts with no matching campaign alert stay standalone — that's the
+  // hidden-bid-war-inside-a-healthy-campaign case worth surfacing.
+  const mergedAlerts = useMemo(() => {
+    const fam = a => {
+      const c = (a.cause || '').toLowerCase();
+      if (c.includes('outbid')) return 'outbid';
+      if (c.includes('hours live') || c.includes('budget')) return 'budget';
+      if (c.includes('category-wide')) return 'category';
+      if (c.includes('daypart')) return 'daypart';
+      return a.flags && a.flags[0] ? a.flags[0].metric : 'other';
+    };
+    const campByKey = {};
+    alerts.forEach(a => {
+      campByKey[a.campaign.toLowerCase() + '||' + fam(a)] = true;
+    });
+    const driverMap = {};
+    const standaloneKw = [];
+    kwAlerts.forEach(a => {
+      const key = (a.campaign || '').toLowerCase() + '||' + fam(a);
+      if (campByKey[key]) (driverMap[key] = driverMap[key] || []).push(a);else standaloneKw.push(a);
+    });
+    const rows = [...alerts.map(a => {
+      const drivers = driverMap[a.campaign.toLowerCase() + '||' + fam(a)] || [];
+      return {
+        lvl: 'Campaign',
+        key: 'al_' + a.campaign,
+        name: a.campaign,
+        tag: `${a.brand || ''} · ${a.category || ''}`,
+        sev: a.severity,
+        flags: a.flags,
+        cause: a.cause,
+        brand: a.brand,
+        category: a.category,
+        segment: a.segment,
+        baseSpend: a.baseSpend,
+        recSpend: a.recSpend,
+        baseImpr: a.baseImpr,
+        recImpr: a.recImpr,
+        keyword: '',
+        drivers: drivers.sort((x, y) => (y.severity || 0) - (x.severity || 0)).map(d => `"${d.keyword}" ${d.flags.map(f => f.label).join(', ')}`)
+      };
+    }), ...standaloneKw.map(a => ({
+      lvl: 'Keyword',
+      key: 'kw_' + a.keyword,
+      name: `"${a.keyword}"`,
+      tag: a.campaign || '',
+      sev: a.severity,
+      flags: a.flags,
+      cause: a.cause,
+      brand: a.brand,
+      category: a.category,
+      segment: null,
+      baseSpend: a.baseSpend,
+      recSpend: a.recSpend,
+      baseImpr: null,
+      recImpr: null,
+      keyword: a.keyword,
+      drivers: []
+    }))].sort((x, y) => y.sev - x.sev);
+    return rows;
+  }, [alerts, kwAlerts]);
   const live = useMemo(() => campaigns.filter(c => !c.isInactive), [campaigns]);
   const cuts = useMemo(() => live.filter(c => c.verdict === 'Cut').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
   const reduces = useMemo(() => live.filter(c => c.verdict === 'Reduce').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
@@ -8827,35 +8892,22 @@ function DailyBriefView({
       ws['!cols'] = colWidths(rows);
       X.utils.book_append_sheet(wb, ws, name.slice(0, 31));
     };
-    addSheet('Alerts', [...alerts.map(a => ({
-      'Level': 'Campaign',
-      'Campaign': a.campaign,
-      'Keyword': '',
+    addSheet('Alerts', mergedAlerts.map(a => ({
+      'Level': a.lvl,
+      'Campaign': a.lvl === 'Campaign' ? a.name : a.tag,
+      'Keyword': a.keyword || '',
+      'Driver Keywords': a.drivers.join('  |  '),
       'Flags': a.flags.map(f => f.label).join(' | '),
       'Diagnosis': a.cause || a.flags[0]?.detail || '',
-      'Severity Rs-d': Math.round(a.severity),
+      'Severity Rs-d': Math.round(a.sev),
       'Brand': a.brand || '',
       'Category': a.category || '',
       'Segment': a.segment ? SEG_SHORT[a.segment] || a.segment : '',
       'Spend/d baseline': Math.round(a.baseSpend),
       'Spend/d now': Math.round(a.recSpend),
-      'Impr/d baseline': Math.round(a.baseImpr),
-      'Impr/d now': Math.round(a.recImpr)
-    })), ...kwAlerts.map(a => ({
-      'Level': 'Keyword',
-      'Campaign': a.campaign || '',
-      'Keyword': a.keyword,
-      'Flags': a.flags.map(f => f.label).join(' | '),
-      'Diagnosis': a.cause || a.flags[0]?.detail || '',
-      'Severity Rs-d': Math.round(a.severity),
-      'Brand': a.brand || '',
-      'Category': a.category || '',
-      'Segment': '',
-      'Spend/d baseline': Math.round(a.baseSpend),
-      'Spend/d now': Math.round(a.recSpend),
-      'Impr/d baseline': '',
-      'Impr/d now': ''
-    }))].sort((x, y) => (y['Severity Rs-d'] || 0) - (x['Severity Rs-d'] || 0)));
+      'Impr/d baseline': a.baseImpr != null ? Math.round(a.baseImpr) : '',
+      'Impr/d now': a.recImpr != null ? Math.round(a.recImpr) : ''
+    })));
     addSheetSub('Fix List', fixList.map(c => metricRow(c, fixAction(c))), CAMP_SPEC);
     addSheet('KW Bleeders', kwBleeders.flatMap(c => c.bleed.map(k => ({
       'Campaign': c.campaign,
@@ -9224,47 +9276,28 @@ function DailyBriefView({
       cursor: 'pointer',
       whiteSpace: 'nowrap'
     }
-  }, copied ? '✓ Copied' : '⧉ Copy list'))), (alerts.length > 0 || kwAlerts.length > 0) && (() => {
-    const merged = [...alerts.map(a => ({
-      lvl: 'Campaign',
-      key: 'al_' + a.campaign,
-      name: a.campaign,
-      tag: `${a.brand || ''} · ${a.category || ''}`,
-      sev: a.severity,
-      flags: a.flags,
-      cause: a.cause
-    })), ...kwAlerts.map(a => ({
-      lvl: 'Keyword',
-      key: 'kw_' + a.keyword,
-      name: `"${a.keyword}"`,
-      tag: a.campaign || '',
-      sev: a.severity,
-      flags: a.flags,
-      cause: a.cause
-    }))].sort((x, y) => y.sev - x.sev);
-    return /*#__PURE__*/React.createElement(Sec, {
-      icon: "\u26A0",
-      title: "Sudden Changes \u2014 Campaigns & Keywords",
-      accent: "#ef4444",
-      count: merged.length,
-      sub: "last 2d vs prior 7d \xB7 campaign + keyword \xB7 ranked by \u20B9 severity"
-    }, merged.slice(0, 16).map(a => /*#__PURE__*/React.createElement(Row, {
-      key: a.key,
-      id: a.key,
-      name: a.name,
-      tag: (a.lvl === 'Keyword' ? '🔑 KW · ' : '📣 Camp · ') + a.tag,
-      impact: `${fmt(a.sev, 'rsk')}/d`,
-      impactColor: a.lvl === 'Keyword' ? '#f97316' : '#ef4444',
-      action: a.flags.map(f => f.label).join('  ·  '),
-      meta: a.cause || a.flags[0]?.detail
-    })), merged.length > 16 && /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#4b5563',
-        fontSize: 9,
-        padding: '2px 8px'
-      }
-    }, "+", merged.length - 16, " more \u2014 see Excel export"));
-  })(), uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, copied ? '✓ Copied' : '⧉ Copy list'))), mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\u26A0",
+    title: "Sudden Changes \u2014 Campaigns & Keywords",
+    accent: "#ef4444",
+    count: mergedAlerts.length,
+    sub: "last 2d vs prior 7d \xB7 deduped \xB7 driver keywords folded into campaign rows \xB7 ranked by \u20B9 severity"
+  }, mergedAlerts.slice(0, 16).map(a => /*#__PURE__*/React.createElement(Row, {
+    key: a.key,
+    id: a.key,
+    name: a.name,
+    tag: (a.lvl === 'Keyword' ? '🔑 KW · ' : '📣 Camp · ') + a.tag,
+    impact: `${fmt(a.sev, 'rsk')}/d`,
+    impactColor: a.lvl === 'Keyword' ? '#f97316' : '#ef4444',
+    action: a.flags.map(f => f.label).join('  ·  '),
+    meta: (a.cause || a.flags[0]?.detail || '') + (a.drivers.length ? `  ·  🔑 Driver KWs: ${a.drivers.slice(0, 3).join('; ')}${a.drivers.length > 3 ? ` +${a.drivers.length - 3} more` : ''}` : '')
+  })), mergedAlerts.length > 16 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      padding: '2px 8px'
+    }
+  }, "+", mergedAlerts.length - 16, " more \u2014 see Excel export")), uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDEE0",
     title: "Fix List \u2014 Cut \xB7 Reduce \xB7 Optimise",
     accent: "#ef4444",
@@ -12117,7 +12150,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v9 kw-subrow-pctchg + sortable-subrows + merged-alerts
+// build: v10 alert-dedup-driver-keywords
 
 </script>
 </body></html>
