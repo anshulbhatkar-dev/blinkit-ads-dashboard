@@ -8517,6 +8517,19 @@ function DailyBriefView({
   // campaign row as a "driver keyword" (one row per real problem, ₹ counted once).
   // Keyword alerts with no matching campaign alert stay standalone — that's the
   // hidden-bid-war-inside-a-healthy-campaign case worth surfacing.
+  // Per-campaign keyword list (top spend first) from the keyword×campaign feed.
+  // Lets a campaign row show its keywords even when no individual keyword alerted.
+  // Campaigns absent here have no keyword data (Reco / Display / Spotlight) → blank.
+  const campKwMap = useMemo(() => {
+    const m = {};
+    kwCamp.forEach(k => {
+      const ck = (k.campaign || '').toLowerCase();
+      if (!ck || !k.keyword) return;
+      (m[ck] = m[ck] || []).push(k);
+    });
+    Object.keys(m).forEach(ck => m[ck].sort((a, b) => (b.spend || 0) - (a.spend || 0)));
+    return m;
+  }, [kwCamp]);
   const mergedAlerts = useMemo(() => {
     const fam = a => {
       const c = (a.cause || '').toLowerCase();
@@ -8537,12 +8550,22 @@ function DailyBriefView({
       if (campByKey[key]) (driverMap[key] = driverMap[key] || []).push(a);else standaloneKw.push(a);
     });
     const rows = [...alerts.map(a => {
-      const drivers = driverMap[a.campaign.toLowerCase() + '||' + fam(a)] || [];
+      const drivers = (driverMap[a.campaign.toLowerCase() + '||' + fam(a)] || []).sort((x, y) => (y.severity || 0) - (x.severity || 0));
+      let kw,
+        kwIsDriver = false;
+      if (drivers.length) {
+        kw = drivers.map(d => `"${d.keyword}" ${d.flags.map(f => f.label).join(', ')}`).join('  |  ');
+        kwIsDriver = true;
+      } else {
+        const list = campKwMap[a.campaign.toLowerCase()] || [];
+        kw = list.length ? list.slice(0, 3).map(k => `"${k.keyword}"`).join(', ') + (list.length > 3 ? ` +${list.length - 3} more` : '') : '';
+      }
       return {
         lvl: 'Campaign',
         key: 'al_' + a.campaign,
         name: a.campaign,
         tag: `${a.brand || ''} · ${a.category || ''}`,
+        campaign: a.campaign,
         sev: a.severity,
         flags: a.flags,
         cause: a.cause,
@@ -8553,14 +8576,15 @@ function DailyBriefView({
         recSpend: a.recSpend,
         baseImpr: a.baseImpr,
         recImpr: a.recImpr,
-        keyword: '',
-        drivers: drivers.sort((x, y) => (y.severity || 0) - (x.severity || 0)).map(d => `"${d.keyword}" ${d.flags.map(f => f.label).join(', ')}`)
+        kw,
+        kwIsDriver
       };
     }), ...standaloneKw.map(a => ({
       lvl: 'Keyword',
       key: 'kw_' + a.keyword,
       name: `"${a.keyword}"`,
       tag: a.campaign || '',
+      campaign: a.campaign || '',
       sev: a.severity,
       flags: a.flags,
       cause: a.cause,
@@ -8571,11 +8595,11 @@ function DailyBriefView({
       recSpend: a.recSpend,
       baseImpr: null,
       recImpr: null,
-      keyword: a.keyword,
-      drivers: []
+      kw: `"${a.keyword}"`,
+      kwIsDriver: true
     }))].sort((x, y) => y.sev - x.sev);
     return rows;
-  }, [alerts, kwAlerts]);
+  }, [alerts, kwAlerts, campKwMap]);
   const live = useMemo(() => campaigns.filter(c => !c.isInactive), [campaigns]);
   const cuts = useMemo(() => live.filter(c => c.verdict === 'Cut').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
   const reduces = useMemo(() => live.filter(c => c.verdict === 'Reduce').sort((a, b) => (b.drr?.spend || 0) - (a.drr?.spend || 0)), [live]);
@@ -8894,9 +8918,8 @@ function DailyBriefView({
     };
     addSheet('Alerts', mergedAlerts.map(a => ({
       'Level': a.lvl,
-      'Campaign': a.lvl === 'Campaign' ? a.name : a.tag,
-      'Keyword': a.keyword || '',
-      'Driver Keywords': a.drivers.join('  |  '),
+      'Campaign': a.campaign || '',
+      'Keyword(s)': a.kw || '',
       'Flags': a.flags.map(f => f.label).join(' | '),
       'Diagnosis': a.cause || a.flags[0]?.detail || '',
       'Severity Rs-d': Math.round(a.sev),
@@ -9290,7 +9313,7 @@ function DailyBriefView({
     impact: `${fmt(a.sev, 'rsk')}/d`,
     impactColor: a.lvl === 'Keyword' ? '#f97316' : '#ef4444',
     action: a.flags.map(f => f.label).join('  ·  '),
-    meta: (a.cause || a.flags[0]?.detail || '') + (a.drivers.length ? `  ·  🔑 Driver KWs: ${a.drivers.slice(0, 3).join('; ')}${a.drivers.length > 3 ? ` +${a.drivers.length - 3} more` : ''}` : '')
+    meta: (a.cause || a.flags[0]?.detail || '') + (a.lvl === 'Campaign' && a.kw ? `  ·  🔑 ${a.kwIsDriver ? 'Driver KWs' : 'KWs'}: ${a.kw}` : '')
   })), mergedAlerts.length > 16 && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4b5563',
@@ -12150,7 +12173,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v10 alert-dedup-driver-keywords
+// build: v11 alert-single-keyword-col + camp-kw-fallback
 
 </script>
 </body></html>
