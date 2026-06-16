@@ -5509,7 +5509,31 @@ function KeywordScorecardView({
         whiteSpace: 'nowrap',
         color: Math.abs(deltaSales) < 1 ? '#4b5563' : deltaSales > 0 ? '#22c55e' : '#ef4444'
       }
-    }, pk ? (deltaSales >= 0 ? '+' : '') + fmt(deltaSales, 'rsk') : '—')), isExpKw && Object.values(k.campaigns || {}).sort((a, b) => (b.spend || 0) - (a.spend || 0)).map(cd => {
+    }, pk ? (deltaSales >= 0 ? '+' : '') + fmt(deltaSales, 'rsk') : '—')), isExpKw && Object.values(k.campaigns || {}).sort((a, b) => {
+      let av, bv;
+      if (sort.col === 'kw_deltaSpend') {
+        const pa = pk?.campaigns?.[a.campaign],
+          pb = pk?.campaigns?.[b.campaign];
+        av = (a.drr?.spend || 0) - (pa?.drr?.spend || 0);
+        bv = (b.drr?.spend || 0) - (pb?.drr?.spend || 0);
+      } else if (sort.col === 'kw_deltaDQty') {
+        const pa = pk?.campaigns?.[a.campaign],
+          pb = pk?.campaigns?.[b.campaign];
+        av = (a.drr?.totalQty || 0) - (pa?.drr?.totalQty || 0);
+        bv = (b.drr?.totalQty || 0) - (pb?.drr?.totalQty || 0);
+      } else if (sort.col === 'kw_deltaSales') {
+        const pa = pk?.campaigns?.[a.campaign],
+          pb = pk?.campaigns?.[b.campaign];
+        av = (a.drr?.directSales || 0) - (pa?.drr?.directSales || 0);
+        bv = (b.drr?.directSales || 0) - (pb?.drr?.directSales || 0);
+      } else {
+        av = a[sort.col] ?? a.drr?.[sort.col] ?? null;
+        bv = b[sort.col] ?? b.drr?.[sort.col] ?? null;
+      }
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return sort.dir * (av > bv ? 1 : av < bv ? -1 : 0);
+    }).map(cd => {
       const pcd = pk && pk.campaigns ? pk.campaigns[cd.campaign] : null;
       const cDeltaSpend = pcd ? (cd.drr?.spend || 0) - (pcd.drr?.spend || 0) : null;
       const cDeltaDQty = pcd ? (cd.drr?.totalQty || 0) - (pcd.drr?.totalQty || 0) : null;
@@ -5559,23 +5583,35 @@ function KeywordScorecardView({
           padding: '4px 8px',
           color: '#9ca3af',
           textAlign: 'right',
-          fontSize: 10
+          fontSize: 10,
+          whiteSpace: 'nowrap'
         }
-      }, fmt(cd.drr?.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+      }, fmt(cd.drr?.spend, 'rsk'), /*#__PURE__*/React.createElement(PctChg, {
+        curr: cd.drr?.spend,
+        prev: pcd?.drr?.spend
+      })), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
           color: '#9ca3af',
           textAlign: 'right',
-          fontSize: 10
+          fontSize: 10,
+          whiteSpace: 'nowrap'
         }
-      }, fmt(cd.drr?.directSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
+      }, fmt(cd.drr?.directSales, 'rsk'), /*#__PURE__*/React.createElement(PctChg, {
+        curr: cd.drr?.directSales,
+        prev: pcd?.drr?.directSales
+      })), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
           color: cd.roas != null ? mColor(cd.roas, 0.5, 1.5, 3) : '#374151',
           textAlign: 'right',
-          fontSize: 10
+          fontSize: 10,
+          whiteSpace: 'nowrap'
         }
-      }, cd.roas != null ? cd.roas.toFixed(2) + 'x' : '—'), /*#__PURE__*/React.createElement("td", {
+      }, cd.roas != null ? cd.roas.toFixed(2) + 'x' : '—', /*#__PURE__*/React.createElement(PctChg, {
+        curr: cd.roas,
+        prev: pcd?.roas
+      })), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
           color: '#6b7280',
@@ -5587,9 +5623,14 @@ function KeywordScorecardView({
           padding: '4px 8px',
           color: '#9ca3af',
           textAlign: 'right',
-          fontSize: 10
+          fontSize: 10,
+          whiteSpace: 'nowrap'
         }
-      }, cd.avgPos != null ? cd.avgPos.toFixed(1) : '—'), /*#__PURE__*/React.createElement("td", {
+      }, cd.avgPos != null ? cd.avgPos.toFixed(1) : '—', /*#__PURE__*/React.createElement(PctChg, {
+        curr: cd.avgPos,
+        prev: pcd?.avgPos,
+        invert: true
+      })), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
           color: '#9ca3af',
@@ -5601,23 +5642,35 @@ function KeywordScorecardView({
           padding: '4px 8px',
           color: '#6b7280',
           textAlign: 'right',
-          fontSize: 10
+          fontSize: 10,
+          whiteSpace: 'nowrap'
         }
-      }, fmt(cd.drr?.impressions, 'int')), /*#__PURE__*/React.createElement("td", {
+      }, fmt(cd.drr?.impressions, 'int'), /*#__PURE__*/React.createElement(PctChg, {
+        curr: cd.drr?.impressions,
+        prev: pcd?.drr?.impressions
+      })), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
           color: '#6b7280',
           textAlign: 'right',
-          fontSize: 10
+          fontSize: 10,
+          whiteSpace: 'nowrap'
         }
-      }, fmt(cd.drr?.newUsers, 'int')), /*#__PURE__*/React.createElement("td", {
+      }, fmt(cd.drr?.newUsers, 'int'), /*#__PURE__*/React.createElement(PctChg, {
+        curr: cd.drr?.newUsers,
+        prev: pcd?.drr?.newUsers
+      })), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
           color: '#6b7280',
           textAlign: 'right',
-          fontSize: 10
+          fontSize: 10,
+          whiteSpace: 'nowrap'
         }
-      }, fmt(cd.drr?.totalQty, 'int')), /*#__PURE__*/React.createElement("td", {
+      }, fmt(cd.drr?.totalQty, 'int'), /*#__PURE__*/React.createElement(PctChg, {
+        curr: cd.drr?.totalQty,
+        prev: pcd?.drr?.totalQty
+      })), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
           color: '#4b5563',
@@ -8774,8 +8827,10 @@ function DailyBriefView({
       ws['!cols'] = colWidths(rows);
       X.utils.book_append_sheet(wb, ws, name.slice(0, 31));
     };
-    addSheet('Alerts', alerts.map(a => ({
+    addSheet('Alerts', [...alerts.map(a => ({
+      'Level': 'Campaign',
       'Campaign': a.campaign,
+      'Keyword': '',
       'Flags': a.flags.map(f => f.label).join(' | '),
       'Diagnosis': a.cause || a.flags[0]?.detail || '',
       'Severity Rs-d': Math.round(a.severity),
@@ -8786,18 +8841,21 @@ function DailyBriefView({
       'Spend/d now': Math.round(a.recSpend),
       'Impr/d baseline': Math.round(a.baseImpr),
       'Impr/d now': Math.round(a.recImpr)
-    })));
-    addSheet('KW Alerts', kwAlerts.map(a => ({
+    })), ...kwAlerts.map(a => ({
+      'Level': 'Keyword',
+      'Campaign': a.campaign || '',
       'Keyword': a.keyword,
-      'Top Campaign': a.campaign || '',
       'Flags': a.flags.map(f => f.label).join(' | '),
       'Diagnosis': a.cause || a.flags[0]?.detail || '',
       'Severity Rs-d': Math.round(a.severity),
       'Brand': a.brand || '',
       'Category': a.category || '',
+      'Segment': '',
       'Spend/d baseline': Math.round(a.baseSpend),
-      'Spend/d now': Math.round(a.recSpend)
-    })));
+      'Spend/d now': Math.round(a.recSpend),
+      'Impr/d baseline': '',
+      'Impr/d now': ''
+    }))].sort((x, y) => (y['Severity Rs-d'] || 0) - (x['Severity Rs-d'] || 0)));
     addSheetSub('Fix List', fixList.map(c => metricRow(c, fixAction(c))), CAMP_SPEC);
     addSheet('KW Bleeders', kwBleeders.flatMap(c => c.bleed.map(k => ({
       'Campaign': c.campaign,
@@ -9166,43 +9224,47 @@ function DailyBriefView({
       cursor: 'pointer',
       whiteSpace: 'nowrap'
     }
-  }, copied ? '✓ Copied' : '⧉ Copy list'))), alerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\u26A0",
-    title: "Sudden Changes \u2014 Campaigns",
-    accent: "#ef4444",
-    count: alerts.length,
-    sub: "last 2d vs prior 7d \xB7 ranked by \u20B9 severity"
-  }, alerts.slice(0, 10).map(a => /*#__PURE__*/React.createElement(Row, {
-    key: 'al_' + a.campaign,
-    id: 'al_' + a.campaign,
-    name: a.campaign,
-    tag: `${a.brand || ''} · ${a.category || ''}`,
-    impact: `${fmt(a.severity, 'rsk')}/d at risk`,
-    impactColor: "#ef4444",
-    action: a.flags.map(f => f.label).join('  ·  '),
-    meta: a.cause || a.flags[0]?.detail
-  })), alerts.length > 10 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#4b5563',
-      fontSize: 9,
-      padding: '2px 8px'
-    }
-  }, "+", alerts.length - 10, " more \u2014 see Excel export")), kwAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83D\uDD11",
-    title: "Keyword Alerts (Search)",
-    accent: "#f97316",
-    count: kwAlerts.length,
-    sub: "bid wars surface here first"
-  }, kwAlerts.slice(0, 8).map(a => /*#__PURE__*/React.createElement(Row, {
-    key: 'kw_' + a.keyword,
-    id: 'kw_' + a.keyword,
-    name: `"${a.keyword}"`,
-    tag: a.campaign || '',
-    impact: `${fmt(a.severity, 'rsk')}/d`,
-    impactColor: "#f97316",
-    action: a.flags.map(f => f.label).join('  ·  '),
-    meta: a.cause || a.flags[0]?.detail
-  }))), uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, copied ? '✓ Copied' : '⧉ Copy list'))), (alerts.length > 0 || kwAlerts.length > 0) && (() => {
+    const merged = [...alerts.map(a => ({
+      lvl: 'Campaign',
+      key: 'al_' + a.campaign,
+      name: a.campaign,
+      tag: `${a.brand || ''} · ${a.category || ''}`,
+      sev: a.severity,
+      flags: a.flags,
+      cause: a.cause
+    })), ...kwAlerts.map(a => ({
+      lvl: 'Keyword',
+      key: 'kw_' + a.keyword,
+      name: `"${a.keyword}"`,
+      tag: a.campaign || '',
+      sev: a.severity,
+      flags: a.flags,
+      cause: a.cause
+    }))].sort((x, y) => y.sev - x.sev);
+    return /*#__PURE__*/React.createElement(Sec, {
+      icon: "\u26A0",
+      title: "Sudden Changes \u2014 Campaigns & Keywords",
+      accent: "#ef4444",
+      count: merged.length,
+      sub: "last 2d vs prior 7d \xB7 campaign + keyword \xB7 ranked by \u20B9 severity"
+    }, merged.slice(0, 16).map(a => /*#__PURE__*/React.createElement(Row, {
+      key: a.key,
+      id: a.key,
+      name: a.name,
+      tag: (a.lvl === 'Keyword' ? '🔑 KW · ' : '📣 Camp · ') + a.tag,
+      impact: `${fmt(a.sev, 'rsk')}/d`,
+      impactColor: a.lvl === 'Keyword' ? '#f97316' : '#ef4444',
+      action: a.flags.map(f => f.label).join('  ·  '),
+      meta: a.cause || a.flags[0]?.detail
+    })), merged.length > 16 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563',
+        fontSize: 9,
+        padding: '2px 8px'
+      }
+    }, "+", merged.length - 16, " more \u2014 see Excel export"));
+  })(), uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDEE0",
     title: "Fix List \u2014 Cut \xB7 Reduce \xB7 Optimise",
     accent: "#ef4444",
@@ -12055,7 +12117,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v8 kw-subrow-full-metrics + per-camp-deltas
+// build: v9 kw-subrow-pctchg + sortable-subrows + merged-alerts
 
 </script>
 </body></html>
