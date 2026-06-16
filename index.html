@@ -1199,6 +1199,8 @@ function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignInde
       const cQty = cDQ + cIQ;
       const cCpmR = cr.filter(r => r.cpm > 0 && r.impressions > 0);
       const cCpmI = cCpmR.reduce((s, r) => s + r.impressions, 0);
+      const cPosR = cr.filter(r => r.position > 0 && r.impressions > 0);
+      const cPosI = cPosR.reduce((s, r) => s + r.impressions, 0);
       campaigns[camp] = {
         campaign: cd.campaign,
         brand: cd.brand,
@@ -1212,6 +1214,7 @@ function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignInde
         roas: cSpend > 0 ? cDS / cSpend : null,
         nur: cQty > 0 ? cNU / cQty : null,
         avgCpm: cCpmI > 0 ? cCpmR.reduce((s, r) => s + r.cpm * r.impressions, 0) / cCpmI : null,
+        avgPos: cPosI > 0 ? cPosR.reduce((s, r) => s + r.position * r.impressions, 0) / cPosI : null,
         drr: {
           spend: cSpend / numDays,
           directSales: cDS / numDays,
@@ -5506,88 +5509,150 @@ function KeywordScorecardView({
         whiteSpace: 'nowrap',
         color: Math.abs(deltaSales) < 1 ? '#4b5563' : deltaSales > 0 ? '#22c55e' : '#ef4444'
       }
-    }, pk ? (deltaSales >= 0 ? '+' : '') + fmt(deltaSales, 'rsk') : '—')), isExpKw && Object.values(k.campaigns || {}).sort((a, b) => (b.spend || 0) - (a.spend || 0)).map(cd => /*#__PURE__*/React.createElement("tr", {
-      key: cd.campaign,
-      style: {
-        background: 'rgba(255,255,255,0.02)',
-        borderBottom: '1px solid #0d1117'
-      }
-    }, /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '4px 8px 4px 28px',
-        color: '#6b7280',
-        fontSize: 10,
-        position: 'sticky',
-        left: 0,
-        zIndex: 1,
-        background: '#080c12'
-      },
-      colSpan: 1
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        color: '#9ca3af',
-        fontSize: 10
-      }
-    }, cd.campaign)), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '4px 8px',
-        color: BRAND_COLORS[cd.brand] || '#6b7280',
-        fontSize: 9,
-        position: 'sticky',
-        left: 180,
-        background: '#080c12'
-      }
-    }, cd.brand || '—'), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '4px 8px',
-        color: '#6b7280',
-        fontSize: 9,
-        position: 'sticky',
-        left: 260,
-        background: '#080c12'
-      }
-    }, SEG_SHORT[cd.segment] || cd.segment || '—'), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '4px 8px',
-        color: '#9ca3af',
-        textAlign: 'right',
-        fontSize: 10
-      }
-    }, fmt(cd.drr?.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '4px 8px',
-        color: '#9ca3af',
-        textAlign: 'right',
-        fontSize: 10
-      }
-    }, fmt(cd.drr?.directSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '4px 8px',
-        color: cd.roas != null ? mColor(cd.roas, 0.5, 1.5, 3) : '#374151',
-        textAlign: 'right',
-        fontSize: 10
-      }
-    }, cd.roas != null ? cd.roas.toFixed(2) + 'x' : '—'), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '4px 8px',
-        color: '#6b7280',
-        textAlign: 'right',
-        fontSize: 10
-      }
-    }, cd.nur != null ? (cd.nur * 100).toFixed(0) + '%' : '—'), /*#__PURE__*/React.createElement("td", {
-      colSpan: 6,
-      style: {
-        padding: '4px 8px',
-        color: '#374151',
-        textAlign: 'right',
-        fontSize: 9
-      }
-    }, fmt(cd.drr?.impressions, 'int'), " impr/d \xB7 ", cd.avgCpm != null ? fmt(cd.avgCpm, 'rs') + ' CPM' : '—'), /*#__PURE__*/React.createElement("td", {
-      colSpan: 3,
-      style: {
-        padding: '4px 8px'
-      }
-    }))));
+    }, pk ? (deltaSales >= 0 ? '+' : '') + fmt(deltaSales, 'rsk') : '—')), isExpKw && Object.values(k.campaigns || {}).sort((a, b) => (b.spend || 0) - (a.spend || 0)).map(cd => {
+      const pcd = pk && pk.campaigns ? pk.campaigns[cd.campaign] : null;
+      const cDeltaSpend = pcd ? (cd.drr?.spend || 0) - (pcd.drr?.spend || 0) : null;
+      const cDeltaDQty = pcd ? (cd.drr?.totalQty || 0) - (pcd.drr?.totalQty || 0) : null;
+      const cDeltaSales = pcd ? (cd.drr?.directSales || 0) - (pcd.drr?.directSales || 0) : null;
+      return /*#__PURE__*/React.createElement("tr", {
+        key: cd.campaign,
+        style: {
+          background: 'rgba(255,255,255,0.02)',
+          borderBottom: '1px solid #0d1117'
+        }
+      }, /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px 4px 28px',
+          color: '#6b7280',
+          fontSize: 10,
+          position: 'sticky',
+          left: 0,
+          zIndex: 1,
+          background: '#080c12'
+        },
+        colSpan: 1
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          color: '#9ca3af',
+          fontSize: 10
+        }
+      }, cd.campaign)), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: BRAND_COLORS[cd.brand] || '#6b7280',
+          fontSize: 9,
+          position: 'sticky',
+          left: 180,
+          background: '#080c12'
+        }
+      }, cd.brand || '—'), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#6b7280',
+          fontSize: 9,
+          position: 'sticky',
+          left: 260,
+          background: '#080c12'
+        }
+      }, SEG_SHORT[cd.segment] || cd.segment || '—'), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#9ca3af',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, fmt(cd.drr?.spend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#9ca3af',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, fmt(cd.drr?.directSales, 'rsk')), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: cd.roas != null ? mColor(cd.roas, 0.5, 1.5, 3) : '#374151',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, cd.roas != null ? cd.roas.toFixed(2) + 'x' : '—'), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#6b7280',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, cd.nur != null ? (cd.nur * 100).toFixed(0) + '%' : '—'), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#9ca3af',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, cd.avgPos != null ? cd.avgPos.toFixed(1) : '—'), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#9ca3af',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, cd.avgCpm != null ? fmt(cd.avgCpm, 'rs') : '—'), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#6b7280',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, fmt(cd.drr?.impressions, 'int')), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#6b7280',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, fmt(cd.drr?.newUsers, 'int')), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#6b7280',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, fmt(cd.drr?.totalQty, 'int')), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          color: '#4b5563',
+          textAlign: 'right',
+          fontSize: 10
+        }
+      }, "\u2014"), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          textAlign: 'right',
+          fontSize: 10,
+          fontWeight: 600,
+          whiteSpace: 'nowrap',
+          color: cDeltaSpend == null ? '#4b5563' : Math.abs(cDeltaSpend) < 1 ? '#4b5563' : cDeltaSpend > 0 ? '#22c55e' : '#ef4444'
+        }
+      }, cDeltaSpend == null ? '—' : (cDeltaSpend >= 0 ? '+' : '') + fmt(cDeltaSpend, 'rsk')), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          textAlign: 'right',
+          fontSize: 10,
+          fontWeight: 600,
+          whiteSpace: 'nowrap',
+          color: cDeltaDQty == null ? '#4b5563' : Math.abs(cDeltaDQty) < 0.1 ? '#4b5563' : cDeltaDQty > 0 ? '#22c55e' : '#ef4444'
+        }
+      }, cDeltaDQty == null ? '—' : (cDeltaDQty >= 0 ? '+' : '') + cDeltaDQty.toFixed(1)), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
+          textAlign: 'right',
+          fontSize: 10,
+          fontWeight: 600,
+          whiteSpace: 'nowrap',
+          color: cDeltaSales == null ? '#4b5563' : Math.abs(cDeltaSales) < 1 ? '#4b5563' : cDeltaSales > 0 ? '#22c55e' : '#ef4444'
+        }
+      }, cDeltaSales == null ? '—' : (cDeltaSales >= 0 ? '+' : '') + fmt(cDeltaSales, 'rsk')));
+    }));
   })))));
 }
 
@@ -11990,7 +12055,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v7 ledger + comp-tracker + cpm-ladder + opportunities + daypart
+// build: v8 kw-subrow-full-metrics + per-camp-deltas
 
 </script>
 </body></html>
