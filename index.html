@@ -9120,6 +9120,293 @@ function LoadingScreen({
 // per action type + filter-aware SUBTOTAL formula rows. All recommendations
 // respect platform constraints: budget floor ₹500/d, CPM floor ₹200.
 
+// ⚡ SUDDEN CHANGES TAB (v17) — fast-clock defence desk: tickable counter-moves
+// (outbid → bids up, choke → budget up, Earning campaigns only) + read-only review.
+function DefenceSection({
+  alerts,
+  campaigns,
+  allRows,
+  endDate
+}) {
+  const [sel, setSel] = useState(() => new Set());
+  const [open, setOpen] = useState(() => new Set());
+  const [genMsg, setGenMsg] = useState({});
+  const kwSnap = useMemo(() => buildKwSnapshot(allRows, endDate), [allRows, endDate]);
+  const {
+    orders,
+    review
+  } = useMemo(() => buildDefenceOrders(alerts, campaigns, kwSnap), [alerts, campaigns, kwSnap]);
+  const byBrand = useMemo(() => {
+    const m = {};
+    orders.forEach(o => {
+      (m[o.brand || 'Unknown'] = m[o.brand || 'Unknown'] || []).push(o);
+    });
+    return m;
+  }, [orders]);
+  const oKey = o => o.campaign + '|' + o.file;
+  const toggle = k => setSel(p => {
+    const n = new Set(p);
+    n.has(k) ? n.delete(k) : n.add(k);
+    return n;
+  });
+  const dstr = endDate ? endDate.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short'
+  }).replace(' ', '') : 'today';
+  const generate = brand => {
+    const picked = (byBrand[brand] || []).filter(o => sel.has(oKey(o)) && o.campaignId);
+    if (!picked.length) {
+      setGenMsg(m => ({
+        ...m,
+        [brand]: 'Nothing ticked'
+      }));
+      return;
+    }
+    const bs = BRAND_SHORT[brand] || brand.slice(0, 2).toUpperCase();
+    const files = [];
+    const budgets = picked.filter(o => o.file === 'budget');
+    if (budgets.length) {
+      downloadCsv(`${bs}_defence_budget_${dstr}.csv`, ['campaign_id', 'budget'], budgets.map(o => [o.campaignId, o.budget]));
+      files.push('budget');
+    }
+    const bids = picked.filter(o => o.file === 'bids');
+    if (bids.length) {
+      downloadCsv(`${bs}_defence_bids_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type', 'bid'], bids.flatMap(o => o.rows.map(r => [o.campaignId, r.keyword, r.matchType, r.bid])));
+      files.push('bids');
+    }
+    setGenMsg(m => ({
+      ...m,
+      [brand]: `${files.length} file${files.length > 1 ? 's' : ''} downloaded — upload in the ${brand} Blinkit bulk panel`
+    }));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(Card, {
+    accent: "#ef4444",
+    style: {
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13
+    }
+  }, "\u26A1"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, "Defend \u2014 something changed in the last 2 days"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#ef4444',
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, orders.length), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginLeft: 'auto'
+    }
+  }, "only Earning campaigns get defended \xB7 bids capped so defence never breaks profitability \xB7 acting starts 5d settling")), !orders.length && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 11,
+      padding: '8px 0'
+    }
+  }, "Nothing to defend today \u2014 no attack worth answering."), Object.entries(byBrand).map(([brand, list]) => /*#__PURE__*/React.createElement("div", {
+    key: brand,
+    style: {
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: BRAND_COLORS[brand] || '#9ca3af',
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, brand), /*#__PURE__*/React.createElement("button", {
+    onClick: () => generate(brand),
+    style: {
+      marginLeft: 'auto',
+      background: '#450a0a',
+      color: '#fca5a5',
+      border: '1px solid #dc2626',
+      borderRadius: 6,
+      padding: '4px 12px',
+      fontSize: 10,
+      fontWeight: 700,
+      cursor: 'pointer'
+    }
+  }, "\u2B07 Generate files (", list.filter(o => sel.has(oKey(o))).length, ")")), genMsg[brand] && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4ade80',
+      fontSize: 9,
+      marginBottom: 4
+    }
+  }, genMsg[brand]), list.map(o => {
+    const k = oKey(o);
+    return /*#__PURE__*/React.createElement("div", {
+      key: k,
+      onClick: () => setOpen(p => {
+        const n = new Set(p);
+        n.has(k) ? n.delete(k) : n.add(k);
+        return n;
+      }),
+      style: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'flex-start',
+        padding: '5px 8px',
+        borderRadius: 6,
+        background: sel.has(k) ? 'rgba(239,68,68,0.06)' : 'rgba(255,255,255,0.015)',
+        cursor: 'pointer',
+        marginBottom: 3
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: sel.has(k),
+      onClick: e => e.stopPropagation(),
+      onChange: () => toggle(k),
+      style: {
+        marginTop: 2,
+        accentColor: '#ef4444'
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'baseline',
+        flexWrap: 'wrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 9,
+        fontWeight: 700,
+        padding: '1px 7px',
+        borderRadius: 4,
+        color: '#fca5a5',
+        background: 'rgba(239,68,68,0.08)',
+        border: '1px solid rgba(239,68,68,0.3)'
+      }
+    }, o.display), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        fontWeight: 600,
+        wordBreak: 'break-word'
+      }
+    }, o.campaign), /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 'auto',
+        color: '#ef4444',
+        fontSize: 10,
+        fontWeight: 700,
+        whiteSpace: 'nowrap'
+      }
+    }, o.worth)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 10,
+        marginTop: 1
+      }
+    }, o.why), open.has(k) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 5,
+        padding: '7px 10px',
+        background: 'rgba(255,255,255,0.02)',
+        borderRadius: 6,
+        fontSize: 10,
+        color: '#6b7280',
+        lineHeight: 1.6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#fca5a5',
+        fontWeight: 700
+      }
+    }, "Analyst detail"), " \u2014 ", o.detail, o.rows && /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 file rows: ", o.rows.slice(0, 6).map(r => `"${r.keyword}" ₹${r.bid}`).join(', '), o.rows.length > 6 ? ` +${o.rows.length - 6} more` : ''), !o.campaignId && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444'
+      }
+    }, " \xB7 \u26A0 no campaign ID \u2014 will be skipped"))));
+  })))), review.length > 0 && /*#__PURE__*/React.createElement(Card, {
+    style: {
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      fontWeight: 700,
+      marginBottom: 8
+    }
+  }, "\uD83D\uDC41 Review only \u2014 no safe counter-move (", review.length, ")"), review.slice(0, 20).map(({
+    a,
+    c,
+    note
+  }, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      padding: '5px 8px',
+      borderBottom: '1px solid #111827'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'baseline',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#e5e7eb',
+      fontSize: 11,
+      fontWeight: 600
+    }
+  }, a.campaign), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6b7280',
+      fontSize: 9
+    }
+  }, (a.flags || []).map(f => f.label).join(' · ')), /*#__PURE__*/React.createElement("span", {
+    style: {
+      marginLeft: 'auto',
+      color: '#f97316',
+      fontSize: 10,
+      fontWeight: 700
+    }
+  }, fmt(a.severity, 'rsk'), "/d")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      marginTop: 1
+    }
+  }, note || a.cause || '—')))));
+}
 function DailyBriefView({
   campaigns,
   prevCampaigns,
@@ -9129,7 +9416,8 @@ function DailyBriefView({
   kwCamp = [],
   catCurr = [],
   catPrev = null,
-  allRows = []
+  allRows = [],
+  mode = 'brief'
 }) {
   const [done, setDone] = useState(new Set());
   const [copied, setCopied] = useState(false);
@@ -9884,7 +10172,7 @@ function DailyBriefView({
       flexDirection: 'column',
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, mode === 'brief' && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 10,
@@ -9924,11 +10212,31 @@ function DailyBriefView({
       cursor: 'pointer',
       whiteSpace: 'nowrap'
     }
-  }, copied ? '✓ Copied' : '⧉ Copy list'))), /*#__PURE__*/React.createElement(WorkOrderSection, {
+  }, copied ? '✓ Copied' : '⧉ Copy list'))), mode === 'brief' && /*#__PURE__*/React.createElement(WorkOrderSection, {
     campaigns: live,
     allRows: allRows,
-    endDate: endDate
-  }), mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    endDate: endDate,
+    revertHikes: revertHikes,
+    kwBleeders: kwBleeders,
+    alerts: alerts
+  }), mode === 'brief' && alerts.length > 0 && /*#__PURE__*/React.createElement(Card, {
+    accent: "#ef4444",
+    style: {
+      padding: '10px 16px'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#fca5a5',
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, "\u26A1 ", alerts.length, " sudden change", alerts.length > 1 ? 's' : '', " in the last 2 days"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      marginLeft: 8
+    }
+  }, "\u2014 open the \u26A1 Sudden Changes tab to review and defend")), false && mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\u26A0",
     title: "Sudden Changes \u2014 Campaigns & Keywords",
     accent: "#ef4444",
@@ -9949,19 +10257,61 @@ function DailyBriefView({
       fontSize: 9,
       padding: '2px 8px'
     }
-  }, "+", mergedAlerts.length - 16, " more \u2014 see Excel export")), /*#__PURE__*/React.createElement("div", {
-    onClick: () => setShowDiag(s => !s),
-    style: {
-      color: '#6b7280',
-      fontSize: 11,
-      fontWeight: 600,
-      cursor: 'pointer',
-      padding: '8px 12px',
-      border: '1px solid #1f2937',
-      borderRadius: 8,
-      userSelect: 'none'
-    }
-  }, showDiag ? '▾' : '▸', " Watching & diagnostics \u2014 analyst view (", uiFixList.length + kwBleeders.length + qtyDrops.length + revertHikes.length + deteriorating.length + flips.length + scales.length, " items: fix queue, bleeders, qty drops, hikes, deteriorating, flips, growth)"), showDiag && /*#__PURE__*/React.createElement(React.Fragment, null, uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, "+", mergedAlerts.length - 16, " more \u2014 see Excel export")), mode === 'watching' && /*#__PURE__*/React.createElement(React.Fragment, null, (() => {
+    const sm = getStratMap();
+    const tagged = campaigns.filter(c => sm[c.campaign.toLowerCase()]);
+    if (!tagged.length) return null;
+    const totBurn = tagged.reduce((s, c) => s + (c.burnPerDay || 0), 0);
+    return /*#__PURE__*/React.createElement(Sec, {
+      icon: "\uD83C\uDFF3",
+      title: "Strategic \u2014 suppressed by you, still costing",
+      accent: "#6b7280",
+      count: tagged.length,
+      sub: `burning ${fmt(totBurn, 'rsk')}/d in total · tags auto-expire after 30 days`
+    }, tagged.map(c => {
+      const t = sm[c.campaign.toLowerCase()];
+      const daysLeft = Math.max(0, Math.ceil((t.until - Date.now()) / 864e5));
+      return /*#__PURE__*/React.createElement("div", {
+        key: c.campaign,
+        style: {
+          display: 'flex',
+          gap: 8,
+          alignItems: 'baseline',
+          padding: '5px 8px',
+          borderBottom: '1px solid #111827',
+          flexWrap: 'wrap'
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#e5e7eb',
+          fontSize: 11,
+          fontWeight: 600
+        }
+      }, c.campaign), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#6b7280',
+          fontSize: 9
+        }
+      }, "reason: ", t.reason, " \xB7 ", daysLeft, "d left \xB7 Earn ", c.earn != null ? c.earn.toFixed(2) : '—'), /*#__PURE__*/React.createElement("span", {
+        style: {
+          marginLeft: 'auto',
+          color: '#ef4444',
+          fontSize: 10,
+          fontWeight: 700
+        }
+      }, c.burnPerDay ? `${fmt(c.burnPerDay, 'rsk')}/d burn` : '—'), /*#__PURE__*/React.createElement("span", {
+        onClick: () => {
+          clearStratTag(c.campaign);
+          setShowDiag(s => !s);
+        },
+        style: {
+          color: '#93c5fd',
+          fontSize: 9,
+          cursor: 'pointer'
+        }
+      }, "untag"));
+    }));
+  })(), uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDEE0",
     title: "Fix List \u2014 Pull \xB7 Watch \xB7 Tune",
     accent: "#ef4444",
@@ -10092,7 +10442,7 @@ function DailyBriefView({
     impactColor: "#22c55e",
     action: scaleAction(c),
     meta: c.trend === 'improving' ? '↗ weekly Earn improving' : null
-  }))))), totalActions === 0 && /*#__PURE__*/React.createElement(Card, {
+  }))))), mode === 'brief' && totalActions === 0 && /*#__PURE__*/React.createElement(Card, {
     style: {
       textAlign: 'center',
       padding: 48
@@ -10868,6 +11218,167 @@ const BRAND_SHORT = {
   'Little Joys': 'LJ'
 };
 
+// 🏳 Strategic tags (v17): suppress Pull/Tune orders for 30d, cost stays visible.
+const STRAT_KEY = 'earn_strategic_tags';
+function getStratMap() {
+  try {
+    const m = JSON.parse(localStorage.getItem(STRAT_KEY) || '{}');
+    const now = Date.now();
+    let changed = false;
+    Object.keys(m).forEach(k => {
+      if (!m[k] || m[k].until < now) {
+        delete m[k];
+        changed = true;
+      }
+    });
+    if (changed) localStorage.setItem(STRAT_KEY, JSON.stringify(m));
+    return m;
+  } catch (e) {
+    return {};
+  }
+}
+function setStratTag(campaign, reason) {
+  try {
+    const m = getStratMap();
+    m[campaign.toLowerCase()] = {
+      reason: reason || 'strategic',
+      until: Date.now() + 30 * 864e5,
+      tagged: Date.now()
+    };
+    localStorage.setItem(STRAT_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
+function clearStratTag(campaign) {
+  try {
+    const m = getStratMap();
+    delete m[campaign.toLowerCase()];
+    localStorage.setItem(STRAT_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
+
+// ⚡ Defence orders (v17): fast-clock alerts → tickable counter-moves, guardrailed.
+// Only Earning campaigns get defended; bids capped at Max CPM = cur × Earn/1.15.
+function buildDefenceOrders(alerts, campaigns, kwSnap) {
+  const rnd5 = v => Math.round(v / 5) * 5;
+  const byName = {};
+  campaigns.forEach(c => {
+    byName[c.campaign.toLowerCase()] = c;
+  });
+  const orders = [],
+    review = [];
+  alerts.forEach(a => {
+    const c = byName[(a.campaign || '').toLowerCase()];
+    const cause = a.cause || '';
+    if (!c) {
+      review.push({
+        a,
+        note: null
+      });
+      return;
+    }
+    if (c.settling) {
+      review.push({
+        a,
+        c,
+        note: '⏳ changed <5d ago — settling, no compound moves'
+      });
+      return;
+    }
+    if (cause.startsWith('Outbid')) {
+      if ((c.earn ?? 0) < EARN_HI) {
+        review.push({
+          a,
+          c,
+          note: `Losing position — not worth defending (Earn ${c.earn != null ? c.earn.toFixed(2) : '—'} below 1.15). Let it go or fix economics first`
+        });
+        return;
+      }
+      const kws = Object.values(kwSnap[c.campaign.toLowerCase()] || {}).filter(k => k.bid > 0);
+      const maxRatio = c.earn / EARN_HI;
+      const ratio = Math.min(1.2, maxRatio);
+      if (!kws.length || ratio <= 1.05) {
+        review.push({
+          a,
+          c,
+          note: !kws.length ? '✋ no keyword bids for this ad type — raise CPM in panel' : 'Earn buffer too thin to out-bid safely'
+        });
+        return;
+      }
+      orders.push({
+        campaign: c.campaign,
+        campaignId: c.campaignId,
+        brand: c.brand,
+        c,
+        kind: 'Defend',
+        file: 'bids',
+        rows: kws.map(k => ({
+          keyword: k.keyword,
+          matchType: (k.matchType || 'exact').toLowerCase(),
+          bid: rnd5(k.bid * ratio)
+        })),
+        display: `Bids +${Math.round((ratio - 1) * 100)}% (${kws.length} keywords)`,
+        why: 'Competitor outbid us in the last 2 days — buy the rank back',
+        worth: `${fmt(a.severity, 'rsk')}/d at risk`,
+        detail: `${cause} · Earn ${c.earn.toFixed(2)} affords up to +${Math.round((maxRatio - 1) * 100)}% before profitability breaks — stepping +${Math.round((ratio - 1) * 100)}%`
+      });
+      return;
+    }
+    if (cause.startsWith('Hours live')) {
+      if ((c.earn ?? 0) < EARN_HI) {
+        review.push({
+          a,
+          c,
+          note: `Budget choking but Earn ${c.earn != null ? c.earn.toFixed(2) : '—'} < 1.15 — more budget = more burn. Fix economics first`
+        });
+        return;
+      }
+      const bud = c.currentDailyBudget;
+      if (!bud) {
+        review.push({
+          a,
+          c,
+          note: 'no current budget detected'
+        });
+        return;
+      }
+      let target = bud * 1.3;
+      if (c.p90Spend) target = Math.min(target, c.p90Spend * 1.15);
+      target = Math.max(500, rnd5(target));
+      if (target <= bud * 1.05) {
+        review.push({
+          a,
+          c,
+          note: 'already at proven demand ceiling (p90)'
+        });
+        return;
+      }
+      orders.push({
+        campaign: c.campaign,
+        campaignId: c.campaignId,
+        brand: c.brand,
+        c,
+        kind: 'Defend',
+        file: 'budget',
+        budget: target,
+        display: `Budget ₹${Math.round(bud).toLocaleString('en-IN')} → ₹${target.toLocaleString('en-IN')}`,
+        why: 'Budget runs out mid-day — campaign goes dark while demand is live',
+        worth: `${fmt(a.severity, 'rsk')}/d at risk`,
+        detail: `${cause} · Earning ${c.earn.toFixed(2)} — extra spend is profitable · capped at p90 proven demand × 1.15`
+      });
+      return;
+    }
+    review.push({
+      a,
+      c,
+      note: null
+    }); // category dip / daypart / unclear → read-only
+  });
+  return {
+    orders,
+    review
+  };
+}
+
 // 14d keyword snapshot per campaign: latest bid + match type + spend/sales (Search & Spotlight)
 function buildKwSnapshot(allRows, refDate) {
   if (!refDate) return {};
@@ -10903,12 +11414,15 @@ function buildKwSnapshot(allRows, refDate) {
 // problems (Tune/Pull) with ≥30% of spend in proven-bad keywords (≥₹500/14d,
 // kwEarn<0.85), touch ONLY those keywords (kwEarn<0.4 → remove). Level problems
 // (Trim/Scale) scale every keyword proportionally. Constraints: bid ≥₹200.
-function buildWorkOrders(campaigns, kwSnap) {
+function buildWorkOrders(campaigns, kwSnap, stratMap = {}, skipSet = new Set()) {
   const rnd5 = v => Math.round(v / 5) * 5;
   const orders = [];
   campaigns.forEach(c => {
     const a = c.earnAction;
     if (!a || a.kind === 'Settling' || a.kind === 'Watch') return;
+    const ck = c.campaign.toLowerCase();
+    if (skipSet.has(ck)) return; // defence acted today — fast clock wins
+    if (stratMap[ck] && (a.kind === 'Pull' || a.kind === 'Tune')) return; // 🏳 strategic — suppressed, priced in Watching
     const base = {
       campaign: c.campaign,
       campaignId: c.campaignId,
@@ -11023,13 +11537,87 @@ function downloadCsv(filename, header, rows) {
 function WorkOrderSection({
   campaigns,
   allRows,
-  endDate
+  endDate,
+  revertHikes = [],
+  kwBleeders = [],
+  alerts = []
 }) {
   const [sel, setSel] = useState(() => new Set());
   const [open, setOpen] = useState(() => new Set());
   const [genMsg, setGenMsg] = useState({});
+  const [stratTick, setStratTick] = useState(0);
+  const stratMap = useMemo(() => getStratMap(), [stratTick]);
   const kwSnap = useMemo(() => buildKwSnapshot(allRows, endDate), [allRows, endDate]);
-  const orders = useMemo(() => buildWorkOrders(campaigns, kwSnap), [campaigns, kwSnap]);
+  const defenceSet = useMemo(() => new Set(buildDefenceOrders(alerts, campaigns, kwSnap).orders.map(o => o.campaign.toLowerCase())), [alerts, campaigns, kwSnap]);
+  const orders = useMemo(() => {
+    const rnd5 = v => Math.round(v / 5) * 5;
+    const out = buildWorkOrders(campaigns, kwSnap, stratMap, defenceSet);
+    const taken = new Set(out.filter(o => o.file === 'pause' || o.file === 'budget').map(o => o.campaign.toLowerCase()));
+    // Revert Hikes → budget orders (put it back to the pre-hike number, floor ₹500)
+    revertHikes.forEach(c => {
+      if (taken.has(c.campaign.toLowerCase()) || stratMap[c.campaign.toLowerCase()] || defenceSet.has(c.campaign.toLowerCase())) return; // already being paused/re-budgeted
+      const back = c.prevBudgetBefore ? Math.max(500, rnd5(c.prevBudgetBefore)) : null;
+      if (!back || !c.currentDailyBudget || back >= c.currentDailyBudget) return;
+      out.push({
+        campaign: c.campaign,
+        campaignId: c.campaignId,
+        brand: c.brand,
+        c,
+        kind: 'Pull',
+        label: '💸 Revert Hike',
+        file: 'budget',
+        budget: back,
+        why: 'Budget hike bought nothing — put it back',
+        display: `Budget ₹${Math.round(c.currentDailyBudget).toLocaleString('en-IN')} → ₹${back.toLocaleString('en-IN')}`,
+        worth: `stops ${fmt(Math.max(0, (c.iRoasDeltaSpend || 0) * (1 - Math.min(1, c.iRoas || 0))), 'rsk')}/d waste`,
+        detail: `Hike on ${c.lastBudgetChange ? c.lastBudgetChange.toLocaleDateString('en-IN', {
+          day: '2-digit',
+          month: 'short'
+        }) : '—'}: spend +${fmt(c.iRoasDeltaSpend, 'rsk')}/d bought only ${fmt(c.iRoas, 'x')} incremental ROAS over ${c.iRoasPostDays}d`
+      });
+    });
+    // Keyword Bleeders → remove/reprice orders inside HEALTHY campaigns
+    kwBleeders.forEach(b => {
+      const snap = kwSnap[(b.campaign || '').toLowerCase()] || {};
+      const cid = campaigns.find(x => x.campaign.toLowerCase() === (b.campaign || '').toLowerCase());
+      const removes = [],
+        reprices = [];
+      (b.bleed || []).forEach(k => {
+        const s = snap[(k.keyword || '').toLowerCase()];
+        const mt = (s && s.matchType || 'exact').toLowerCase();
+        if (k.roas != null && k.roas < 0.25 * b.croas) removes.push({
+          keyword: k.keyword,
+          matchType: mt
+        });else if (s && s.bid > 0) reprices.push({
+          keyword: k.keyword,
+          matchType: mt,
+          bid: Math.max(200, rnd5(s.bid * 0.75))
+        });
+      });
+      const mk = (file, rows, disp, why) => rows.length && out.push({
+        campaign: b.campaign,
+        campaignId: cid?.campaignId || null,
+        brand: b.brand,
+        c: cid || {
+          earn: null,
+          drr: {
+            spend: (b.spend || 0) / (b.numDays || 1)
+          }
+        },
+        kind: 'Tune',
+        label: '🩸 Bleeder',
+        file,
+        rows,
+        display: disp,
+        why,
+        worth: `stops ~${fmt((b.bleedSpend || 0) / (b.numDays || 1) * 0.6, 'rsk')}/d leak`,
+        detail: `Campaign healthy (${b.croas.toFixed(2)}x) but ${b.bleedPct.toFixed(0)}% of spend sits in keywords below half that. Worst: ${(b.bleed || []).slice(0, 3).map(k => `"${k.keyword}" ${k.roas.toFixed(1)}x`).join(', ')}`
+      });
+      mk('remove', removes, `Remove ${removes.length} keyword${removes.length > 1 ? 's' : ''}`, 'Campaign healthy — these keywords only burn money');
+      mk('bids', reprices, `Bids −25% (${reprices.length} keyword${reprices.length > 1 ? 's' : ''})`, 'Campaign healthy — weak keywords repriced, rest untouched');
+    });
+    return out;
+  }, [campaigns, kwSnap, revertHikes, kwBleeders, stratMap, defenceSet]);
   const growthCapped = useMemo(() => {
     const growth = orders.filter(o => o.kind === 'Scale' || o.kind === 'Trim').sort((x, y) => (y.c.drr?.spend || 0) - (x.c.drr?.spend || 0)).slice(0, 10);
     const gset = new Set(growth);
@@ -11239,7 +11827,22 @@ function WorkOrderSection({
         fontWeight: 700,
         whiteSpace: 'nowrap'
       }
-    }, o.worth)), /*#__PURE__*/React.createElement("div", {
+    }, o.worth), (o.kind === 'Pull' || o.kind === 'Tune') && /*#__PURE__*/React.createElement("span", {
+      onClick: e => {
+        e.stopPropagation();
+        const r = window.prompt('Mark STRATEGIC for 30 days — suggestions stop, cost stays visible in Watching.\nReason (conquesting / launch / rank defence / seasonal):', 'conquesting');
+        if (r) {
+          setStratTag(o.campaign, r);
+          setStratTick(t => t + 1);
+        }
+      },
+      title: "Known issue / deliberate spend \u2014 suppress for 30 days",
+      style: {
+        fontSize: 10,
+        cursor: 'pointer',
+        color: '#6b7280'
+      }
+    }, "\uD83C\uDFF3")), /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#9ca3af',
         fontSize: 10,
@@ -13109,7 +13712,13 @@ function App() {
   }
   const tabs = [{
     id: 'brief',
-    label: `⌁ Daily Brief${alerts.length ? ` (${alerts.length})` : ''}`
+    label: '⌁ Daily Brief'
+  }, {
+    id: 'defence',
+    label: `⚡ Sudden Changes${alerts.length ? ` (${alerts.length})` : ''}`
+  }, {
+    id: 'watching',
+    label: '👀 Watching'
   }, {
     id: 'portfolio',
     label: 'Portfolio'
@@ -13379,7 +13988,24 @@ function App() {
     kwCamp: kwCamp,
     catCurr: catCurr,
     catPrev: catPrev,
-    allRows: allRows
+    allRows: allRows,
+    mode: "brief"
+  }), tab === 'defence' && /*#__PURE__*/React.createElement(DefenceSection, {
+    alerts: alerts,
+    campaigns: campaigns,
+    allRows: allRows,
+    endDate: bounds.max
+  }), tab === 'watching' && /*#__PURE__*/React.createElement(DailyBriefView, {
+    campaigns: campaigns,
+    prevCampaigns: prevCampaigns,
+    alerts: alerts,
+    kwAlerts: kwAlerts,
+    endDate: bounds.max,
+    kwCamp: kwCamp,
+    catCurr: catCurr,
+    catPrev: catPrev,
+    allRows: allRows,
+    mode: "watching"
   }), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns
@@ -13457,7 +14083,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v16 work-orders + blinkit-bulk-csv-generator + surgical-keyword-bids + campaign-ids + diag-collapse
+// build: v17 two-desk-split — brief=pure tick list · defence tab (fast-clock, guardrailed) · watching tab · strategic tags
 
 </script>
 </body></html>
