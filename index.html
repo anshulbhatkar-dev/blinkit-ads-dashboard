@@ -9126,7 +9126,8 @@ function DefenceSection({
   alerts,
   campaigns,
   allRows,
-  endDate
+  endDate,
+  reviewOnly = false
 }) {
   const [sel, setSel] = useState(() => new Set());
   const [open, setOpen] = useState(() => new Set());
@@ -9185,7 +9186,7 @@ function DefenceSection({
       flexDirection: 'column',
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(Card, {
+  }, !reviewOnly && /*#__PURE__*/React.createElement(Card, {
     accent: "#ef4444",
     style: {
       padding: 16
@@ -9364,7 +9365,13 @@ function DefenceSection({
       fontWeight: 700,
       marginBottom: 8
     }
-  }, "\uD83D\uDC41 Review only \u2014 no safe counter-move (", review.length, ")"), review.slice(0, 20).map(({
+  }, "\uD83D\uDC41 Sudden changes \u2014 review only, no safe counter-move (", review.length, ")"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginBottom: 8
+    }
+  }, "market dips, daypart patterns, losing positions not worth defending, campaigns mid-settling \u2014 informational; anything defendable is already a \u26A1 row in the Daily Brief"), review.slice(0, 20).map(({
     a,
     c,
     note
@@ -10219,24 +10226,13 @@ function DailyBriefView({
     revertHikes: revertHikes,
     kwBleeders: kwBleeders,
     alerts: alerts
-  }), mode === 'brief' && alerts.length > 0 && /*#__PURE__*/React.createElement(Card, {
-    accent: "#ef4444",
-    style: {
-      padding: '10px 16px'
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#fca5a5',
-      fontSize: 11,
-      fontWeight: 700
-    }
-  }, "\u26A1 ", alerts.length, " sudden change", alerts.length > 1 ? 's' : '', " in the last 2 days"), /*#__PURE__*/React.createElement("span", {
+  }), mode === 'brief' && alerts.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#6b7280',
       fontSize: 10,
-      marginLeft: 8
+      padding: '2px 4px'
     }
-  }, "\u2014 open the \u26A1 Sudden Changes tab to review and defend")), false && mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, "\u26A1 ", alerts.length, " sudden change", alerts.length > 1 ? 's' : '', " detected \u2014 defendable ones are already \u26A1 rows above; the rest are informational, in \uD83D\uDC40 Watching"), false && mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\u26A0",
     title: "Sudden Changes \u2014 Campaigns & Keywords",
     accent: "#ef4444",
@@ -10311,44 +10307,21 @@ function DailyBriefView({
         }
       }, "untag"));
     }));
-  })(), uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83D\uDEE0",
-    title: "Fix List \u2014 Pull \xB7 Watch \xB7 Tune",
-    accent: "#ef4444",
-    count: uiFixList.length,
-    sub: `Earn = D.ROAS ÷ margin floor (CM1 wrt MRP, NUR-weighted repeats R=${EARN_R}) · burning ${fmt(cutSavings + reduceSavings, 'rsk')}/d · Pull fires only after 2 burning weeks`
-  }, uiFixList.slice(0, 18).map(c => /*#__PURE__*/React.createElement(Row, {
-    key: 'fix_' + c.campaign,
-    id: 'fix_' + c.campaign,
+  })(), reduces.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "\uD83D\uDC40",
+    title: "Watch \u2014 first burning week, no action yet",
+    accent: "#f59e0b",
+    count: reduces.length,
+    sub: "a third of these self-correct \xB7 burns a second week \u2192 appears in Daily Brief automatically"
+  }, reduces.map(c => /*#__PURE__*/React.createElement(Row, {
+    key: 'watch_' + c.campaign,
+    id: 'watch_' + c.campaign,
     badge: c.verdict,
-    warn: alertSet.has(c.campaign.toLowerCase()),
     name: c.campaign,
-    tag: `${SEG_SHORT[c.segment] || c.segment || ''} · Earn ${c.earn != null ? c.earn.toFixed(2) : c.cci != null ? 'CCI ' + c.cci.toFixed(1) : '—'}${c.earnFloor ? ` (floor ${c.earnFloor.toFixed(1)}x)` : ''}`,
+    tag: `${SEG_SHORT[c.segment] || c.segment || ''} · Earn ${c.earn != null ? c.earn.toFixed(2) : '—'}${c.earnFloor ? ` (floor ${c.earnFloor.toFixed(1)}x)` : ''}`,
     impact: c.burnPerDay != null ? `${fmt(c.burnPerDay, 'rsk')}/d burn` : `${fmt(c.drr?.spend, 'rsk')}/d`,
-    impactColor: c.earnAction?.kind === 'Pull' ? '#ef4444' : '#f59e0b',
-    action: fixAction(c),
-    meta: [alertSet.has(c.campaign.toLowerCase()) ? 'also firing a sudden-change alert above' : null, c.nurFallback ? 'NUR unmeasurable (0 direct units) — floor uses 50% assumption' : null].filter(Boolean).join(' · ') || null
-  })), uiFixList.length > 18 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#4b5563',
-      fontSize: 9,
-      padding: '2px 8px'
-    }
-  }, "+", uiFixList.length - 18, " more \u2014 see Excel export")), kwBleeders.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83E\uDE78",
-    title: "Keyword Bleeders",
-    accent: "#f97316",
-    count: kwBleeders.length,
-    sub: "campaign fine, specific keywords leaking \u2014 fix the keywords, keep the campaign"
-  }, kwBleeders.slice(0, 8).map(c => /*#__PURE__*/React.createElement(Row, {
-    key: 'kb_' + c.campaign,
-    id: 'kb_' + c.campaign,
-    name: c.campaign,
-    tag: SEG_SHORT[c.segment] || c.segment,
-    impact: `${fmt(c.bleedSpend / c.numDays, 'rsk')}/d leaking`,
-    impactColor: "#f97316",
-    action: `${c.bleedPct.toFixed(0)}% of spend in keywords below half the campaign's ${c.croas.toFixed(2)}x. Worst: ${c.bleed.slice(0, 3).map(k => `"${k.keyword}" ${k.roas.toFixed(1)}x`).join(', ')}`,
-    meta: "full keyword list in Excel \u2192 KW Bleeders sheet"
+    impactColor: "#f59e0b",
+    action: c.earnAction ? c.earnAction.detail : 'first bad week — waiting for confirmation'
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
@@ -10378,24 +10351,6 @@ function DailyBriefView({
     impactColor: "#ef4444",
     action: `${pq.toFixed(1)} → ${cq.toFixed(1)} units/d (▼${Math.round((pq - cq) / pq * 100)}%) · share ${contribPrev != null ? contribPrev.toFixed(1) : '—'}% → ${contribNow != null ? contribNow.toFixed(1) : '—'}%`,
     meta: inlineVerdict(deltaPP, catChg)
-  }))), revertHikes.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83D\uDCB8",
-    title: "Revert Budget Hikes",
-    accent: "#ef4444",
-    count: revertHikes.length,
-    sub: "hike didn't buy sales \u2014 incremental ROAS < 0.8x"
-  }, revertHikes.slice(0, 8).map(c => /*#__PURE__*/React.createElement(Row, {
-    key: 'rev_' + c.campaign,
-    id: 'rev_' + c.campaign,
-    name: c.campaign,
-    tag: SEG_SHORT[c.segment] || c.segment,
-    impact: `iROAS ${fmt(c.iRoas, 'x')}`,
-    impactColor: "#ef4444",
-    action: `Hike on ${c.lastBudgetChange ? c.lastBudgetChange.toLocaleDateString('en-IN', {
-      day: '2-digit',
-      month: 'short'
-    }) : '—'}: spend +${fmt(c.iRoasDeltaSpend, 'rsk')}/d → sales +${fmt(c.iRoasDeltaSales, 'rsk')}/d over ${c.iRoasPostDays}d`,
-    meta: "Revert to previous budget \u2014 the extra spend is buying air"
   }))), deteriorating.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDCC9",
     title: "Deteriorating This Week",
@@ -10427,21 +10382,6 @@ function DailyBriefView({
     impact: `${prev.earnState} → ${c.earnState}`,
     impactColor: "#ef4444",
     action: `Earn ${prev.earn != null ? prev.earn.toFixed(2) : '—'} → ${c.earn != null ? c.earn.toFixed(2) : '—'} · ROAS ${prev.roas != null ? fmt(prev.roas, 'x') : '—'} → ${c.roas != null ? fmt(c.roas, 'x') : '—'} · spend ${fmt(c.drr?.spend, 'rsk')}/d`
-  }))), scales.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\u2B06",
-    title: "Scale & Trim \u2014 Growth Shortlist",
-    accent: "#22c55e",
-    count: scales.length,
-    sub: "Earning with headroom (budget/CPM step attached) or overbidding at top rank (Trim = free margin)"
-  }, scales.slice(0, 12).map(c => /*#__PURE__*/React.createElement(Row, {
-    key: 'sc_' + c.campaign,
-    id: 'sc_' + c.campaign,
-    name: c.campaign,
-    tag: `${SEG_SHORT[c.segment] || c.segment || ''} · Earn ${c.earn != null ? c.earn.toFixed(2) : '—'}`,
-    impact: `${fmt(c.drr?.spend, 'rsk')}/d now`,
-    impactColor: "#22c55e",
-    action: scaleAction(c),
-    meta: c.trend === 'improving' ? '↗ weekly Earn improving' : null
   }))))), mode === 'brief' && totalActions === 0 && /*#__PURE__*/React.createElement(Card, {
     style: {
       textAlign: 'center',
@@ -11453,6 +11393,18 @@ function buildWorkOrders(campaigns, kwSnap, stratMap = {}, skipSet = new Set()) 
       });
       if (a.cpmRatio == null) return;
     }
+    if (a.pause == null && a.newBudget == null && a.cpmRatio == null) {
+      // Tune-NUR / Tune-Conv: human work, no number — still an action item (✋ manual)
+      if (a.kind === 'Tune') orders.push({
+        ...base,
+        file: null,
+        manual: true,
+        why: a.label.includes('NUR') ? 'Audience exhausted — refresh/expand keywords toward new users' : 'Ads fine, conversion is the drag — check price/pack/PDP vs competitor',
+        display: a.label.includes('NUR') ? '✋ Refresh keywords' : '✋ Fix conversion',
+        worth: ''
+      });
+      return;
+    }
     if (a.cpmRatio != null) {
       const kws = Object.values(kwSnap[c.campaign.toLowerCase()] || {}).filter(k => k.bid > 0);
       if (!kws.length) {
@@ -11548,7 +11500,8 @@ function WorkOrderSection({
   const [stratTick, setStratTick] = useState(0);
   const stratMap = useMemo(() => getStratMap(), [stratTick]);
   const kwSnap = useMemo(() => buildKwSnapshot(allRows, endDate), [allRows, endDate]);
-  const defenceSet = useMemo(() => new Set(buildDefenceOrders(alerts, campaigns, kwSnap).orders.map(o => o.campaign.toLowerCase())), [alerts, campaigns, kwSnap]);
+  const defenceOrders = useMemo(() => buildDefenceOrders(alerts, campaigns, kwSnap).orders, [alerts, campaigns, kwSnap]);
+  const defenceSet = useMemo(() => new Set(defenceOrders.map(o => o.campaign.toLowerCase())), [defenceOrders]);
   const orders = useMemo(() => {
     const rnd5 = v => Math.round(v / 5) * 5;
     const out = buildWorkOrders(campaigns, kwSnap, stratMap, defenceSet);
@@ -11616,8 +11569,10 @@ function WorkOrderSection({
       mk('remove', removes, `Remove ${removes.length} keyword${removes.length > 1 ? 's' : ''}`, 'Campaign healthy — these keywords only burn money');
       mk('bids', reprices, `Bids −25% (${reprices.length} keyword${reprices.length > 1 ? 's' : ''})`, 'Campaign healthy — weak keywords repriced, rest untouched');
     });
+    // v18: ⚡ defence rows join the same list & files — fast clock, sorted first
+    defenceOrders.forEach(o => out.push(o));
     return out;
-  }, [campaigns, kwSnap, revertHikes, kwBleeders, stratMap, defenceSet]);
+  }, [campaigns, kwSnap, revertHikes, kwBleeders, stratMap, defenceSet, defenceOrders]);
   const growthCapped = useMemo(() => {
     const growth = orders.filter(o => o.kind === 'Scale' || o.kind === 'Trim').sort((x, y) => (y.c.drr?.spend || 0) - (x.c.drr?.spend || 0)).slice(0, 10);
     const gset = new Set(growth);
@@ -11628,7 +11583,7 @@ function WorkOrderSection({
     growthCapped.forEach(o => {
       (m[o.brand || 'Unknown'] = m[o.brand || 'Unknown'] || []).push(o);
     });
-    Object.values(m).forEach(arr => arr.sort((x, y) => (y.c.burnPerDay || 0) - (x.c.burnPerDay || 0)));
+    Object.values(m).forEach(arr => arr.sort((x, y) => (y.kind === 'Defend') - (x.kind === 'Defend') || (y.c.burnPerDay || 0) - (x.c.burnPerDay || 0)));
     return m;
   }, [growthCapped]);
   if (!growthCapped.length) return null;
@@ -11684,7 +11639,8 @@ function WorkOrderSection({
     Pull: '#ef4444',
     Tune: '#f59e0b',
     Trim: '#22c55e',
-    Scale: '#22c55e'
+    Scale: '#22c55e',
+    Defend: '#f97316'
   };
   return /*#__PURE__*/React.createElement(Card, {
     accent: "#3b82f6",
@@ -13712,10 +13668,7 @@ function App() {
   }
   const tabs = [{
     id: 'brief',
-    label: '⌁ Daily Brief'
-  }, {
-    id: 'defence',
-    label: `⚡ Sudden Changes${alerts.length ? ` (${alerts.length})` : ''}`
+    label: `⌁ Daily Brief${briefCount ? ` (${briefCount})` : ''}`
   }, {
     id: 'watching',
     label: '👀 Watching'
@@ -13759,6 +13712,7 @@ function App() {
     id: 'guide',
     label: '❓ Guide'
   }];
+  const briefCount = campaigns.filter(c => c.earnAction && c.earnAction.kind !== 'Settling' && c.earnAction.kind !== 'Watch').length;
   const totalCut = campaigns.filter(c => c.verdict === 'Burning').length;
   const totalScale = campaigns.filter(c => c.verdict === 'Earning').length;
   return /*#__PURE__*/React.createElement("div", {
@@ -13990,12 +13944,19 @@ function App() {
     catPrev: catPrev,
     allRows: allRows,
     mode: "brief"
-  }), tab === 'defence' && /*#__PURE__*/React.createElement(DefenceSection, {
+  }), tab === 'watching' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(DefenceSection, {
     alerts: alerts,
     campaigns: campaigns,
     allRows: allRows,
-    endDate: bounds.max
-  }), tab === 'watching' && /*#__PURE__*/React.createElement(DailyBriefView, {
+    endDate: bounds.max,
+    reviewOnly: true
+  }), /*#__PURE__*/React.createElement(DailyBriefView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns,
     alerts: alerts,
@@ -14006,7 +13967,7 @@ function App() {
     catPrev: catPrev,
     allRows: allRows,
     mode: "watching"
-  }), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
+  })), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns
   }), tab === 'scorecard' && /*#__PURE__*/React.createElement(ScorecardView, {
@@ -14083,7 +14044,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v17 two-desk-split — brief=pure tick list · defence tab (fast-clock, guardrailed) · watching tab · strategic tags
+// build: v18 two-tabs-final — defence merged into Brief rows/files · manual Tune rows · Watching deduplicated (zero overlap)
 
 </script>
 </body></html>
