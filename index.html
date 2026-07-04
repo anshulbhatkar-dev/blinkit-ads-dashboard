@@ -522,6 +522,8 @@ const FIELD_ALIASES = {
   Search: {
     date: ['date ist', 'date'],
     campaign: ['campaign name'],
+    campaignId: ['campaign id'],
+    matchType: ['match type'],
     keyword: ['keyword'],
     position: ['most viewed position', 'rank imp', 'position'],
     impressions: ['impressions'],
@@ -543,6 +545,7 @@ const FIELD_ALIASES = {
   Reco: {
     date: ['date ist', 'date'],
     campaign: ['campaign name'],
+    campaignId: ['campaign id'],
     asset: ['asset'],
     impressions: ['impressions'],
     directAtc: ['direct atc'],
@@ -561,6 +564,7 @@ const FIELD_ALIASES = {
   Display: {
     date: ['date ist', 'date'],
     campaign: ['campaign name'],
+    campaignId: ['campaign id'],
     layout: ['targeting layout'],
     impressions: ['impressions'],
     directQty: ['direct quantities sold'],
@@ -577,6 +581,7 @@ const FIELD_ALIASES = {
   CategoryBrowse: {
     date: ['date ist', 'date'],
     campaign: ['campaign name'],
+    campaignId: ['campaign id'],
     position: ['most viewed position'],
     impressions: ['impressions'],
     directQty: ['direct quantities sold'],
@@ -593,6 +598,8 @@ const FIELD_ALIASES = {
   Spotlight: {
     date: ['date ist', 'date'],
     campaign: ['campaign name'],
+    campaignId: ['campaign id'],
+    matchType: ['match type'],
     keyword: ['keyword'],
     impressions: ['impressions'],
     clicks: ['unique clicks'],
@@ -605,6 +612,7 @@ const FIELD_ALIASES = {
   VisualDIY: {
     date: ['date ist', 'date'],
     campaign: ['campaign name'],
+    campaignId: ['campaign id'],
     layout: ['targeting layout'],
     impressions: ['impressions'],
     clicks: ['unique clicks'],
@@ -629,6 +637,8 @@ const FALLBACK_IDX = {
   Search: {
     date: 1,
     campaign: 3,
+    campaignId: 2,
+    matchType: 6,
     keyword: 4,
     position: 5,
     impressions: 10,
@@ -650,6 +660,7 @@ const FALLBACK_IDX = {
   Reco: {
     date: 1,
     campaign: 4,
+    campaignId: 2,
     asset: 5,
     impressions: 10,
     directAtc: 11,
@@ -668,6 +679,7 @@ const FALLBACK_IDX = {
   Display: {
     date: 1,
     campaign: 3,
+    campaignId: 2,
     layout: 5,
     impressions: 11,
     directQty: 17,
@@ -684,6 +696,7 @@ const FALLBACK_IDX = {
   CategoryBrowse: {
     date: 1,
     campaign: 3,
+    campaignId: 2,
     position: 6,
     impressions: 9,
     directQty: 15,
@@ -700,6 +713,8 @@ const FALLBACK_IDX = {
   Spotlight: {
     date: 1,
     campaign: 3,
+    campaignId: 2,
+    matchType: 5,
     keyword: 4,
     impressions: 9,
     clicks: 11,
@@ -712,6 +727,7 @@ const FALLBACK_IDX = {
   VisualDIY: {
     date: 1,
     campaign: 3,
+    campaignId: 2,
     layout: 5,
     impressions: 11,
     clicks: 13,
@@ -769,10 +785,16 @@ function extractRow(row, type, C) {
     return v !== undefined && v !== '' ? Number(v) || 0 : 0;
   };
   const d = f => parseDate(row[C[f]]);
+  const cid = () => {
+    const v = String(row[C.campaignId] ?? '').trim().replace(/\.0$/, '');
+    return /^\d+$/.test(v) ? v : null;
+  };
   if (type === 'Search') return {
     type,
     date: d('date'),
     campaign: s('campaign'),
+    campaignId: cid(),
+    matchType: s('matchType') || null,
     keyword: s('keyword'),
     impressions: n('impressions'),
     position: n('position') || null,
@@ -796,6 +818,7 @@ function extractRow(row, type, C) {
     type,
     date: d('date'),
     campaign: s('campaign'),
+    campaignId: cid(),
     keyword: s('asset'),
     impressions: n('impressions'),
     position: null,
@@ -818,6 +841,7 @@ function extractRow(row, type, C) {
     type,
     date: d('date'),
     campaign: s('campaign'),
+    campaignId: cid(),
     keyword: s('layout'),
     impressions: n('impressions'),
     position: null,
@@ -838,6 +862,7 @@ function extractRow(row, type, C) {
     type,
     date: d('date'),
     campaign: s('campaign'),
+    campaignId: cid(),
     keyword: null,
     impressions: n('impressions'),
     position: n('position') || null,
@@ -858,6 +883,8 @@ function extractRow(row, type, C) {
     type,
     date: d('date'),
     campaign: s('campaign'),
+    campaignId: cid(),
+    matchType: s('matchType') || null,
     keyword: null,
     impressions: n('impressions'),
     position: null,
@@ -881,6 +908,7 @@ function extractRow(row, type, C) {
     type,
     date: d('date'),
     campaign: s('campaign'),
+    campaignId: cid(),
     keyword: s('layout'),
     impressions: n('impressions'),
     position: null,
@@ -1233,6 +1261,7 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     if (r.segment) groups[key].segCounts[r.segment] = (groups[key].segCounts[r.segment] || 0) + 1;
     if (!groups[key].brand && r.brand) groups[key].brand = r.brand;
     if (!groups[key].category && r.category) groups[key].category = r.category;
+    if (!groups[key].campaignId && r.campaignId) groups[key].campaignId = r.campaignId;
     if (r.hasMetrics) groups[key].hasMetrics = true;
     groups[key].rows.push(r);
   });
@@ -1523,6 +1552,7 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     const ctr = !hasMetrics && totImp > 0 ? totClicks / totImp * 100 : null;
     campaigns.push({
       campaign: data.name,
+      campaignId: data.campaignId || null,
       brand,
       category,
       segment,
@@ -9098,7 +9128,8 @@ function DailyBriefView({
   endDate,
   kwCamp = [],
   catCurr = [],
-  catPrev = null
+  catPrev = null,
+  allRows = []
 }) {
   const [done, setDone] = useState(new Set());
   const [copied, setCopied] = useState(false);
@@ -9205,6 +9236,7 @@ function DailyBriefView({
     return rows;
   }, [alerts, kwAlerts, campKwMap]);
   const live = useMemo(() => campaigns.filter(c => !c.isInactive), [campaigns]);
+  const [showDiag, setShowDiag] = useState(false); // v16: analyst view collapsed by default
 
   // v15: queues are Earn-action-driven. Pull = 2wks burning (exact ₹ or Pause),
   // Watch = burning wk 1 (no action yet), Tune = breakeven with the drag named.
@@ -9892,7 +9924,11 @@ function DailyBriefView({
       cursor: 'pointer',
       whiteSpace: 'nowrap'
     }
-  }, copied ? '✓ Copied' : '⧉ Copy list'))), mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, copied ? '✓ Copied' : '⧉ Copy list'))), /*#__PURE__*/React.createElement(WorkOrderSection, {
+    campaigns: live,
+    allRows: allRows,
+    endDate: endDate
+  }), mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\u26A0",
     title: "Sudden Changes \u2014 Campaigns & Keywords",
     accent: "#ef4444",
@@ -9913,7 +9949,19 @@ function DailyBriefView({
       fontSize: 9,
       padding: '2px 8px'
     }
-  }, "+", mergedAlerts.length - 16, " more \u2014 see Excel export")), uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+  }, "+", mergedAlerts.length - 16, " more \u2014 see Excel export")), /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowDiag(s => !s),
+    style: {
+      color: '#6b7280',
+      fontSize: 11,
+      fontWeight: 600,
+      cursor: 'pointer',
+      padding: '8px 12px',
+      border: '1px solid #1f2937',
+      borderRadius: 8,
+      userSelect: 'none'
+    }
+  }, showDiag ? '▾' : '▸', " Watching & diagnostics \u2014 analyst view (", uiFixList.length + kwBleeders.length + qtyDrops.length + revertHikes.length + deteriorating.length + flips.length + scales.length, " items: fix queue, bleeders, qty drops, hikes, deteriorating, flips, growth)"), showDiag && /*#__PURE__*/React.createElement(React.Fragment, null, uiFixList.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "\uD83D\uDEE0",
     title: "Fix List \u2014 Pull \xB7 Watch \xB7 Tune",
     accent: "#ef4444",
@@ -10044,7 +10092,7 @@ function DailyBriefView({
     impactColor: "#22c55e",
     action: scaleAction(c),
     meta: c.trend === 'improving' ? '↗ weekly Earn improving' : null
-  })))), totalActions === 0 && /*#__PURE__*/React.createElement(Card, {
+  }))))), totalActions === 0 && /*#__PURE__*/React.createElement(Card, {
     style: {
       textAlign: 'center',
       padding: 48
@@ -10680,17 +10728,20 @@ function computeEarnAction(c, ladder) {
       if (c.ctr != null && c.ctr < 0.1) return {
         kind: 'Pull',
         label: '✂ Spotlight Waste',
+        pause: true,
         detail: `CTR ${c.ctr.toFixed(2)}% — 1 click per ${Math.round(100 / Math.max(c.ctr, 0.01)).toLocaleString('en-IN')} views. Audience mismatch: cheaper impressions won't fix relevance — change keyword/creative or pause`
       };
       return {
         kind: 'Pull',
         label: '✂ Spotlight Waste',
+        cpmRatio: 0.9,
         detail: `CPC ₹${Math.round(c.cpc || 0)}${c.cci ? ` = ${c.cci.toFixed(1)}× category median` : ''} — lower CPM −10% (floor ₹200) or pause`
       };
     }
     if (c.cciState === 'Pricey') return {
       kind: 'Tune',
       label: '🔧 Spotlight CPM',
+      cpmRatio: 0.9,
       detail: `CPC ₹${Math.round(c.cpc || 0)} = ${(c.cci || 0).toFixed(1)}× category median → CPM −10% step (floor ₹200)`
     };
     return null;
@@ -10712,6 +10763,7 @@ function computeEarnAction(c, ladder) {
     if (c.earn !== null && c.earn < 0.6) return {
       kind: 'Pull',
       label: '✂ Pause',
+      pause: true,
       detail: `Earn ${c.earn.toFixed(2)} for 2 weeks — no lever bridges a ${Math.round((1 - c.earn) * 100)}% gap. Burning ${fmt(c.burnPerDay, 'rsk')}/d`
     };
     const budFloored = curBud !== null && curBud <= 500;
@@ -10719,6 +10771,7 @@ function computeEarnAction(c, ladder) {
     if (budFloored && cpmFloored) return {
       kind: 'Pull',
       label: '✂ Pause ⛔',
+      pause: true,
       detail: `Both levers at platform floors (₹500 budget / ₹200 CPM), still burning ${fmt(c.burnPerDay, 'rsk')}/d — lever-exhausted`
     };
     const newBud = curBud ? Math.max(500, rnd5(curBud * 0.5)) : null;
@@ -10730,11 +10783,14 @@ function computeEarnAction(c, ladder) {
     if (!parts.length) return {
       kind: 'Pull',
       label: '✂ Pause',
+      pause: true,
       detail: `Earn ${(c.earn || 0).toFixed(2)} for 2 weeks, burning ${fmt(c.burnPerDay, 'rsk')}/d — no reducible lever left`
     };
     return {
       kind: 'Pull',
       label: '✂ Pull',
+      newBudget: curBud && newBud && newBud < curBud ? newBud : null,
+      cpmRatio: curCpm && newCpm && newCpm < curCpm - 5 ? newCpm / curCpm : null,
       detail: `Earn ${(c.earn || 0).toFixed(2)} for 2 weeks → ${parts.join(' + ')} · re-judged after 5d settling`
     };
   }
@@ -10743,6 +10799,7 @@ function computeEarnAction(c, ladder) {
     if (curCpm && ladHere && curCpm > ladHere * 1.15) return {
       kind: 'Tune',
       label: '🔧 Tune CPM',
+      cpmRatio: Math.max(200, rnd5(ladHere)) / curCpm,
       detail: `Paying ₹${Math.round(curCpm)} CPM for rank ${c.avgPos.toFixed(1)}; category ladder clears it at ~₹${Math.round(ladHere)} → lower CPM to ₹${Math.max(200, rnd5(ladHere))}`
     };
     if (c.nurD != null && c.nurD < 0.4) return {
@@ -10765,6 +10822,7 @@ function computeEarnAction(c, ladder) {
       if (newCpm < curCpm - 10) return {
         kind: 'Trim',
         label: '💰 Trim',
+        cpmRatio: newCpm / curCpm,
         detail: `Rank ${c.avgPos.toFixed(1)} held at ₹${Math.round(curCpm)} CPM; ladder price ~₹${Math.round(lad6)} → lower to ₹${newCpm} (−10% step) · saves ~${fmt(spend * (1 - newCpm / curCpm), 'rsk')}/d · stop if rank slips past 6`
       };
     }
@@ -10780,6 +10838,7 @@ function computeEarnAction(c, ladder) {
     if (target > curBud * 1.05) return {
       kind: 'Scale',
       label: '⬆ Scale Budget',
+      newBudget: target,
       detail: `Earn ${(c.earn || 0).toFixed(2)}${util != null ? ` · util ${(util * 100).toFixed(0)}%` : ''}${hpd && hpd < 18 ? ` · live ${hpd.toFixed(0)}h/d` : ''} → raise budget ₹${Math.round(curBud).toLocaleString('en-IN')} → ₹${target.toLocaleString('en-IN')} (+${Math.round((step - 1) * 100)}%, p90-capped)`
     };
   }
@@ -10789,10 +10848,424 @@ function computeEarnAction(c, ladder) {
     if (next > curCpm * 1.05) return {
       kind: 'Scale',
       label: '⬆ Scale CPM',
+      cpmRatio: next / curCpm,
       detail: `Earn ${c.earn.toFixed(2)}, rank ${c.avgPos.toFixed(1)}, budget unspent → raise CPM ₹${Math.round(curCpm)} → ₹${next} (+20% step) · Max ₹${maxCpm} before Earn < ${EARN_HI}`
     };
   }
   return null; // demand-capped winner — nothing to buy, stay silent
+}
+
+// ─── WORK ORDERS + BLINKIT BULK-CSV GENERATOR (v16) ─────────────────────────
+// Every accepted suggestion becomes rows in Blinkit's own bulk-upload templates:
+//   pause:  campaign_id,desired_status(stop)
+//   budget: campaign_id,budget
+//   bids:   campaign_id,keyword_name,match_type,bid
+//   remove: campaign_id,keyword_name,match_type
+// Files are brand-scoped (Blinkit bulk actions run per brand account).
+const BRAND_SHORT = {
+  'Be Bodywise': 'BB',
+  'Man Matters': 'MM',
+  'Little Joys': 'LJ'
+};
+
+// 14d keyword snapshot per campaign: latest bid + match type + spend/sales (Search & Spotlight)
+function buildKwSnapshot(allRows, refDate) {
+  if (!refDate) return {};
+  const start = new Date(refDate.getTime() - 13 * 864e5);
+  const snap = {};
+  allRows.forEach(r => {
+    if (!r.date || r.date < start || r.date > refDate) return;
+    if (!r.keyword || r.type !== 'Search' && r.type !== 'Spotlight') return;
+    const ck = r.campaign.toLowerCase();
+    const kk = r.keyword.toLowerCase();
+    if (!snap[ck]) snap[ck] = {};
+    if (!snap[ck][kk]) snap[ck][kk] = {
+      keyword: r.keyword,
+      matchType: null,
+      bid: null,
+      bidDate: null,
+      spend: 0,
+      sales: 0
+    };
+    const k = snap[ck][kk];
+    k.spend += r.spend || 0;
+    k.sales += r.directSales || 0;
+    if (r.matchType) k.matchType = r.matchType;
+    if (r.cpm > 0 && (!k.bidDate || r.date >= k.bidDate)) {
+      k.bid = r.cpm;
+      k.bidDate = r.date;
+    }
+  });
+  return snap;
+}
+
+// Turn earnActions into executable work orders. Surgical rule: for efficiency
+// problems (Tune/Pull) with ≥30% of spend in proven-bad keywords (≥₹500/14d,
+// kwEarn<0.85), touch ONLY those keywords (kwEarn<0.4 → remove). Level problems
+// (Trim/Scale) scale every keyword proportionally. Constraints: bid ≥₹200.
+function buildWorkOrders(campaigns, kwSnap) {
+  const rnd5 = v => Math.round(v / 5) * 5;
+  const orders = [];
+  campaigns.forEach(c => {
+    const a = c.earnAction;
+    if (!a || a.kind === 'Settling' || a.kind === 'Watch') return;
+    const base = {
+      campaign: c.campaign,
+      campaignId: c.campaignId,
+      brand: c.brand,
+      c,
+      kind: a.kind,
+      label: a.label,
+      detail: a.detail
+    };
+    if (a.pause) {
+      orders.push({
+        ...base,
+        file: 'pause',
+        why: 'Losing money 2 weeks — nothing left to fix',
+        display: 'Pause',
+        worth: c.burnPerDay ? `saves ${fmt(c.burnPerDay, 'rsk')}/d` : ''
+      });
+      return;
+    }
+    if (a.newBudget != null) {
+      orders.push({
+        ...base,
+        file: 'budget',
+        budget: a.newBudget,
+        why: a.kind === 'Scale' ? 'Winner with unmet demand' : 'Losing money 2 weeks — shrink while fixing',
+        display: `Budget ₹${Math.round(c.currentDailyBudget || 0).toLocaleString('en-IN')} → ₹${a.newBudget.toLocaleString('en-IN')}`,
+        worth: a.kind === 'Scale' ? `+${fmt((a.newBudget - (c.currentDailyBudget || 0)) * (c.earn || 1), 'rsk')}/d potential` : c.burnPerDay ? `cuts ${fmt(c.burnPerDay * 0.5, 'rsk')}/d burn` : ''
+      });
+      if (a.cpmRatio == null) return;
+    }
+    if (a.cpmRatio != null) {
+      const kws = Object.values(kwSnap[c.campaign.toLowerCase()] || {}).filter(k => k.bid > 0);
+      if (!kws.length) {
+        orders.push({
+          ...base,
+          file: null,
+          manual: true,
+          why: a.kind === 'Trim' ? 'Overpaying — lower CPM in panel (no keyword bids for this ad type)' : 'CPM change — manual in panel (no keyword bids for this ad type)',
+          display: `CPM ×${a.cpmRatio.toFixed(2)} (manual)`,
+          worth: ''
+        });
+        return;
+      }
+      const floor = c.earnFloor;
+      const tot = kws.reduce((s, k) => s + k.spend, 0);
+      const bad = floor ? kws.filter(k => k.spend >= 500 && k.sales / k.spend / floor < EARN_LO) : [];
+      const badSpend = bad.reduce((s, k) => s + k.spend, 0);
+      const surgical = (a.kind === 'Tune' || a.kind === 'Pull') && tot > 0 && badSpend / tot >= 0.3 && bad.length;
+      if (surgical) {
+        const removes = bad.filter(k => k.sales / k.spend / floor < 0.4);
+        const reprices = bad.filter(k => k.sales / k.spend / floor >= 0.4);
+        if (removes.length) orders.push({
+          ...base,
+          file: 'remove',
+          rows: removes.map(k => ({
+            keyword: k.keyword,
+            matchType: (k.matchType || 'exact').toLowerCase()
+          })),
+          why: `${removes.length} keyword${removes.length > 1 ? 's' : ''} only burn money — remove, keep campaign`,
+          display: `Remove ${removes.length} keyword${removes.length > 1 ? 's' : ''}`,
+          worth: `stops ${fmt(removes.reduce((s, k) => s + k.spend, 0) / 14, 'rsk')}/d`
+        });
+        if (reprices.length) orders.push({
+          ...base,
+          file: 'bids',
+          rows: reprices.map(k => ({
+            keyword: k.keyword,
+            matchType: (k.matchType || 'exact').toLowerCase(),
+            bid: Math.max(200, rnd5(k.bid * 0.75))
+          })),
+          why: `${reprices.length} keyword${reprices.length > 1 ? 's' : ''} losing money — bids −25%, rest untouched`,
+          display: `Bids −25% (${reprices.length} of ${kws.length} keywords)`,
+          worth: ''
+        });
+      } else {
+        orders.push({
+          ...base,
+          file: 'bids',
+          rows: kws.map(k => ({
+            keyword: k.keyword,
+            matchType: (k.matchType || 'exact').toLowerCase(),
+            bid: Math.max(200, rnd5(k.bid * a.cpmRatio))
+          })),
+          why: a.kind === 'Trim' ? 'Holding top rank while overpaying — same rank, cheaper' : a.kind === 'Scale' ? 'Winner limited by visibility — bid up for rank' : 'Whole campaign overpaying vs market',
+          display: `Bids ×${a.cpmRatio.toFixed(2)} (all ${kws.length} keywords)`,
+          worth: a.cpmRatio < 1 ? `saves ~${fmt((c.drr?.spend || 0) * (1 - a.cpmRatio), 'rsk')}/d` : ''
+        });
+      }
+    }
+  });
+  return orders;
+}
+function downloadCsv(filename, header, rows) {
+  const esc = v => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const text = [header.join(','), ...rows.map(r => r.map(esc).join(','))].join('\n');
+  const blob = new Blob([text], {
+    type: 'text/csv;charset=utf-8'
+  });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 500);
+}
+function WorkOrderSection({
+  campaigns,
+  allRows,
+  endDate
+}) {
+  const [sel, setSel] = useState(() => new Set());
+  const [open, setOpen] = useState(() => new Set());
+  const [genMsg, setGenMsg] = useState({});
+  const kwSnap = useMemo(() => buildKwSnapshot(allRows, endDate), [allRows, endDate]);
+  const orders = useMemo(() => buildWorkOrders(campaigns, kwSnap), [campaigns, kwSnap]);
+  const growthCapped = useMemo(() => {
+    const growth = orders.filter(o => o.kind === 'Scale' || o.kind === 'Trim').sort((x, y) => (y.c.drr?.spend || 0) - (x.c.drr?.spend || 0)).slice(0, 10);
+    const gset = new Set(growth);
+    return orders.filter(o => o.kind !== 'Scale' && o.kind !== 'Trim' || gset.has(o));
+  }, [orders]);
+  const byBrand = useMemo(() => {
+    const m = {};
+    growthCapped.forEach(o => {
+      (m[o.brand || 'Unknown'] = m[o.brand || 'Unknown'] || []).push(o);
+    });
+    Object.values(m).forEach(arr => arr.sort((x, y) => (y.c.burnPerDay || 0) - (x.c.burnPerDay || 0)));
+    return m;
+  }, [growthCapped]);
+  if (!growthCapped.length) return null;
+  const oKey = o => o.campaign + '|' + (o.file || 'manual') + '|' + o.display;
+  const toggle = k => setSel(p => {
+    const n = new Set(p);
+    n.has(k) ? n.delete(k) : n.add(k);
+    return n;
+  });
+  const dstr = endDate ? endDate.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short'
+  }).replace(' ', '') : 'today';
+  const generate = brand => {
+    const picked = (byBrand[brand] || []).filter(o => sel.has(oKey(o)) && o.file);
+    if (!picked.length) {
+      setGenMsg(m => ({
+        ...m,
+        [brand]: 'Nothing ticked — select changes first'
+      }));
+      return;
+    }
+    const bs = BRAND_SHORT[brand] || brand.slice(0, 2).toUpperCase();
+    const noId = picked.filter(o => !o.campaignId);
+    const files = [];
+    const grab = kind => picked.filter(o => o.file === kind && o.campaignId);
+    const pauses = grab('pause');
+    if (pauses.length) {
+      downloadCsv(`${bs}_pause_${dstr}.csv`, ['campaign_id', 'desired_status'], pauses.map(o => [o.campaignId, 'stop']));
+      files.push('pause');
+    }
+    const budgets = grab('budget');
+    if (budgets.length) {
+      downloadCsv(`${bs}_budget_${dstr}.csv`, ['campaign_id', 'budget'], budgets.map(o => [o.campaignId, o.budget]));
+      files.push('budget');
+    }
+    const bids = grab('bids');
+    if (bids.length) {
+      downloadCsv(`${bs}_keyword_bids_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type', 'bid'], bids.flatMap(o => o.rows.map(r => [o.campaignId, r.keyword, r.matchType, r.bid])));
+      files.push('bids');
+    }
+    const removes = grab('remove');
+    if (removes.length) {
+      downloadCsv(`${bs}_remove_keywords_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type'], removes.flatMap(o => o.rows.map(r => [o.campaignId, r.keyword, r.matchType])));
+      files.push('remove');
+    }
+    setGenMsg(m => ({
+      ...m,
+      [brand]: files.length ? `${files.length} file${files.length > 1 ? 's' : ''} downloaded — upload each in the ${brand} Blinkit bulk panel${noId.length ? ` · ⚠ ${noId.length} skipped (no campaign ID in sheet)` : ''}` : 'No file-able rows selected'
+    }));
+  };
+  const KIND_CLR = {
+    Pull: '#ef4444',
+    Tune: '#f59e0b',
+    Trim: '#22c55e',
+    Scale: '#22c55e'
+  };
+  return /*#__PURE__*/React.createElement(Card, {
+    accent: "#3b82f6",
+    style: {
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13
+    }
+  }, "\uD83D\uDDC2"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, "Today's Changes \u2014 tick, generate, upload"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#3b82f6',
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, growthCapped.length), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginLeft: 'auto'
+    }
+  }, "files are Blinkit bulk-upload templates \xB7 one set per brand \xB7 click a row for the analyst detail")), Object.entries(byBrand).map(([brand, list]) => /*#__PURE__*/React.createElement("div", {
+    key: brand,
+    style: {
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: BRAND_COLORS[brand] || '#9ca3af',
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, brand), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9
+    }
+  }, list.length, " suggestion", list.length > 1 ? 's' : ''), /*#__PURE__*/React.createElement("button", {
+    onClick: () => generate(brand),
+    style: {
+      marginLeft: 'auto',
+      background: '#14532d',
+      color: '#4ade80',
+      border: '1px solid #16a34a',
+      borderRadius: 6,
+      padding: '4px 12px',
+      fontSize: 10,
+      fontWeight: 700,
+      cursor: 'pointer'
+    }
+  }, "\u2B07 Generate files (", list.filter(o => sel.has(oKey(o))).length, ")")), genMsg[brand] && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4ade80',
+      fontSize: 9,
+      marginBottom: 4
+    }
+  }, genMsg[brand]), list.map(o => {
+    const k = oKey(o);
+    return /*#__PURE__*/React.createElement("div", {
+      key: k,
+      onClick: () => setOpen(p => {
+        const n = new Set(p);
+        n.has(k) ? n.delete(k) : n.add(k);
+        return n;
+      }),
+      style: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'flex-start',
+        padding: '5px 8px',
+        borderRadius: 6,
+        background: sel.has(k) ? 'rgba(59,130,246,0.06)' : 'rgba(255,255,255,0.015)',
+        cursor: 'pointer',
+        marginBottom: 3
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: sel.has(k),
+      onClick: e => e.stopPropagation(),
+      onChange: () => toggle(k),
+      style: {
+        marginTop: 2,
+        accentColor: '#3b82f6'
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'baseline',
+        flexWrap: 'wrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 9,
+        fontWeight: 700,
+        padding: '1px 7px',
+        borderRadius: 4,
+        color: KIND_CLR[o.kind] || '#9ca3af',
+        background: 'rgba(255,255,255,0.04)',
+        border: `1px solid ${KIND_CLR[o.kind] || '#374151'}44`
+      }
+    }, o.manual ? '✋ ' : '', o.display), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        fontWeight: 600,
+        wordBreak: 'break-word'
+      }
+    }, o.campaign), o.worth && /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 'auto',
+        color: KIND_CLR[o.kind] || '#9ca3af',
+        fontSize: 10,
+        fontWeight: 700,
+        whiteSpace: 'nowrap'
+      }
+    }, o.worth)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 10,
+        marginTop: 1
+      }
+    }, o.why), open.has(k) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 5,
+        padding: '7px 10px',
+        background: 'rgba(255,255,255,0.02)',
+        borderRadius: 6,
+        fontSize: 10,
+        color: '#6b7280',
+        lineHeight: 1.6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#93c5fd',
+        fontWeight: 700
+      }
+    }, "Analyst detail"), " \u2014 ", o.label, ": ", o.detail, o.c.earn != null && /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 Earn ", o.c.earn.toFixed(2), o.c.earnFloor ? ` vs floor ${o.c.earnFloor.toFixed(2)}x` : '', " \xB7 CM1 ", o.c.cm1Pct != null ? (o.c.cm1Pct * 100).toFixed(0) + '%' : '—', " of MRP \xB7 NUR ", o.c.nurD != null ? (o.c.nurD * 100).toFixed(0) + '%' : '—', " \xB7 weekly Earn ", o.c.earnW1 != null ? o.c.earnW1.toFixed(2) : '—', " \u2192 ", o.c.earnW2 != null ? o.c.earnW2.toFixed(2) : '—'), o.rows && /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 file rows: ", o.rows.slice(0, 6).map(r => `"${r.keyword}"${r.bid ? ` ₹${r.bid}` : ''}`).join(', '), o.rows.length > 6 ? ` +${o.rows.length - 6} more` : ''), !o.campaignId && /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#ef4444'
+      }
+    }, " \xB7 \u26A0 no campaign ID found \u2014 will be skipped in files"))));
+  }))));
 }
 
 // ─── CHANGE LEDGER ───────────────────────────────────────────────────────────
@@ -12905,7 +13378,8 @@ function App() {
     endDate: bounds.max,
     kwCamp: kwCamp,
     catCurr: catCurr,
-    catPrev: catPrev
+    catPrev: catPrev,
+    allRows: allRows
   }), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns
@@ -12983,7 +13457,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v15 earn-verdict-cutover — old verdict/score removed from UI; states+actions everywhere
+// build: v16 work-orders + blinkit-bulk-csv-generator + surgical-keyword-bids + campaign-ids + diag-collapse
 
 </script>
 </body></html>
