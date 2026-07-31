@@ -1544,6 +1544,32 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       } else settling = true;
     }
 
+    // Weekly (this 7d vs prior 7d) per-metric splits — powers the analyst-detail strip
+    const _w2s = new Date(endDate.getTime() - 6 * 864e5);
+    const _w1s = new Date(endDate.getTime() - 13 * 864e5),
+      _w1e = new Date(_w2s.getTime() - 864e5);
+    const wkAgg = (from, to) => {
+      const wr = rows.filter(r => r.date >= from && r.date <= to);
+      const sp = wr.reduce((s, r) => s + r.spend, 0),
+        ds = wr.reduce((s, r) => s + r.directSales, 0);
+      const nu = wr.reduce((s, r) => s + r.newUsers, 0),
+        dq = wr.reduce((s, r) => s + r.directQty, 0);
+      const pr = wr.filter(r => r.position > 0 && r.impressions > 0),
+        prI = pr.reduce((s, r) => s + r.impressions, 0);
+      const cr = wr.filter(r => r.cpm > 0 && r.impressions > 0),
+        crI = cr.reduce((s, r) => s + r.impressions, 0);
+      const nd = new Set(wr.map(r => r.date.toDateString())).size || 1;
+      return {
+        roas: sp > 0 ? ds / sp : null,
+        nur: dq > 0 ? Math.min(nu / dq, 1) : null,
+        spend: sp / nd,
+        rank: prI > 0 ? pr.reduce((s, r) => s + r.position * r.impressions, 0) / prI : null,
+        cpm: crI > 0 ? cr.reduce((s, r) => s + r.cpm * r.impressions, 0) / crI : null
+      };
+    };
+    const wkThis = wkAgg(_w2s, endDate),
+      wkLast = wkAgg(_w1s, _w1e);
+
     // ── EARN RATIO ENGINE (v14) — margin-anchored, self-benchmarking ─────────
     // Floor = (1 ÷ CM1%MRP) ÷ [NUR×R + (1−NUR)]; Earn = direct ROAS ÷ floor.
     // NUR for the floor uses DIRECT qty (repeat credit only for provably new buyers).
@@ -1659,6 +1685,8 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       earnPersist,
       burnPerDay,
       cpmResponsive,
+      wkThis,
+      wkLast,
       p90Spend: p90SpendOf(key),
       totClicks,
       cpc,
@@ -11416,6 +11444,7 @@ function buildDefenceOrders(alerts, campaigns, kwSnap) {
 function buildKwSnapshot(allRows, refDate) {
   if (!refDate) return {};
   const start = new Date(refDate.getTime() - 13 * 864e5);
+  const w2s = new Date(refDate.getTime() - 6 * 864e5); // this-week boundary
   const snap = {};
   allRows.forEach(r => {
     if (!r.date || r.date < start || r.date > refDate) return;
@@ -11429,7 +11458,23 @@ function buildKwSnapshot(allRows, refDate) {
       bid: null,
       bidDate: null,
       spend: 0,
-      sales: 0
+      sales: 0,
+      w1: {
+        sp: 0,
+        sa: 0,
+        posN: 0,
+        posI: 0,
+        cpmN: 0,
+        cpmI: 0
+      },
+      w2: {
+        sp: 0,
+        sa: 0,
+        posN: 0,
+        posI: 0,
+        cpmN: 0,
+        cpmI: 0
+      }
     };
     const k = snap[ck][kk];
     k.spend += r.spend || 0;
@@ -11439,7 +11484,29 @@ function buildKwSnapshot(allRows, refDate) {
       k.bid = r.cpm;
       k.bidDate = r.date;
     }
+    const w = r.date >= w2s ? k.w2 : k.w1; // weekly split for this-vs-last
+    w.sp += r.spend || 0;
+    w.sa += r.directSales || 0;
+    if (r.position > 0 && r.impressions > 0) {
+      w.posN += r.position * r.impressions;
+      w.posI += r.impressions;
+    }
+    if (r.cpm > 0 && r.impressions > 0) {
+      w.cpmN += r.cpm * r.impressions;
+      w.cpmI += r.impressions;
+    }
   });
+  // derive this-week / last-week per keyword
+  Object.values(snap).forEach(kws => Object.values(kws).forEach(k => {
+    const m = w => ({
+      roas: w.sp > 0 ? w.sa / w.sp : null,
+      rank: w.posI > 0 ? w.posN / w.posI : null,
+      cpm: w.cpmI > 0 ? w.cpmN / w.cpmI : null,
+      spend: w.sp / 7
+    });
+    k.thisWk = m(k.w2);
+    k.lastWk = m(k.w1);
+  }));
   return snap;
 }
 
@@ -11598,7 +11665,7 @@ function WorkOrderSection({
   const orders = useMemo(() => {
     const rnd5 = v => Math.round(v / 5) * 5;
     const out = buildWorkOrders(campaigns, kwSnap, stratMap, defenceSet);
-    const taken = new Set(out.filter(o => o.file === 'pause' || o.file === 'budget').map(o => o.campaign.toLowerCase()));
+    const taken = new Set(out.map(o => o.campaign.toLowerCase())); // ALL main-pass orders (any file type) — one order per campaign
     // Revert Hikes → budget orders (put it back to the pre-hike number, floor ₹500)
     revertHikes.forEach(c => {
       if (taken.has(c.campaign.toLowerCase()) || stratMap[c.campaign.toLowerCase()] || defenceSet.has(c.campaign.toLowerCase())) return; // already being paused/re-budgeted
@@ -11621,6 +11688,7 @@ function WorkOrderSection({
           month: 'short'
         }) : '—'}: spend +${fmt(c.iRoasDeltaSpend, 'rsk')}/d bought only ${fmt(c.iRoas, 'x')} incremental ROAS over ${c.iRoasPostDays}d`
       });
+      taken.add(c.campaign.toLowerCase()); // claim it so a bleeder can't also order the same campaign
     });
     // Keyword Bleeders → remove/reprice orders inside HEALTHY campaigns
     kwBleeders.forEach(b => {
@@ -11973,16 +12041,116 @@ function WorkOrderSection({
         color: '#93c5fd',
         fontWeight: 700
       }
-    }, "Detail"), " — ", o.detail, o.c.earn != null && /*#__PURE__*/React.createElement("div", {
+    }, "Detail"), " — ", o.detail, o.c.earn != null && (() => {
+      const t = o.c.wkThis || {},
+        l = o.c.wkLast || {};
+      const cell = (label, tv, lv, f) => /*#__PURE__*/React.createElement("span", {
+        style: {
+          marginRight: 12,
+          whiteSpace: 'nowrap'
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#6b7280'
+        }
+      }, label, " "), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#d1d5db'
+        }
+      }, tv == null ? '—' : f(tv)), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#4b5563'
+        }
+      }, " ← ", lv == null ? '—' : f(lv)));
+      const x = v => v.toFixed(2) + 'x',
+        pct = v => (v * 100).toFixed(0) + '%',
+        rs = v => fmt(v, 'rsk'),
+        r1 = v => v.toFixed(1),
+        cpm = v => fmt(v, 'rs');
+      return /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: 5
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          color: '#6b7280',
+          fontSize: 9,
+          marginBottom: 2
+        }
+      }, "campaign · ", /*#__PURE__*/React.createElement("b", {
+        style: {
+          color: '#93c5fd'
+        }
+      }, "this week ← last week")), /*#__PURE__*/React.createElement("b", {
+        style: {
+          color: '#d1d5db',
+          marginRight: 12
+        }
+      }, "Earn Ratio ", o.c.earnW2 != null ? o.c.earnW2.toFixed(2) : o.c.earn != null ? o.c.earn.toFixed(2) : '—', /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#4b5563',
+          fontWeight: 400
+        }
+      }, " ← ", o.c.earnW1 != null ? o.c.earnW1.toFixed(2) : '—')), cell('D.ROAS', t.roas, l.roas, x), cell('NUR', t.nur, l.nur, pct), cell('Spend/d', t.spend, l.spend, rs), cell('Rank', t.rank, l.rank, r1), cell('CPM', t.cpm, l.cpm, cpm));
+    })(), o.rows && o.rows.length > 0 && /*#__PURE__*/React.createElement("div", {
       style: {
-        marginTop: 4,
-        color: '#9ca3af'
+        marginTop: 5
       }
-    }, /*#__PURE__*/React.createElement("b", {
+    }, /*#__PURE__*/React.createElement("div", {
       style: {
-        color: '#d1d5db'
+        color: '#6b7280',
+        fontSize: 9,
+        marginBottom: 2
       }
-    }, "Earn Ratio ", o.c.earn.toFixed(2)), " · D.ROAS ", o.c.roas != null ? o.c.roas.toFixed(2) + 'x' : '—', " · NUR ", o.c.nurD != null ? (o.c.nurD * 100).toFixed(0) + '%' : '—', " · Spend ", fmt(o.c.drr?.spend, 'rsk'), "/d · Rank ", o.c.avgPos != null ? o.c.avgPos.toFixed(1) : '—', " · CPM ", o.c.avgCpm != null ? fmt(o.c.avgCpm, 'rs') : '—', " · this wk ", o.c.earnW2 != null ? o.c.earnW2.toFixed(2) : '—', " vs last ", o.c.earnW1 != null ? o.c.earnW1.toFixed(2) : '—'), o.rows && /*#__PURE__*/React.createElement(React.Fragment, null, " · file rows: ", o.rows.slice(0, 6).map(r => `"${r.keyword}"${r.bid ? ` ₹${r.bid}` : ''}`).join(', '), o.rows.length > 6 ? ` +${o.rows.length - 6} more` : ''), !o.campaignId && /*#__PURE__*/React.createElement("span", {
+    }, "affected keywords · ", /*#__PURE__*/React.createElement("b", {
+      style: {
+        color: '#93c5fd'
+      }
+    }, "this week ← last week")), o.rows.slice(0, 8).map((r, ri) => {
+      const ks = (kwSnap[o.campaign.toLowerCase()] || {})[(r.keyword || '').toLowerCase()];
+      const t = ks && ks.thisWk || {},
+        l = ks && ks.lastWk || {};
+      const c2 = (lab, tv, lv, f) => /*#__PURE__*/React.createElement("span", {
+        style: {
+          marginRight: 8,
+          whiteSpace: 'nowrap'
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#6b7280'
+        }
+      }, lab, " "), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#d1d5db'
+        }
+      }, tv == null ? '—' : f(tv)), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#4b5563'
+        }
+      }, " ← ", lv == null ? '—' : f(lv)));
+      return /*#__PURE__*/React.createElement("div", {
+        key: ri,
+        style: {
+          marginBottom: 1
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#e5e7eb'
+        }
+      }, "\"", r.keyword, "\""), r.bid ? /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#6b7280'
+        }
+      }, " → ₹", r.bid) : /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#ef4444'
+        }
+      }, " (remove)"), '  ', c2('ROAS', t.roas, l.roas, v => v.toFixed(2) + 'x'), c2('Rank', t.rank, l.rank, v => v.toFixed(1)), c2('CPM', t.cpm, l.cpm, v => fmt(v, 'rs')));
+    }), o.rows.length > 8 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#4b5563'
+      }
+    }, "+", o.rows.length - 8, " more")), !o.campaignId && /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#ef4444'
       }
@@ -14209,7 +14377,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v19c = v19b + CPM-up only when per-campaign history shows it wins rank (ladder fallback, else 🏳 judgment call) · pending: slider/on-deck/History/rebasing/Guide + full week-over-week detail
+// build: v19d = v19c + real duplicate fix (taken=all main orders) + week-over-week detail (each metric this←last, campaign + affected keywords) · pending: slider/on-deck/History/rebasing/Guide
 
 </script>
 </body></html>
