@@ -1485,7 +1485,8 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
     if (lastChange && bm && hasMetrics) {
       const rowsSince = rows.filter(r => r.date >= lastChange);
       sinceDays = new Set(rowsSince.map(r => r.date.toDateString())).size;
-      if (sinceDays >= 5) {
+      if (sinceDays >= 7) {
+        // settling window aligned to 1 week (was 5d) — one clock unit
         const sS = rowsSince.reduce((t, r) => t + r.spend, 0);
         const dsS = rowsSince.reduce((t, r) => t + r.directSales, 0);
         const nuS = rowsSince.reduce((t, r) => t + r.newUsers, 0);
@@ -2510,7 +2511,7 @@ function ScoreBar({
     style: {
       color: '#4b5563'
     }
-  }, "\u2014");
+  }, "—");
   const s = Math.max(0, Math.min(100, Math.round(score)));
   const c = s >= 70 ? '#22c55e' : s >= 50 ? '#3b82f6' : s >= 35 ? '#f59e0b' : s >= 20 ? '#f97316' : '#ef4444';
   return /*#__PURE__*/React.createElement("div", {
@@ -2554,7 +2555,7 @@ function MCell({
     style: {
       color: '#4b5563'
     }
-  }, "\u2014");
+  }, "—");
   const c = mColor(val, floor, healthy, strong);
   return /*#__PURE__*/React.createElement("span", {
     style: {
@@ -3383,7 +3384,7 @@ function CampaignDetail({
     }, Math.round(campaign.score), "/100"), prevCampaign?.score != null && /*#__PURE__*/React.createElement(PctChg, {
       curr: campaign.score,
       prev: prevCampaign.score
-    }), '  ', "\u2192 ", /*#__PURE__*/React.createElement(VBadge, {
+    }), '  ', "→ ", /*#__PURE__*/React.createElement(VBadge, {
       verdict: campaign.verdict,
       sm: true
     })));
@@ -3406,14 +3407,14 @@ function CampaignDetail({
       display: 'flex',
       gap: 12
     }
-  }, /*#__PURE__*/React.createElement("span", null, "\u2691 Last change: ", campaign.lastChange.toLocaleDateString('en-IN', {
+  }, /*#__PURE__*/React.createElement("span", null, "⚑ Last change: ", campaign.lastChange.toLocaleDateString('en-IN', {
     day: '2-digit',
     month: 'short',
     year: 'numeric'
-  })), campaign.lastCpmChange && campaign.prevCpmBefore && campaign.lastCpmValue && /*#__PURE__*/React.createElement("span", null, "CPM: \u20B9", Math.round(campaign.prevCpmBefore), " \u2192 \u20B9", Math.round(campaign.lastCpmValue), " (", campaign.lastCpmChange.toLocaleDateString('en-IN', {
+  })), campaign.lastCpmChange && campaign.prevCpmBefore && campaign.lastCpmValue && /*#__PURE__*/React.createElement("span", null, "CPM: ₹", Math.round(campaign.prevCpmBefore), " → ₹", Math.round(campaign.lastCpmValue), " (", campaign.lastCpmChange.toLocaleDateString('en-IN', {
     day: '2-digit',
     month: 'short'
-  }), ")"), campaign.lastBudgetChange && campaign.prevBudgetBefore && campaign.lastBudgetValue && /*#__PURE__*/React.createElement("span", null, "Budget: \u20B9", Math.round(campaign.prevBudgetBefore), " \u2192 \u20B9", Math.round(campaign.lastBudgetValue), " (", campaign.lastBudgetChange.toLocaleDateString('en-IN', {
+  }), ")"), campaign.lastBudgetChange && campaign.prevBudgetBefore && campaign.lastBudgetValue && /*#__PURE__*/React.createElement("span", null, "Budget: ₹", Math.round(campaign.prevBudgetBefore), " → ₹", Math.round(campaign.lastBudgetValue), " (", campaign.lastBudgetChange.toLocaleDateString('en-IN', {
     day: '2-digit',
     month: 'short'
   }), ")")), /*#__PURE__*/React.createElement("div", {
@@ -3442,7 +3443,7 @@ function CampaignDetail({
       gap: 8,
       marginBottom: 12
     }
-  }, mBox('Spend/day', fmt(campaign.drr?.spend, 'rsk'), `Total ${fmt(campaign.spend, 'rsk')} · ${numDays}d`, null, prevCampaign?.drr?.spend), mBox('Sales/day', fmt(campaign.drr?.directSales, 'rsk'), campaign.roas != null ? `D.ROAS ${fmt(campaign.roas, 'x')}` : null, campaign.roas != null && bm ? mColor(campaign.roas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.drr?.directSales), mBox('Total ROAS', campaign.avgTotalRoas != null ? `${campaign.avgTotalRoas.toFixed(2)}x` : '—', 'Direct+Indirect', campaign.avgTotalRoas != null && bm ? mColor(campaign.avgTotalRoas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.avgTotalRoas), mBox('New Users/day', fmt(campaign.drr?.newUsers, 'int'), campaign.nur != null ? `NUR ${fmt(campaign.nur, '%')}` : null, campaign.nur != null && bm ? mColor(campaign.nur, bm.nurF, bm.nurH, bm.nurS) : null, prevCampaign?.drr?.newUsers), mBox('LTV:CAC', campaign.ltvCac != null ? fmt(campaign.ltvCac, 'x') : '—', campaign.cac != null ? `CAC ${fmt(campaign.cac, 'rs')}` : null, campaign.ltvCac != null && bm ? mColor(campaign.ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null, prevCampaign?.ltvCac), mBox('Impressions/day', fmt(campaign.drr?.impressions, 'int'), campaign.avgPos ? `Rank ${campaign.avgPos.toFixed(1)}` : null, null, prevCampaign?.drr?.impressions), mBox('Orders/day', fmt(campaign.drr?.totalQty, 'int'), `Dir ${fmt(campaign.drr?.directSales && campaign.drr?.totalQty ? campaign.directSales / (campaign.totalQty || 1) : 0, 'rs')}/order`, null, prevCampaign?.drr?.totalQty), campaign.avgCpm != null && mBox('Avg CPM', fmt(campaign.avgCpm, 'rs'), null, null, prevCampaign?.avgCpm), campaign.utilization != null && mBox('Utilization', `${(campaign.utilization * 100).toFixed(0)}%`, campaign.utilization >= 0.9 ? '⚠ Near/over budget' : campaign.utilization >= 0.7 ? '✓ Healthy' : '↓ Under-utilizing', campaign.utilization >= 0.9 ? '#ef4444' : campaign.utilization >= 0.7 ? '#22c55e' : '#f59e0b', prevCampaign?.utilization), campaign.earn != null && mBox('Earn Ratio', campaign.earn.toFixed(2), `floor ${campaign.earnFloor != null ? campaign.earnFloor.toFixed(2) + 'x' : '—'} · CM1 ${campaign.cm1Pct != null ? (campaign.cm1Pct * 100).toFixed(0) + '%' : '—'} of MRP`, campaign.earn >= 1.15 ? '#22c55e' : campaign.earn >= 0.85 ? '#f59e0b' : '#ef4444', prevCampaign?.earn), campaign.iRoas != null && mBox('Incr. ROAS (last hike)', fmt(campaign.iRoas, 'x'), `+${fmt(campaign.iRoasDeltaSpend, 'rsk')}/d spend → +${fmt(campaign.iRoasDeltaSales, 'rsk')}/d sales`, campaign.iRoas < 0.8 ? '#ef4444' : campaign.iRoas < 1.5 ? '#f59e0b' : '#22c55e'), campaign.earnW2 != null && mBox('Earn This Week', campaign.earnW2.toFixed(2), campaign.trend === 'deteriorating' ? '▼ collapsing vs prior week' : campaign.trend === 'improving' ? '▲ improving vs prior week' : `prior week ${campaign.earnW1 != null ? campaign.earnW1.toFixed(2) : '—'}`, campaign.trend === 'deteriorating' ? '#ef4444' : campaign.trend === 'improving' ? '#22c55e' : null)), dailyData.length >= 2 && /*#__PURE__*/React.createElement("div", {
+  }, mBox('Spend/day', fmt(campaign.drr?.spend, 'rsk'), `Total ${fmt(campaign.spend, 'rsk')} · ${numDays}d`, null, prevCampaign?.drr?.spend), mBox('Sales/day', fmt(campaign.drr?.directSales, 'rsk'), campaign.roas != null ? `D.ROAS ${fmt(campaign.roas, 'x')}` : null, campaign.roas != null && bm ? mColor(campaign.roas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.drr?.directSales), mBox('Total ROAS', campaign.avgTotalRoas != null ? `${campaign.avgTotalRoas.toFixed(2)}x` : '—', 'Direct+Indirect', campaign.avgTotalRoas != null && bm ? mColor(campaign.avgTotalRoas, bm.roasF, bm.roasH, bm.roasS) : null, prevCampaign?.avgTotalRoas), mBox('New Users/day', fmt(campaign.drr?.newUsers, 'int'), campaign.nur != null ? `NUR ${fmt(campaign.nur, '%')}` : null, campaign.nur != null && bm ? mColor(campaign.nur, bm.nurF, bm.nurH, bm.nurS) : null, prevCampaign?.drr?.newUsers), mBox('LTV:CAC', campaign.ltvCac != null ? fmt(campaign.ltvCac, 'x') : '—', campaign.cac != null ? `CAC ${fmt(campaign.cac, 'rs')}` : null, campaign.ltvCac != null && bm ? mColor(campaign.ltvCac, bm.ltvF, bm.ltvH, bm.ltvS) : null, prevCampaign?.ltvCac), mBox('Impressions/day', fmt(campaign.drr?.impressions, 'int'), campaign.avgPos ? `Rank ${campaign.avgPos.toFixed(1)}` : null, null, prevCampaign?.drr?.impressions), mBox('Orders/day', fmt(campaign.drr?.totalQty, 'int'), `Dir ${fmt(campaign.drr?.directSales && campaign.drr?.totalQty ? campaign.directSales / (campaign.totalQty || 1) : 0, 'rs')}/order`, null, prevCampaign?.drr?.totalQty), campaign.avgCpm != null && mBox('Avg CPM', fmt(campaign.avgCpm, 'rs'), null, null, prevCampaign?.avgCpm), campaign.utilization != null && mBox('Utilization', `${(campaign.utilization * 100).toFixed(0)}%`, campaign.utilization >= 0.9 ? '⚠ Near/over budget' : campaign.utilization >= 0.7 ? '✓ Healthy' : '↓ Under-utilizing', campaign.utilization >= 0.9 ? '#ef4444' : campaign.utilization >= 0.7 ? '#22c55e' : '#f59e0b', prevCampaign?.utilization), campaign.earn != null && mBox('Earn Ratio', campaign.earn.toFixed(2), `floor ${campaign.earnFloor != null ? campaign.earnFloor.toFixed(2) + 'x' : '—'} · CM1 ${campaign.cm1Pct != null ? (campaign.cm1Pct * 100).toFixed(0) + '%' : '—'} of MRP`, campaign.earn >= 1.15 ? '#22c55e' : campaign.earn >= 0.85 ? '#f59e0b' : '#ef4444', prevCampaign?.earn), campaign.iRoas != null && mBox('Incr. ROAS (last hike)', fmt(campaign.iRoas, 'x'), `+${fmt(campaign.iRoasDeltaSpend, 'rsk')}/d spend → +${fmt(campaign.iRoasDeltaSales, 'rsk')}/d sales`, campaign.iRoas < 0.8 ? '#ef4444' : campaign.iRoas < 1.5 ? '#f59e0b' : '#22c55e'), campaign.earnW2 != null && mBox('Earn Ratio (this wk)', campaign.earnW2.toFixed(2), campaign.trend === 'deteriorating' ? '▼ collapsing vs prior week' : campaign.trend === 'improving' ? '▲ improving vs prior week' : `prior week ${campaign.earnW1 != null ? campaign.earnW1.toFixed(2) : '—'}`, campaign.trend === 'deteriorating' ? '#ef4444' : campaign.trend === 'improving' ? '#22c55e' : null)), dailyData.length >= 2 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 20,
@@ -4102,7 +4103,7 @@ function ScorecardView({
   }, /*#__PURE__*/React.createElement("input", {
     value: search,
     onChange: e => setSearch(e.target.value),
-    placeholder: "Search campaign\u2026",
+    placeholder: "Search campaign…",
     style: {
       background: '#111827',
       border: '1px solid #1f2937',
@@ -4122,7 +4123,7 @@ function ScorecardView({
   }, /*#__PURE__*/React.createElement("input", {
     value: kw,
     onChange: e => setKw(e.target.value),
-    placeholder: "Keyword filter\u2026",
+    placeholder: "Keyword filter…",
     style: {
       background: '#111827',
       border: '1px solid #1f2937',
@@ -4188,7 +4189,7 @@ function ScorecardView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("span", {
+  }, "✕ Clear") : null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 10,
@@ -4328,18 +4329,18 @@ function ScorecardView({
   }, "Peer"), /*#__PURE__*/React.createElement(Th, {
     col: "earn",
     align: "right"
-  }, "Earn"), /*#__PURE__*/React.createElement(Th, {
+  }, "Earn Ratio"), /*#__PURE__*/React.createElement(Th, {
     col: "verdict"
   }, "Verdict"), /*#__PURE__*/React.createElement(Th, {
     col: "deltaSpend",
     align: "right"
-  }, "\u0394Spend/d"), /*#__PURE__*/React.createElement(Th, {
+  }, "ΔSpend/d"), /*#__PURE__*/React.createElement(Th, {
     col: "deltaDQty",
     align: "right"
-  }, "\u0394DQty/d"), /*#__PURE__*/React.createElement(Th, {
+  }, "ΔDQty/d"), /*#__PURE__*/React.createElement(Th, {
     col: "deltaSales",
     align: "right"
-  }, "\u0394Sales/d"))), /*#__PURE__*/React.createElement("tbody", null, (() => {
+  }, "ΔSales/d"))), /*#__PURE__*/React.createElement("tbody", null, (() => {
     const subSpend = filtered.reduce((s, c) => s + (c.drr?.spend || 0), 0);
     const subSales = filtered.reduce((s, c) => s + (c.drr?.directSales || 0), 0);
     const subImp = filtered.reduce((s, c) => s + (c.drr?.impressions || 0), 0);
@@ -4685,7 +4686,7 @@ function ScorecardView({
         marginRight: 4,
         fontSize: 10
       }
-    }, "\u26A0"), c.campaign), /*#__PURE__*/React.createElement("td", {
+    }, "⚠"), c.campaign), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         color: BRAND_COLORS[c.brand] || '#6b7280',
@@ -4761,7 +4762,7 @@ function ScorecardView({
       style: {
         color: '#374151'
       }
-    }, "\u2014"), /*#__PURE__*/React.createElement(PctChg, {
+    }, "—"), /*#__PURE__*/React.createElement(PctChg, {
       curr: c.avgTotalRoas,
       prev: pv?.avgTotalRoas
     })), /*#__PURE__*/React.createElement("td", {
@@ -4909,14 +4910,14 @@ function ScorecardView({
       verdict: c.verdict,
       sm: true
     }), c.earnPersist && /*#__PURE__*/React.createElement("span", {
-      title: "Burning 2 consecutive weeks \u2014 Pull is armed",
+      title: "Burning 2 consecutive weeks — Pull is armed",
       style: {
         color: '#ef4444',
         fontSize: 9,
         marginLeft: 3,
         fontWeight: 700
       }
-    }, "\xD72wk"), c.earnAction && /*#__PURE__*/React.createElement("span", {
+    }, "×2wk"), c.earnAction && /*#__PURE__*/React.createElement("span", {
       title: `${c.earnAction.label}: ${c.earnAction.detail}`,
       style: {
         fontSize: 10,
@@ -4931,27 +4932,27 @@ function ScorecardView({
         fontSize: 10,
         marginLeft: 3
       }
-    }, "\u23F3"), segShift[c.segment] != null && segShift[c.segment] <= -15 && /*#__PURE__*/React.createElement("span", {
+    }, "⏳"), segShift[c.segment] != null && segShift[c.segment] <= -15 && /*#__PURE__*/React.createElement("span", {
       title: `segment median ROAS fell ${Math.abs(segShift[c.segment]).toFixed(0)}% vs prev period — market shift, judge relative not absolute`,
       style: {
         fontSize: 10,
         marginLeft: 3
       }
-    }, "\uD83C\uDF10"), c.trend === 'deteriorating' && /*#__PURE__*/React.createElement("span", {
+    }, "🌐"), c.trend === 'deteriorating' && /*#__PURE__*/React.createElement("span", {
       title: `weekly Earn ${c.earnW1 != null ? c.earnW1.toFixed(2) : '—'} → ${c.earnW2 != null ? c.earnW2.toFixed(2) : '—'} — collapsing this week`,
       style: {
         color: '#ef4444',
         fontSize: 10,
         marginLeft: 3
       }
-    }, "\u25BC"), c.trend === 'improving' && /*#__PURE__*/React.createElement("span", {
+    }, "▼"), c.trend === 'improving' && /*#__PURE__*/React.createElement("span", {
       title: `weekly Earn ${c.earnW1 != null ? c.earnW1.toFixed(2) : '—'} → ${c.earnW2 != null ? c.earnW2.toFixed(2) : '—'} — improving this week`,
       style: {
         color: '#22c55e',
         fontSize: 10,
         marginLeft: 3
       }
-    }, "\u25B2")), /*#__PURE__*/React.createElement("td", {
+    }, "▲")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px',
         textAlign: 'right',
@@ -5118,7 +5119,7 @@ function SegmentHealthView({
         fontSize: 10,
         marginLeft: 8
       }
-    }, cs.length, " campaigns \xB7 ", fmt(totSpend, 'rsk'), "/d spend \xB7 ", fmt(totSales, 'rsk'), "/d sales")), /*#__PURE__*/React.createElement("div", {
+    }, cs.length, " campaigns · ", fmt(totSpend, 'rsk'), "/d spend · ", fmt(totSales, 'rsk'), "/d sales")), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
         gap: 4
@@ -5131,7 +5132,7 @@ function SegmentHealthView({
         padding: '2px 6px',
         borderRadius: 4
       }
-    }, "ROAS \u26A0 ", roasBreach), nurBreach > 0 && /*#__PURE__*/React.createElement("span", {
+    }, "ROAS ⚠ ", roasBreach), nurBreach > 0 && /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#ef4444',
         fontSize: 9,
@@ -5139,7 +5140,7 @@ function SegmentHealthView({
         padding: '2px 6px',
         borderRadius: 4
       }
-    }, "NUR \u26A0 ", nurBreach), ltvBreach > 0 && /*#__PURE__*/React.createElement("span", {
+    }, "NUR ⚠ ", nurBreach), ltvBreach > 0 && /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#ef4444',
         fontSize: 9,
@@ -5147,7 +5148,7 @@ function SegmentHealthView({
         padding: '2px 6px',
         borderRadius: 4
       }
-    }, "LTV \u26A0 ", ltvBreach))), /*#__PURE__*/React.createElement("div", {
+    }, "LTV ⚠ ", ltvBreach))), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'grid',
         gridTemplateColumns: '1fr 1fr 1fr',
@@ -5329,7 +5330,7 @@ function NoActionView({
       color: '#4b5563',
       fontSize: 10
     }
-  }, "Detection: campaign live now \xB7 daily D.ROAS below segment floor on \u22657 of the last 10 active days \xB7 no budget or CPM change since the streak began. Act on it or kill it \u2014 every day here is paid for."), /*#__PURE__*/React.createElement("div", {
+  }, "Detection: campaign live now · daily D.ROAS below segment floor on ≥7 of the last 10 active days · no budget or CPM change since the streak began. Act on it or kill it — every day here is paid for."), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
@@ -5357,7 +5358,7 @@ function NoActionView({
     label: "Flagged",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
-    label: "\u20B9 Burned",
+    label: "₹ Burned",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     label: "Spend/d",
@@ -5392,7 +5393,7 @@ function NoActionView({
       color: '#374151',
       fontSize: 8
     }
-  }, t.brand, " \xB7 ", t.category)), /*#__PURE__*/React.createElement("td", {
+  }, t.brand, " · ", t.category)), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '7px 10px',
       color: BRAND_COLORS[t.brand] || '#6b7280',
@@ -5476,7 +5477,7 @@ function NoActionView({
       textAlign: 'center',
       color: '#4b5563'
     }
-  }, "\u2705 Clean \u2014 every persistent breach has had a budget/CPM response."))))));
+  }, "✅ Clean — every persistent breach has had a budget/CPM response."))))));
 }
 
 // ─── KEYWORD SCORECARD VIEW ──────────────────────────────────────────────────
@@ -5635,7 +5636,7 @@ function KeywordScorecardView({
   }, /*#__PURE__*/React.createElement("input", {
     value: search,
     onChange: e => setSearch(e.target.value),
-    placeholder: "Search keyword\u2026",
+    placeholder: "Search keyword…",
     style: {
       background: '#111827',
       border: '1px solid #1f2937',
@@ -5689,13 +5690,13 @@ function KeywordScorecardView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("span", {
+  }, "✕ Clear") : null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 10,
       marginLeft: 'auto'
     }
-  }, filtered.length, " keywords \xB7 click to expand campaigns")), /*#__PURE__*/React.createElement("div", {
+  }, filtered.length, " keywords · click to expand campaigns")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
@@ -5800,13 +5801,13 @@ function KeywordScorecardView({
   }, "Camps"), /*#__PURE__*/React.createElement(Th, {
     col: "kw_deltaSpend",
     align: "right"
-  }, "\u0394Spend/d"), /*#__PURE__*/React.createElement(Th, {
+  }, "ΔSpend/d"), /*#__PURE__*/React.createElement(Th, {
     col: "kw_deltaDQty",
     align: "right"
-  }, "\u0394DQty/d"), /*#__PURE__*/React.createElement(Th, {
+  }, "ΔDQty/d"), /*#__PURE__*/React.createElement(Th, {
     col: "kw_deltaSales",
     align: "right"
-  }, "\u0394Sales/d"))), /*#__PURE__*/React.createElement("tbody", null, /*#__PURE__*/React.createElement("tr", {
+  }, "ΔSales/d"))), /*#__PURE__*/React.createElement("tbody", null, /*#__PURE__*/React.createElement("tr", {
     style: {
       borderBottom: '2px solid #1f2937',
       background: 'rgba(59,130,246,0.08)',
@@ -6309,7 +6310,7 @@ function KeywordScorecardView({
           textAlign: 'right',
           fontSize: 10
         }
-      }, "\u2014"), /*#__PURE__*/React.createElement("td", {
+      }, "—"), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
           textAlign: 'right',
@@ -6619,7 +6620,7 @@ function CategorySalesView({
       color: '#4b5563',
       fontSize: 11
     }
-  }, "\u2014"), /*#__PURE__*/React.createElement("td", {
+  }, "—"), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px'
     }
@@ -6674,7 +6675,7 @@ function CategorySalesView({
             letterSpacing: '0.08em',
             opacity: 0.7
           }
-        }, "\uD83C\uDF3F Organic Sales (from Sales Import \u2014 total minus ad-attributed)"))));
+        }, "🌿 Organic Sales (from Sales Import — total minus ad-attributed)"))));
       }
     }
     tableRows.push(/*#__PURE__*/React.createElement("tr", {
@@ -6708,7 +6709,7 @@ function CategorySalesView({
         transform: isExp ? 'rotate(90deg)' : 'none',
         transition: 'transform 0.15s'
       }
-    }, "\u25B6") : /*#__PURE__*/React.createElement("span", {
+    }, "▶") : /*#__PURE__*/React.createElement("span", {
       style: {
         minWidth: 10,
         flexShrink: 0,
@@ -6799,7 +6800,7 @@ function CategorySalesView({
       style: {
         color: '#4b5563'
       }
-    }, "\u2014")), /*#__PURE__*/React.createElement("td", {
+    }, "—")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         textAlign: 'right',
@@ -6856,7 +6857,7 @@ function CategorySalesView({
         color: '#374151',
         fontSize: 10
       }
-    }, "\u2014") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    }, "—") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontWeight: 600,
         fontSize: 11,
@@ -7045,7 +7046,7 @@ function CategorySalesView({
           style: {
             color: '#4b5563'
           }
-        }, "\u2014")), /*#__PURE__*/React.createElement("td", {
+        }, "—")), /*#__PURE__*/React.createElement("td", {
           style: {
             padding: '4px 10px',
             textAlign: 'right',
@@ -7180,7 +7181,7 @@ function CategorySalesView({
   }, /*#__PURE__*/React.createElement("input", {
     value: kwSearch,
     onChange: e => setKwSearch(e.target.value),
-    placeholder: "Search keyword\u2026",
+    placeholder: "Search keyword…",
     style: {
       background: '#111827',
       border: '1px solid #1f2937',
@@ -7219,7 +7220,7 @@ function CategorySalesView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("div", {
+  }, "✕ Clear") : null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 4,
@@ -7253,7 +7254,7 @@ function CategorySalesView({
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, filtered.length, " keywords \xB7 curr (top) \xB7 prev (bottom) \xB7 click to expand campaigns")), /*#__PURE__*/React.createElement("div", {
+  }, filtered.length, " keywords · curr (top) · prev (bottom) · click to expand campaigns")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
@@ -7273,11 +7274,11 @@ function CategorySalesView({
   }), /*#__PURE__*/React.createElement(ThStatic, {
     label: "Segment"
   }), /*#__PURE__*/React.createElement(ThStatic, {
-    label: "% Contrib (\u0394pp)",
+    label: "% Contrib (Δpp)",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "deltaDQ",
-    label: "\u0394DQty/d",
+    label: "ΔDQty/d",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "drrDQ",
@@ -7596,7 +7597,7 @@ function SalesFlowView({
       color: '#4b5563',
       fontSize: 11
     }
-  }, "\u2014"), /*#__PURE__*/React.createElement("td", {
+  }, "—"), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px'
     }
@@ -7658,7 +7659,7 @@ function SalesFlowView({
         transition: 'transform 0.15s',
         display: 'inline-block'
       }
-    }, "\u25B6") : /*#__PURE__*/React.createElement("span", {
+    }, "▶") : /*#__PURE__*/React.createElement("span", {
       style: {
         minWidth: 10,
         flexShrink: 0,
@@ -7740,7 +7741,7 @@ function SalesFlowView({
       style: {
         color: '#4b5563'
       }
-    }, "\u2014")), /*#__PURE__*/React.createElement("td", {
+    }, "—")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         textAlign: 'right',
@@ -7986,7 +7987,7 @@ function SalesFlowView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("div", {
+  }, "✕ Clear") : null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 4,
@@ -8020,7 +8021,7 @@ function SalesFlowView({
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, filtered.length, " categories \xB7 curr (top) \xB7 prev (bottom) \xB7 sort applies at all levels")), /*#__PURE__*/React.createElement("div", {
+  }, filtered.length, " categories · curr (top) · prev (bottom) · sort applies at all levels")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
@@ -8038,11 +8039,11 @@ function SalesFlowView({
     col: "_name",
     label: "Category / Segment / Keyword / Campaign"
   }), /*#__PURE__*/React.createElement(ThS, {
-    label: "% Contrib (\u0394pp)",
+    label: "% Contrib (Δpp)",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "deltaDQ",
-    label: "\u0394DQty/d",
+    label: "ΔDQty/d",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "drrDQ",
@@ -8248,7 +8249,7 @@ function BudgetSpendChart({
       marginBottom: 8,
       fontWeight: 600
     }
-  }, campaign, " \u2014 Daily Budget vs Spend"), /*#__PURE__*/React.createElement("div", {
+  }, campaign, " — Daily Budget vs Spend"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'flex-end',
@@ -8605,13 +8606,13 @@ function SpikeRadarView({
       border: 'none',
       cursor: 'pointer'
     }
-  }, "\u2715 Clear") : null, /*#__PURE__*/React.createElement("span", {
+  }, "✕ Clear") : null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "click column headers to sort \xB7 drain capacity = campaign's own p90 daily spend (60d)")), /*#__PURE__*/React.createElement("div", {
+  }, "click column headers to sort · drain capacity = campaign's own p90 daily spend (60d)")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
@@ -8727,7 +8728,7 @@ function SpikeRadarView({
         color: '#374151',
         fontSize: 8
       }
-    }, t.brand, " \xB7 ", t.category, " \xB7 ", t.type)), /*#__PURE__*/React.createElement("td", {
+    }, t.brand, " · ", t.category, " · ", t.type)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
@@ -8825,7 +8826,7 @@ function SpikeRadarView({
       style: {
         color: '#374151'
       }
-    }, "\u2014"), /*#__PURE__*/React.createElement("span", {
+    }, "—"), /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#4b5563'
       }
@@ -8837,7 +8838,7 @@ function SpikeRadarView({
       style: {
         color: '#374151'
       }
-    }, "\u2014")), /*#__PURE__*/React.createElement("td", {
+    }, "—")), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
@@ -8862,7 +8863,7 @@ function SpikeRadarView({
         ...prev,
         [t.campKey]: e.target.value
       })),
-      placeholder: "\u20B9",
+      placeholder: "₹",
       style: {
         width: 70,
         background: '#111827',
@@ -8893,7 +8894,7 @@ function SpikeRadarView({
       style: {
         color: '#374151'
       }
-    }, "\u2014"))), isExp && /*#__PURE__*/React.createElement("tr", {
+    }, "—"))), isExp && /*#__PURE__*/React.createElement("tr", {
       style: {
         borderBottom: '1px solid #1f2937',
         background: '#070b11'
@@ -8918,12 +8919,12 @@ function SpikeRadarView({
         fontWeight: 700,
         marginBottom: 3
       }
-    }, "\u26A1 ", actionText(t)), /*#__PURE__*/React.createElement("div", {
+    }, "⚡ ", actionText(t)), /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#9ca3af',
         fontSize: 10
       }
-    }, "\uD83D\uDCDC Ledger: ", ledgerNarrative(t))), /*#__PURE__*/React.createElement(BudgetSpendChart, {
+    }, "📜 Ledger: ", ledgerNarrative(t))), /*#__PURE__*/React.createElement(BudgetSpendChart, {
       monthDays: t.days,
       campaign: t.campaign
     }))));
@@ -8934,7 +8935,7 @@ function SpikeRadarView({
       textAlign: 'center',
       color: '#4b5563'
     }
-  }, "No spike risk \u2014 surplus banks under control across the portfolio."))))));
+  }, "No spike risk — surplus banks under control across the portfolio."))))));
 }
 
 // ─── LOADING SCREEN ──────────────────────────────────────────────────────────
@@ -9011,7 +9012,7 @@ function LoadingScreen({
       fontSize: 32,
       marginBottom: 16
     }
-  }, "\u26A1"), /*#__PURE__*/React.createElement("h1", {
+  }, "⚡"), /*#__PURE__*/React.createElement("h1", {
     style: {
       color: '#f9fafb',
       fontSize: 22,
@@ -9024,7 +9025,7 @@ function LoadingScreen({
       fontSize: 13,
       marginBottom: 36
     }
-  }, "Mosaic Wellness \xB7 Be Bodywise \xB7 Man Matters \xB7 Little Joys"), status === 'loading' && /*#__PURE__*/React.createElement("div", {
+  }, "Mosaic Wellness · Be Bodywise · Man Matters · Little Joys"), status === 'loading' && /*#__PURE__*/React.createElement("div", {
     style: {
       background: '#0d1117',
       border: '1px solid #1f2937',
@@ -9054,7 +9055,7 @@ function LoadingScreen({
       fontSize: 11,
       marginBottom: 16
     }
-  }, "Pulling live data from Google Sheets\u2026"), /*#__PURE__*/React.createElement("button", {
+  }, "Pulling live data from Google Sheets…"), /*#__PURE__*/React.createElement("button", {
     onClick: () => doLoad(true),
     style: {
       background: 'transparent',
@@ -9065,7 +9066,7 @@ function LoadingScreen({
       fontSize: 11,
       cursor: 'pointer'
     }
-  }, "\u21BA Refresh (clear cache)")), status === 'error' && /*#__PURE__*/React.createElement("div", {
+  }, "↺ Refresh (clear cache)")), status === 'error' && /*#__PURE__*/React.createElement("div", {
     style: {
       background: '#0d1117',
       border: '1px solid #7f1d1d',
@@ -9077,7 +9078,7 @@ function LoadingScreen({
       fontSize: 28,
       marginBottom: 12
     }
-  }, "\u26A0\uFE0F"), /*#__PURE__*/React.createElement("div", {
+  }, "⚠️"), /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#ef4444',
       fontSize: 13,
@@ -9112,7 +9113,7 @@ function LoadingScreen({
       cursor: 'pointer',
       fontWeight: 600
     }
-  }, "\u21BA Retry"))));
+  }, "↺ Retry"))));
 }
 
 // ─── DAILY BRIEF VIEW ────────────────────────────────────────────────────────
@@ -9202,13 +9203,13 @@ function DefenceSection({
     style: {
       fontSize: 13
     }
-  }, "\u26A1"), /*#__PURE__*/React.createElement("span", {
+  }, "⚡"), /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#f9fafb',
       fontSize: 12,
       fontWeight: 700
     }
-  }, "Defend \u2014 something changed in the last 2 days"), /*#__PURE__*/React.createElement("span", {
+  }, "Defend — something changed in the last 2 days"), /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#ef4444',
       fontSize: 11,
@@ -9220,13 +9221,13 @@ function DefenceSection({
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "only Earning campaigns get defended \xB7 bids capped so defence never breaks profitability \xB7 acting starts 5d settling")), !orders.length && /*#__PURE__*/React.createElement("div", {
+  }, "only Earning campaigns get defended · bids capped so defence never breaks profitability · acting starts 5d settling")), !orders.length && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#6b7280',
       fontSize: 11,
       padding: '8px 0'
     }
-  }, "Nothing to defend today \u2014 no attack worth answering."), Object.entries(byBrand).map(([brand, list]) => /*#__PURE__*/React.createElement("div", {
+  }, "Nothing to defend today — no attack worth answering."), Object.entries(byBrand).map(([brand, list]) => /*#__PURE__*/React.createElement("div", {
     key: brand,
     style: {
       marginTop: 10
@@ -9257,7 +9258,7 @@ function DefenceSection({
       fontWeight: 700,
       cursor: 'pointer'
     }
-  }, "\u2B07 Generate files (", list.filter(o => sel.has(oKey(o))).length, ")")), genMsg[brand] && /*#__PURE__*/React.createElement("div", {
+  }, "⬇ Generate files (", list.filter(o => sel.has(oKey(o))).length, ")")), genMsg[brand] && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4ade80',
       fontSize: 9,
@@ -9349,11 +9350,11 @@ function DefenceSection({
         color: '#fca5a5',
         fontWeight: 700
       }
-    }, "Analyst detail"), " \u2014 ", o.detail, o.rows && /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 file rows: ", o.rows.slice(0, 6).map(r => `"${r.keyword}" ₹${r.bid}`).join(', '), o.rows.length > 6 ? ` +${o.rows.length - 6} more` : ''), !o.campaignId && /*#__PURE__*/React.createElement("span", {
+    }, "Analyst detail"), " — ", o.detail, o.rows && /*#__PURE__*/React.createElement(React.Fragment, null, " · file rows: ", o.rows.slice(0, 6).map(r => `"${r.keyword}" ₹${r.bid}`).join(', '), o.rows.length > 6 ? ` +${o.rows.length - 6} more` : ''), !o.campaignId && /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#ef4444'
       }
-    }, " \xB7 \u26A0 no campaign ID \u2014 will be skipped"))));
+    }, " · ⚠ no campaign ID — will be skipped"))));
   })))), review.length > 0 && /*#__PURE__*/React.createElement(Card, {
     style: {
       padding: 16
@@ -9365,13 +9366,13 @@ function DefenceSection({
       fontWeight: 700,
       marginBottom: 8
     }
-  }, "\uD83D\uDC41 Sudden changes \u2014 review only, no safe counter-move (", review.length, ")"), /*#__PURE__*/React.createElement("div", {
+  }, "👁 Sudden changes — review only, no safe counter-move (", review.length, ")"), /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       marginBottom: 8
     }
-  }, "market dips, daypart patterns, losing positions not worth defending, campaigns mid-settling \u2014 informational; anything defendable is already a \u26A1 row in the Daily Brief"), review.slice(0, 20).map(({
+  }, "market dips, daypart patterns, losing positions not worth defending, campaigns mid-settling — informational; anything defendable is already a ⚡ row in the Daily Brief"), review.slice(0, 20).map(({
     a,
     c,
     note
@@ -10107,7 +10108,7 @@ function DailyBriefView({
         color: '#ef4444',
         fontSize: 10
       }
-    }, "\u26A0"), badge && /*#__PURE__*/React.createElement(VBadge, {
+    }, "⚠"), badge && /*#__PURE__*/React.createElement(VBadge, {
       verdict: badge,
       sm: true
     }), /*#__PURE__*/React.createElement("span", {
@@ -10181,6 +10182,36 @@ function DailyBriefView({
     }
   }, mode === 'brief' && /*#__PURE__*/React.createElement("div", {
     style: {
+      background: 'rgba(59,130,246,0.06)',
+      border: '1px solid rgba(59,130,246,0.25)',
+      borderRadius: 8,
+      padding: '8px 12px',
+      fontSize: 10,
+      color: '#9ca3af',
+      lineHeight: 1.6
+    }
+  }, /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: '#93c5fd'
+    }
+  }, "How to read this:"), " ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: '#f97316'
+    }
+  }, "⚡"), " = something changed in the ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: '#d1d5db'
+    }
+  }, "last 2 days"), " — act fast to defend position. Everything else compares your ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: '#d1d5db'
+    }
+  }, "last 7 days to the week before"), " — steady performance. Budget cuts are only suggested after ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: '#d1d5db'
+    }
+  }, "two bad weeks"), ", so you're never reacting to a one-off blip."), mode === 'brief' && /*#__PURE__*/React.createElement("div", {
+    style: {
       display: 'flex',
       gap: 10,
       flexWrap: 'wrap',
@@ -10206,7 +10237,7 @@ function DailyBriefView({
       cursor: 'pointer',
       whiteSpace: 'nowrap'
     }
-  }, "\u2B07 Export Excel"), /*#__PURE__*/React.createElement("button", {
+  }, "⬇ Export Excel"), /*#__PURE__*/React.createElement("button", {
     onClick: copyActions,
     style: {
       background: copied ? 'rgba(34,197,94,0.15)' : '#1e3a5f',
@@ -10232,12 +10263,12 @@ function DailyBriefView({
       fontSize: 10,
       padding: '2px 4px'
     }
-  }, "\u26A1 ", alerts.length, " sudden change", alerts.length > 1 ? 's' : '', " detected \u2014 defendable ones are already \u26A1 rows above; the rest are informational, in \uD83D\uDC40 Watching"), false && mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\u26A0",
-    title: "Sudden Changes \u2014 Campaigns & Keywords",
+  }, "⚡ ", alerts.length, " sudden change", alerts.length > 1 ? 's' : '', " detected — defendable ones are already ⚡ rows above; the rest are informational, in 👀 Watching"), false && mergedAlerts.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "⚠",
+    title: "Sudden Changes — Campaigns & Keywords",
     accent: "#ef4444",
     count: mergedAlerts.length,
-    sub: "last 2d vs prior 7d \xB7 deduped \xB7 driver keywords folded into campaign rows \xB7 ranked by \u20B9 severity"
+    sub: "last 2d vs prior 7d · deduped · driver keywords folded into campaign rows · ranked by ₹ severity"
   }, mergedAlerts.slice(0, 16).map(a => /*#__PURE__*/React.createElement(Row, {
     key: a.key,
     id: a.key,
@@ -10253,14 +10284,14 @@ function DailyBriefView({
       fontSize: 9,
       padding: '2px 8px'
     }
-  }, "+", mergedAlerts.length - 16, " more \u2014 see Excel export")), mode === 'watching' && /*#__PURE__*/React.createElement(React.Fragment, null, (() => {
+  }, "+", mergedAlerts.length - 16, " more — see Excel export")), mode === 'watching' && /*#__PURE__*/React.createElement(React.Fragment, null, (() => {
     const sm = getStratMap();
     const tagged = campaigns.filter(c => sm[c.campaign.toLowerCase()]);
     if (!tagged.length) return null;
     const totBurn = tagged.reduce((s, c) => s + (c.burnPerDay || 0), 0);
     return /*#__PURE__*/React.createElement(Sec, {
-      icon: "\uD83C\uDFF3",
-      title: "Strategic \u2014 suppressed by you, still costing",
+      icon: "🏳",
+      title: "Strategic — suppressed by you, still costing",
       accent: "#6b7280",
       count: tagged.length,
       sub: `burning ${fmt(totBurn, 'rsk')}/d in total · tags auto-expire after 30 days`
@@ -10288,7 +10319,7 @@ function DailyBriefView({
           color: '#6b7280',
           fontSize: 9
         }
-      }, "reason: ", t.reason, " \xB7 ", daysLeft, "d left \xB7 Earn ", c.earn != null ? c.earn.toFixed(2) : '—'), /*#__PURE__*/React.createElement("span", {
+      }, "reason: ", t.reason, " · ", daysLeft, "d left · Earn ", c.earn != null ? c.earn.toFixed(2) : '—'), /*#__PURE__*/React.createElement("span", {
         style: {
           marginLeft: 'auto',
           color: '#ef4444',
@@ -10308,11 +10339,11 @@ function DailyBriefView({
       }, "untag"));
     }));
   })(), reduces.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83D\uDC40",
-    title: "Watch \u2014 first burning week, no action yet",
+    icon: "👀",
+    title: "Watch — first burning week, no action yet",
     accent: "#f59e0b",
     count: reduces.length,
-    sub: "a third of these self-correct \xB7 burns a second week \u2192 appears in Daily Brief automatically"
+    sub: "a third of these self-correct · burns a second week → appears in Daily Brief automatically"
   }, reduces.map(c => /*#__PURE__*/React.createElement(Row, {
     key: 'watch_' + c.campaign,
     id: 'watch_' + c.campaign,
@@ -10329,11 +10360,11 @@ function DailyBriefView({
       gap: 14
     }
   }, qtyDrops.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83D\uDCE6",
-    title: "Qty Drops \u2014 Keyword Level",
+    icon: "📦",
+    title: "Qty Drops — Keyword Level",
     accent: "#ef4444",
     count: qtyDrops.length,
-    sub: "ranked by share-of-sales lost (\u0394pp) \xB7 INLINE = market dipped too"
+    sub: "ranked by share-of-sales lost (Δpp) · INLINE = market dipped too"
   }, qtyDrops.slice(0, 12).map(({
     r,
     pq,
@@ -10352,11 +10383,11 @@ function DailyBriefView({
     action: `${pq.toFixed(1)} → ${cq.toFixed(1)} units/d (▼${Math.round((pq - cq) / pq * 100)}%) · share ${contribPrev != null ? contribPrev.toFixed(1) : '—'}% → ${contribNow != null ? contribNow.toFixed(1) : '—'}%`,
     meta: inlineVerdict(deltaPP, catChg)
   }))), deteriorating.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83D\uDCC9",
+    icon: "📉",
     title: "Deteriorating This Week",
     accent: "#f59e0b",
     count: deteriorating.length,
-    sub: "weekly Earn down \u226530% vs prior week \u2014 state hasn't flipped yet"
+    sub: "weekly Earn down ≥30% vs prior week — state hasn't flipped yet"
   }, deteriorating.slice(0, 8).map(c => /*#__PURE__*/React.createElement(Row, {
     key: 'det_' + c.campaign,
     id: 'det_' + c.campaign,
@@ -10366,11 +10397,11 @@ function DailyBriefView({
     impactColor: "#f59e0b",
     action: `Spend ${fmt(c.drr?.spend, 'rsk')}/d · state still "${c.earnState}" — investigate before it turns Burning`
   }))), flips.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "\uD83D\uDD01",
+    icon: "🔁",
     title: "State Flips vs Prev Period",
     accent: "#8b5cf6",
     count: flips.length,
-    sub: "were Earning, now Breakeven/Burning \u2014 the real news"
+    sub: "were Earning, now Breakeven/Burning — the real news"
   }, flips.slice(0, 8).map(({
     c,
     prev
@@ -10392,7 +10423,7 @@ function DailyBriefView({
       fontSize: 26,
       marginBottom: 8
     }
-  }, "\u2705"), /*#__PURE__*/React.createElement("div", {
+  }, "✅"), /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#9ca3af',
       fontSize: 13
@@ -10718,7 +10749,7 @@ function ReallocatorView({
       color: '#374151',
       fontSize: 8
     }
-  }, e.category, " \xB7 ", SEG_SHORT[e.seg] || e.seg)), /*#__PURE__*/React.createElement("td", {
+  }, e.category, " · ", SEG_SHORT[e.seg] || e.seg)), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px',
       textAlign: 'right',
@@ -10830,7 +10861,7 @@ function ReallocatorView({
       cursor: 'pointer',
       whiteSpace: 'nowrap'
     }
-  }, "\u2B07 Export Plan")), /*#__PURE__*/React.createElement("div", {
+  }, "⬇ Export Plan")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 8,
@@ -10848,7 +10879,7 @@ function ReallocatorView({
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "rules: same-brand only \xB7 Brand campaigns locked \xB7 GH/GT/Comp pool \xB7 max 15%/donor/cycle \xB7 \u20B9500 budget floor \xB7 receiver gains haircut 20% \xB7 re-run weekly after changes settle")), shown.map(b => /*#__PURE__*/React.createElement(Card, {
+  }, "rules: same-brand only · Brand campaigns locked · GH/GT/Comp pool · max 15%/donor/cycle · ₹500 budget floor · receiver gains haircut 20% · re-run weekly after changes settle")), shown.map(b => /*#__PURE__*/React.createElement(Card, {
     key: b.brand,
     accent: b.net > 0 ? '#22c55e' : '#6b7280',
     style: {
@@ -10873,7 +10904,7 @@ function ReallocatorView({
       color: '#6b7280',
       fontSize: 10
     }
-  }, "only ", b.n, " estimable campaigns \u2014 pool too small to act safely"), b.noReceivers && /*#__PURE__*/React.createElement("span", {
+  }, "only ", b.n, " estimable campaigns — pool too small to act safely"), b.noReceivers && /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#6b7280',
       fontSize: 10
@@ -10942,7 +10973,7 @@ function ReallocatorView({
       fontSize: 10,
       lineHeight: 1.6
     }
-  }, "How marginal ROAS is estimated: each campaign's days are DOW-normalized (Sunday demand \u2260 Tuesday demand), split into spend terciles, and marginal = extra sales \xF7 extra spend between mid and high spend days. It answers \"what does the NEXT rupee buy here\" \u2014 different from average ROAS, which includes the easy first rupees. Estimates are observational; that's why moves are capped at 15% and meant to be re-measured weekly, not done in one shot."));
+  }, "How marginal ROAS is estimated: each campaign's days are DOW-normalized (Sunday demand ≠ Tuesday demand), split into spend terciles, and marginal = extra sales ÷ extra spend between mid and high spend days. It answers \"what does the NEXT rupee buy here\" — different from average ROAS, which includes the easy first rupees. Estimates are observational; that's why moves are capped at 15% and meant to be re-measured weekly, not done in one shot."));
 }
 
 // ─── CPM LADDER ──────────────────────────────────────────────────────────────
@@ -11042,46 +11073,44 @@ function computeEarnAction(c, ladder) {
   if (c.settling) return {
     kind: 'Settling',
     label: '⏸ Settling',
-    detail: `Budget/CPM changed ${c.sinceDays}d ago — wait for 5d of post-change data before the next move`
+    detail: `Budget/CPM changed ${c.sinceDays}d ago — waiting for a full week of post-change data before the next move`
   };
   if (st === 'Burning') {
     if (!c.earnPersist) return {
       kind: 'Watch',
-      label: '👀 Watch',
-      detail: `Burning ${fmt(c.burnPerDay, 'rsk')}/d (week 1) — a third of these self-correct; auto-escalates to Pull if it persists next week`
-    };
-    if (c.earn !== null && c.earn < 0.6) return {
-      kind: 'Pull',
-      label: '✂ Pause',
-      pause: true,
-      detail: `Earn ${c.earn.toFixed(2)} for 2 weeks — no lever bridges a ${Math.round((1 - c.earn) * 100)}% gap. Burning ${fmt(c.burnPerDay, 'rsk')}/d`
+      label: '👀 On the clock',
+      detail: `Burning ${fmt(c.burnPerDay, 'rsk')}/d — 1 bad week. About a third self-correct; becomes a budget cut next week if it persists.`
     };
     const budFloored = curBud !== null && curBud <= 500;
     const cpmFloored = curCpm !== null && curCpm <= 210;
-    if (budFloored && cpmFloored) return {
+    // Pause is HARD-GATED: only Earn Ratio < 0.4, 2 weeks in, AND both levers already at floor (nothing left to cut).
+    if (c.earn !== null && c.earn < 0.4 && budFloored && cpmFloored) return {
       kind: 'Pull',
       label: '✂ Pause ⛔',
       pause: true,
-      detail: `Both levers at platform floors (₹500 budget / ₹200 CPM), still burning ${fmt(c.burnPerDay, 'rsk')}/d — lever-exhausted`
+      detail: `Earn Ratio ${c.earn.toFixed(2)} for 2 weeks, budget & CPM already at floor — nothing left to cut. Burning ${fmt(c.burnPerDay, 'rsk')}/d.`
     };
-    const newBud = curBud ? Math.max(500, rnd5(curBud * 0.5)) : null;
+    // Otherwise reduce ONE lever per cycle — prefer budget (−25% default, slider adjusts); fall to CPM only if budget floored.
+    const newBud = curBud && !budFloored ? Math.max(500, rnd5(curBud * 0.75)) : null; // −25% default (was 0.5)
     const lad6 = ladderFor(6);
-    const newCpm = curCpm ? Math.max(200, lad6 ? Math.min(rnd5(curCpm * 0.9), rnd5(lad6)) : rnd5(curCpm * 0.9)) : null;
-    const parts = [];
-    if (curBud && newBud && newBud < curBud) parts.push(`budget ₹${Math.round(curBud).toLocaleString('en-IN')} → ₹${newBud.toLocaleString('en-IN')}`);
-    if (curCpm && newCpm && newCpm < curCpm - 5) parts.push(`CPM ₹${Math.round(curCpm)} → ₹${newCpm}`);
-    if (!parts.length) return {
-      kind: 'Pull',
-      label: '✂ Pause',
-      pause: true,
-      detail: `Earn ${(c.earn || 0).toFixed(2)} for 2 weeks, burning ${fmt(c.burnPerDay, 'rsk')}/d — no reducible lever left`
-    };
-    return {
+    const newCpm = curCpm && !cpmFloored ? Math.max(200, lad6 ? Math.min(rnd5(curCpm * 0.9), rnd5(lad6)) : rnd5(curCpm * 0.9)) : null;
+    if (newBud && newBud < curBud) return {
       kind: 'Pull',
       label: '✂ Pull',
-      newBudget: curBud && newBud && newBud < curBud ? newBud : null,
-      cpmRatio: curCpm && newCpm && newCpm < curCpm - 5 ? newCpm / curCpm : null,
-      detail: `Earn ${(c.earn || 0).toFixed(2)} for 2 weeks → ${parts.join(' + ')} · re-judged after 5d settling`
+      newBudget: newBud,
+      detail: `Earn Ratio ${(c.earn || 0).toFixed(2)} for 2 weeks → cut budget ₹${Math.round(curBud).toLocaleString('en-IN')} → ₹${newBud.toLocaleString('en-IN')} (−25%, slide to adjust) · re-judged after a week`
+    };
+    if (newCpm && newCpm < curCpm - 5) return {
+      kind: 'Pull',
+      label: '✂ Pull',
+      cpmRatio: newCpm / curCpm,
+      detail: `Earn Ratio ${(c.earn || 0).toFixed(2)} for 2 weeks, budget at floor → lower CPM ₹${Math.round(curCpm)} → ₹${newCpm} · re-judged after a week`
+    };
+    // Levers floored but Earn Ratio ≥ 0.4 — do NOT auto-pause; hold and flag for manual review.
+    return {
+      kind: 'Watch',
+      label: '👀 Holding (at floors)',
+      detail: `Burning ${fmt(c.burnPerDay, 'rsk')}/d but Earn Ratio ${(c.earn || 0).toFixed(2)} ≥ 0.4 and both levers at floor — holding rather than pausing. Review manually.`
     };
   }
   if (st === 'Breakeven') {
@@ -11097,11 +11126,9 @@ function computeEarnAction(c, ladder) {
       label: '🔧 Tune NUR',
       detail: `Only ${(c.nurD * 100).toFixed(0)}% of buyers are new → floor elevated to ${(c.earnFloor || 0).toFixed(2)}x. Audience saturating — refresh/expand keywords toward new users`
     };
-    return {
-      kind: 'Tune',
-      label: '🔧 Tune Conv',
-      detail: `CPM fair, NUR ok — conversion is the drag (Earn ${(c.earn || 0).toFixed(2)}). Review keyword relevance / pack price on PDP`
-    };
+    // Fix-conversion suggestion dropped (Anshul: not actionable in-tool). CPM fair + NUR ok +
+    // weak conversion → no order; campaign stays Breakeven, shown silent (no ✋ row).
+    return null;
   }
 
   // Earning — TRIM first (free margin), then growth levers
@@ -11133,14 +11160,23 @@ function computeEarnAction(c, ladder) {
     };
   }
   if (!budCapped && c.avgPos != null && c.avgPos > 6 && curCpm && c.earn) {
-    const maxCpm = rnd5(curCpm * (c.earn / EARN_HI)); // bid where Earn falls to 1.15
-    const next = Math.min(rnd5(curCpm * 1.2), maxCpm);
-    if (next > curCpm * 1.05) return {
-      kind: 'Scale',
-      label: '⬆ Scale CPM',
-      cpmRatio: next / curCpm,
-      detail: `Earn ${c.earn.toFixed(2)}, rank ${c.avgPos.toFixed(1)}, budget unspent → raise CPM ₹${Math.round(curCpm)} → ₹${next} (+20% step) · Max ₹${maxCpm} before Earn < ${EARN_HI}`
-    };
+    // CPM-responsiveness guard: only bid up if the category ladder shows a higher CPM
+    // can actually win a better rank. Comp keywords are often CPM-insensitive (auction
+    // saturated) — doubling CPM doesn't move position — so don't suggest it there.
+    const L = ladder && ladder[(c.category || '').toLowerCase()];
+    const bestRank = L && L.length ? Math.min(...L.map(x => x.rank)) : null;
+    const cpmResponsive = bestRank != null && bestRank <= c.avgPos - 1; // ladder proves a better rank is buyable
+    const suppress = c.segment === 'Comp' && !cpmResponsive || L && L.length && !cpmResponsive;
+    if (!suppress) {
+      const maxCpm = rnd5(curCpm * (c.earn / EARN_HI)); // bid where Earn Ratio falls to 1.15
+      const next = Math.min(rnd5(curCpm * 1.2), maxCpm);
+      if (next > curCpm * 1.05) return {
+        kind: 'Scale',
+        label: '⬆ Scale CPM',
+        cpmRatio: next / curCpm,
+        detail: `Earn Ratio ${c.earn.toFixed(2)}, rank ${c.avgPos.toFixed(1)}, budget unspent → raise CPM ₹${Math.round(curCpm)} → ₹${next} (+20% step) · Max ₹${maxCpm} before Earn Ratio < ${EARN_HI}`
+      };
+    }
   }
   return null; // demand-capped winner — nothing to buy, stay silent
 }
@@ -11177,12 +11213,13 @@ function getStratMap() {
     return {};
   }
 }
-function setStratTag(campaign, reason) {
+function setStratTag(campaign, reason, days = 30) {
   try {
     const m = getStratMap();
     m[campaign.toLowerCase()] = {
       reason: reason || 'strategic',
-      until: Date.now() + 30 * 864e5,
+      days,
+      until: Date.now() + days * 864e5,
       tagged: Date.now()
     };
     localStorage.setItem(STRAT_KEY, JSON.stringify(m));
@@ -11391,7 +11428,7 @@ function buildWorkOrders(campaigns, kwSnap, stratMap = {}, skipSet = new Set()) 
         display: `Budget ₹${Math.round(c.currentDailyBudget || 0).toLocaleString('en-IN')} → ₹${a.newBudget.toLocaleString('en-IN')}`,
         worth: a.kind === 'Scale' ? `+${fmt((a.newBudget - (c.currentDailyBudget || 0)) * (c.earn || 1), 'rsk')}/d potential` : c.burnPerDay ? `cuts ${fmt(c.burnPerDay * 0.5, 'rsk')}/d burn` : ''
       });
-      if (a.cpmRatio == null) return;
+      return; // one lever per campaign per cycle — a budget order never also emits a bid/remove order
     }
     if (a.pause == null && a.newBudget == null && a.cpmRatio == null) {
       // Tune-NUR / Tune-Conv: human work, no number — still an action item (✋ manual)
@@ -11531,6 +11568,8 @@ function WorkOrderSection({
     });
     // Keyword Bleeders → remove/reprice orders inside HEALTHY campaigns
     kwBleeders.forEach(b => {
+      const bk = (b.campaign || '').toLowerCase();
+      if (taken.has(bk) || stratMap[bk] || defenceSet.has(bk)) return; // one place per campaign — already an order/parked/defended
       const snap = kwSnap[(b.campaign || '').toLowerCase()] || {};
       const cid = campaigns.find(x => x.campaign.toLowerCase() === (b.campaign || '').toLowerCase());
       const removes = [],
@@ -11658,13 +11697,13 @@ function WorkOrderSection({
     style: {
       fontSize: 13
     }
-  }, "\uD83D\uDDC2"), /*#__PURE__*/React.createElement("span", {
+  }, "🗂"), /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#f9fafb',
       fontSize: 12,
       fontWeight: 700
     }
-  }, "Today's Changes \u2014 tick, generate, upload"), /*#__PURE__*/React.createElement("span", {
+  }, "Today's Changes — tick, generate, upload"), /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#3b82f6',
       fontSize: 11,
@@ -11676,7 +11715,7 @@ function WorkOrderSection({
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "files are Blinkit bulk-upload templates \xB7 one set per brand \xB7 click a row for the analyst detail")), Object.entries(byBrand).map(([brand, list]) => /*#__PURE__*/React.createElement("div", {
+  }, "files are Blinkit bulk-upload templates · one set per brand · click a row for the analyst detail")), Object.entries(byBrand).map(([brand, list]) => /*#__PURE__*/React.createElement("div", {
     key: brand,
     style: {
       marginTop: 10
@@ -11712,7 +11751,7 @@ function WorkOrderSection({
       fontWeight: 700,
       cursor: 'pointer'
     }
-  }, "\u2B07 Generate files (", list.filter(o => sel.has(oKey(o))).length, ")")), genMsg[brand] && /*#__PURE__*/React.createElement("div", {
+  }, "⬇ Generate files (", list.filter(o => sel.has(oKey(o))).length, ")")), genMsg[brand] && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#4ade80',
       fontSize: 9,
@@ -11792,13 +11831,25 @@ function WorkOrderSection({
           setStratTick(t => t + 1);
         }
       },
-      title: "Known issue / deliberate spend \u2014 suppress for 30 days",
+      title: "Known issue / deliberate spend — suppress for 30 days",
       style: {
         fontSize: 10,
         cursor: 'pointer',
         color: '#6b7280'
       }
-    }, "\uD83C\uDFF3")), /*#__PURE__*/React.createElement("div", {
+    }, "🏳"), (o.kind === 'Pull' || o.kind === 'Tune') && /*#__PURE__*/React.createElement("span", {
+      onClick: e => {
+        e.stopPropagation();
+        setStratTag(o.campaign, 'acknowledged — recheck in a week', 7);
+        setStratTick(t => t + 1);
+      },
+      title: "Call taken — snooze 7 days, then it comes back",
+      style: {
+        fontSize: 10,
+        cursor: 'pointer',
+        color: '#6b7280'
+      }
+    }, "👍")), /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#9ca3af',
         fontSize: 10,
@@ -11819,11 +11870,20 @@ function WorkOrderSection({
         color: '#93c5fd',
         fontWeight: 700
       }
-    }, "Analyst detail"), " \u2014 ", o.label, ": ", o.detail, o.c.earn != null && /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 Earn ", o.c.earn.toFixed(2), o.c.earnFloor ? ` vs floor ${o.c.earnFloor.toFixed(2)}x` : '', " \xB7 CM1 ", o.c.cm1Pct != null ? (o.c.cm1Pct * 100).toFixed(0) + '%' : '—', " of MRP \xB7 NUR ", o.c.nurD != null ? (o.c.nurD * 100).toFixed(0) + '%' : '—', " \xB7 weekly Earn ", o.c.earnW1 != null ? o.c.earnW1.toFixed(2) : '—', " \u2192 ", o.c.earnW2 != null ? o.c.earnW2.toFixed(2) : '—'), o.rows && /*#__PURE__*/React.createElement(React.Fragment, null, " \xB7 file rows: ", o.rows.slice(0, 6).map(r => `"${r.keyword}"${r.bid ? ` ₹${r.bid}` : ''}`).join(', '), o.rows.length > 6 ? ` +${o.rows.length - 6} more` : ''), !o.campaignId && /*#__PURE__*/React.createElement("span", {
+    }, "Detail"), " — ", o.detail, o.c.earn != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 4,
+        color: '#9ca3af'
+      }
+    }, /*#__PURE__*/React.createElement("b", {
+      style: {
+        color: '#d1d5db'
+      }
+    }, "Earn Ratio ", o.c.earn.toFixed(2)), " · D.ROAS ", o.c.roas != null ? o.c.roas.toFixed(2) + 'x' : '—', " · NUR ", o.c.nurD != null ? (o.c.nurD * 100).toFixed(0) + '%' : '—', " · Spend ", fmt(o.c.drr?.spend, 'rsk'), "/d · Rank ", o.c.avgPos != null ? o.c.avgPos.toFixed(1) : '—', " · CPM ", o.c.avgCpm != null ? fmt(o.c.avgCpm, 'rs') : '—', " · this wk ", o.c.earnW2 != null ? o.c.earnW2.toFixed(2) : '—', " vs last ", o.c.earnW1 != null ? o.c.earnW1.toFixed(2) : '—'), o.rows && /*#__PURE__*/React.createElement(React.Fragment, null, " · file rows: ", o.rows.slice(0, 6).map(r => `"${r.keyword}"${r.bid ? ` ₹${r.bid}` : ''}`).join(', '), o.rows.length > 6 ? ` +${o.rows.length - 6} more` : ''), !o.campaignId && /*#__PURE__*/React.createElement("span", {
       style: {
         color: '#ef4444'
       }
-    }, " \xB7 \u26A0 no campaign ID found \u2014 will be skipped in files"))));
+    }, " · ⚠ no campaign ID found — will be skipped in files"))));
   }))));
 }
 
@@ -12119,7 +12179,7 @@ function ChangeLedgerView({
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "every budget/CPM change found in the data \xB7 impact = 7d after vs 7d before \xB7 alignment = what the verdict said the day before the change")), /*#__PURE__*/React.createElement("div", {
+  }, "every budget/CPM change found in the data · impact = 7d after vs 7d before · alignment = what the verdict said the day before the change")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
@@ -12187,7 +12247,7 @@ function ChangeLedgerView({
         color: '#374151',
         fontSize: 8
       }
-    }, e.brand, " \xB7 ", SEG_SHORT[e.seg] || e.seg)), /*#__PURE__*/React.createElement("td", {
+    }, e.brand, " · ", SEG_SHORT[e.seg] || e.seg)), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         whiteSpace: 'nowrap'
@@ -12198,7 +12258,7 @@ function ChangeLedgerView({
         fontSize: 10,
         fontWeight: 600
       }
-    }, e.kind, " \u20B9", Math.round(e.from).toLocaleString('en-IN'), " \u2192 \u20B9", Math.round(e.to).toLocaleString('en-IN'))), /*#__PURE__*/React.createElement("td", {
+    }, e.kind, " ₹", Math.round(e.from).toLocaleString('en-IN'), " → ₹", Math.round(e.to).toLocaleString('en-IN'))), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px'
       }
@@ -12242,14 +12302,14 @@ function ChangeLedgerView({
         color: '#9ca3af',
         fontSize: 10
       }
-    }, e.preRoas != null ? e.preRoas.toFixed(2) : '—', " \u2192 ", e.postRoas != null ? e.postRoas.toFixed(2) : '—'), /*#__PURE__*/React.createElement("td", {
+    }, e.preRoas != null ? e.preRoas.toFixed(2) : '—', " → ", e.postRoas != null ? e.postRoas.toFixed(2) : '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 10px',
         textAlign: 'right',
         color: '#9ca3af',
         fontSize: 10
       }
-    }, e.preRank != null ? e.preRank.toFixed(1) : '—', " \u2192 ", e.postRank != null ? e.postRank.toFixed(1) : '—'));
+    }, e.preRank != null ? e.preRank.toFixed(1) : '—', " → ", e.postRank != null ? e.postRank.toFixed(1) : '—'));
   }), shown.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
     colSpan: 10,
     style: {
@@ -12387,7 +12447,7 @@ function CompTrackerView({
       style: {
         color: '#374151'
       }
-    }, "\u2014");
+    }, "—");
     const bad = badWhenUp ? v > 0 : v < 0;
     const col = Math.abs(v) < (fmt === 'pp' ? 0.3 : 3) ? '#6b7280' : bad ? '#ef4444' : '#22c55e';
     const txt = fmt === 'pp' ? `${v > 0 ? '+' : ''}${v.toFixed(1)}` : `${v > 0 ? '+' : ''}${v.toFixed(0)}%`;
@@ -12474,7 +12534,7 @@ function CompTrackerView({
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "current 14d vs prior 14d \xB7 heat = comp-keyword CPM inflation + rank slips + new-user loss \xB7 \uD83C\uDF19 daypart squeezes are soft-flagged in alerts, not here")), /*#__PURE__*/React.createElement("div", {
+  }, "current 14d vs prior 14d · heat = comp-keyword CPM inflation + rank slips + new-user loss · 🌙 daypart squeezes are soft-flagged in alerts, not here")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
@@ -12723,12 +12783,12 @@ function OpportunitiesView({
       fontSize: 24,
       marginBottom: 8
     }
-  }, "\uD83D\uDCE1"), /*#__PURE__*/React.createElement("div", {
+  }, "📡"), /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#9ca3af',
       fontSize: 13
     }
-  }, "BK Import Search volume data not loaded \u2014 check the sheet tab is accessible, then \u21BA Refresh."));
+  }, "BK Import Search volume data not loaded — check the sheet tab is accessible, then ↺ Refresh."));
   const expBrands = [...new Set(opps.expansion.map(e => e.compBrand).filter(b => b && b !== 'Generic'))].sort();
   const exp = opps.expansion.slice(0, 60);
   const und = (brandF.length ? opps.underfed.filter(u => brandF.includes(u.brand)) : opps.underfed).slice(0, 40);
@@ -12800,13 +12860,13 @@ function OpportunitiesView({
       fontWeight: 700,
       marginBottom: 8
     }
-  }, "\uD83C\uDFAF Expansion \u2014 searched on Blinkit, not targeted by us ", /*#__PURE__*/React.createElement("span", {
+  }, "🎯 Expansion — searched on Blinkit, not targeted by us ", /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       fontWeight: 400
     }
-  }, "\xB7 volume \u226550 searches/d \xB7 sorted by demand")), /*#__PURE__*/React.createElement("div", {
+  }, "· volume ≥50 searches/d · sorted by demand")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       maxHeight: '34vh',
@@ -12903,13 +12963,13 @@ function OpportunitiesView({
       fontSize: 12,
       fontWeight: 700
     }
-  }, "\uD83C\uDF7D Underfed Winners \u2014 strong ROAS, starved of spend ", /*#__PURE__*/React.createElement("span", {
+  }, "🍽 Underfed Winners — strong ROAS, starved of spend ", /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       fontWeight: 400
     }
-  }, "\xB7 ROAS \u22653x, spend <\u20B9300/d, demand confirmed where volume known")), /*#__PURE__*/React.createElement("div", {
+  }, "· ROAS ≥3x, spend <₹300/d, demand confirmed where volume known")), /*#__PURE__*/React.createElement("div", {
     style: {
       marginLeft: 'auto'
     }
@@ -12965,7 +13025,7 @@ function OpportunitiesView({
       color: '#9ca3af',
       fontSize: 10
     }
-  }, u.brand, " \xB7 ", u.category), /*#__PURE__*/React.createElement("td", {
+  }, u.brand, " · ", u.category), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '5px 10px',
       textAlign: 'right',
@@ -13123,45 +13183,45 @@ function HelpView() {
     }
   }, /*#__PURE__*/React.createElement(Box, {
     accent: "#3b82f6"
-  }, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDC4B Read this once. You'll be fine."), /*#__PURE__*/React.createElement(P, null, "This dashboard does the thinking. You do two things every morning: open ", /*#__PURE__*/React.createElement(Hi, null, "\u2301 Daily Brief"), ", then glance at ", /*#__PURE__*/React.createElement(Hi, null, "Spike Radar"), ". Both tell you exactly what to do in plain words. Total time: ", /*#__PURE__*/React.createElement(Hi, {
+  }, /*#__PURE__*/React.createElement(H, null, "👋 Read this once. You'll be fine."), /*#__PURE__*/React.createElement(P, null, "This dashboard does the thinking. You do two things every morning: open ", /*#__PURE__*/React.createElement(Hi, null, "⌁ Daily Brief"), ", then glance at ", /*#__PURE__*/React.createElement(Hi, null, "Spike Radar"), ". Both tell you exactly what to do in plain words. Total time: ", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, "5 minutes"), ". Everything else in the dashboard is optional deep-diving \u2014 ignore it until you need it.")), /*#__PURE__*/React.createElement(Box, {
+  }, "5 minutes"), ". Everything else in the dashboard is optional deep-diving — ignore it until you need it.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#22c55e"
-  }, /*#__PURE__*/React.createElement(H, null, "\u2600\uFE0F Your 5-minute morning"), /*#__PURE__*/React.createElement(Step, {
+  }, /*#__PURE__*/React.createElement(H, null, "☀️ Your 5-minute morning"), /*#__PURE__*/React.createElement(Step, {
     n: "1",
-    title: "Open Daily Brief \u2014 read each suggestion, tick what you accept"
-  }, "Every row is one change, in plain words: ", /*#__PURE__*/React.createElement(Hi, null, "Pause"), ", ", /*#__PURE__*/React.createElement(Hi, null, "Budget \u20B92,000 \u2192 \u20B91,000"), ", ", /*#__PURE__*/React.createElement(Hi, null, "Bids \u221225%"), ",", /*#__PURE__*/React.createElement(Hi, null, "Remove 2 keywords"), ". \u26A1 orange rows = a competitor attacked in the last 2 days, defend first. Curious why? Click the row \u2014 the full explanation opens. You never have to calculate anything."), /*#__PURE__*/React.createElement(Step, {
+    title: "Open Daily Brief — read each suggestion, tick what you accept"
+  }, "Every row is one change, in plain words: ", /*#__PURE__*/React.createElement(Hi, null, "Pause"), ", ", /*#__PURE__*/React.createElement(Hi, null, "Budget ₹2,000 → ₹1,000"), ", ", /*#__PURE__*/React.createElement(Hi, null, "Bids −25%"), ",", /*#__PURE__*/React.createElement(Hi, null, "Remove 2 keywords"), ". ⚡ orange rows = a competitor attacked in the last 2 days, defend first. Curious why? Click the row — the full explanation opens. You never have to calculate anything."), /*#__PURE__*/React.createElement(Step, {
     n: "2",
     title: "Press 'Generate files' under each brand"
-  }, "The dashboard downloads ready-made files (e.g. ", /*#__PURE__*/React.createElement(Hi, null, "BB_pause_04Jul.csv"), "). Upload each file in that brand's Blinkit ", /*#__PURE__*/React.createElement(Hi, null, "bulk update"), " panel \u2014 BB files into Be Bodywise, MM into Man Matters, LJ into Little Joys. That's it."), /*#__PURE__*/React.createElement(Step, {
+  }, "The dashboard downloads ready-made files (e.g. ", /*#__PURE__*/React.createElement(Hi, null, "BB_pause_04Jul.csv"), "). Upload each file in that brand's Blinkit ", /*#__PURE__*/React.createElement(Hi, null, "bulk update"), " panel — BB files into Be Bodywise, MM into Man Matters, LJ into Little Joys. That's it."), /*#__PURE__*/React.createElement(Step, {
     n: "3",
-    title: "\u270B rows = do by hand"
-  }, "A few rows can't go in a file (Blinkit has no bulk template for them) \u2014 those say \u270B and tell you exactly what to change in the panel. Tick them when done. Then Spike Radar \uD83D\uDD34/\uD83D\uDFE0 rows, and you're finished.")), /*#__PURE__*/React.createElement(Box, {
+    title: "✋ rows = do by hand"
+  }, "A few rows can't go in a file (Blinkit has no bulk template for them) — those say ✋ and tell you exactly what to change in the panel. Tick them when done. Then Spike Radar 🔴/🟠 rows, and you're finished.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#8b5cf6"
-  }, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDDFA Two tabs \u2014 the whole map"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\u2301 Daily Brief"), " = things to DO. Every row is tickable, every tick becomes a file (or a \u270B hand-task). The number on the tab = how many changes are waiting. If it's empty, nothing needs you today."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\uD83D\uDC40 Watching"), " = things BREWING. Nothing there needs action \u2014 first-bad-week campaigns, market dips, slipping trends. When something gets bad enough for long enough, it ", /*#__PURE__*/React.createElement(Hi, {
+  }, /*#__PURE__*/React.createElement(H, null, "🗺 Two tabs — the whole map"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "⌁ Daily Brief"), " = things to DO. Every row is tickable, every tick becomes a file (or a ✋ hand-task). The number on the tab = how many changes are waiting. If it's empty, nothing needs you today."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "👀 Watching"), " = things BREWING. Nothing there needs action — first-bad-week campaigns, market dips, slipping trends. When something gets bad enough for long enough, it ", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, "moves to the Daily Brief by itself"), ". You never have to promote anything manually."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\uD83C\uDFF3 Strategic"), " \u2014 see a suggestion you're deliberately ignoring (a conquesting war, a launch you're funding)? Click the little \uD83C\uDFF3 flag on the row, type the reason. It stops nagging for 30 days, but the money it burns stays visible in Watching with your reason attached \u2014 so month-end reviews answer themselves.")), /*#__PURE__*/React.createElement(Box, {
+  }, "moves to the Daily Brief by itself"), ". You never have to promote anything manually."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "🏳 Strategic"), " — see a suggestion you're deliberately ignoring (a conquesting war, a launch you're funding)? Click the little 🏳 flag on the row, type the reason. It stops nagging for 30 days, but the money it burns stays visible in Watching with your reason attached — so month-end reviews answer themselves.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#3b82f6"
-  }, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDC54 For executives \u2014 the 10-minute weekly read"), /*#__PURE__*/React.createElement(Step, {
+  }, /*#__PURE__*/React.createElement(H, null, "👔 For executives — the 10-minute weekly read"), /*#__PURE__*/React.createElement(Step, {
     n: "1",
     title: "Daily Brief, top cards only"
-  }, "\"Burning Now\" = profit leaking per day (Earn engine). \"\u20B9 At Risk\" = new problems this week. Both small? The account is healthy \u2014 you can stop here."), /*#__PURE__*/React.createElement(Step, {
+  }, "\"Burning Now\" = profit leaking per day (Earn engine). \"₹ At Risk\" = new problems this week. Both small? The account is healthy — you can stop here."), /*#__PURE__*/React.createElement(Step, {
     n: "2",
-    title: "Fix List \u2014 read the top 5 rows"
+    title: "Fix List — read the top 5 rows"
   }, "The biggest leaks, biggest first, fix written on each. One question to ask the team: \"was this done?\""), /*#__PURE__*/React.createElement(Step, {
     n: "3",
-    title: "Spike Radar \u2014 summary cards"
+    title: "Spike Radar — summary cards"
   }, "\"Drawn Over Budget MTD\" = money Blinkit already took beyond plan this month. Red count = it's happening right now."), /*#__PURE__*/React.createElement(Step, {
     n: "4",
-    title: "\u23F3 No Action \u2014 the accountability tab"
-  }, "Anything here is a known problem nobody acted on, with the \u20B9 burned counter running. Should be empty."), /*#__PURE__*/React.createElement(Step, {
+    title: "⏳ No Action — the accountability tab"
+  }, "Anything here is a known problem nobody acted on, with the ₹ burned counter running. Should be empty."), /*#__PURE__*/React.createElement(Step, {
     n: "5",
     title: "Detail? One click"
-  }, "\u2B07 Export Excel gives every list as a filterable sheet. No need to learn the dashboard.")), /*#__PURE__*/React.createElement(Box, {
+  }, "⬇ Export Excel gives every list as a filterable sheet. No need to learn the dashboard.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#3b82f6"
-  }, /*#__PURE__*/React.createElement(H, null, "\u2696 Earn Ratio \u2014 the one number that runs the show (new)"), /*#__PURE__*/React.createElement(P, null, "Every campaign now carries a single number: ", /*#__PURE__*/React.createElement(Hi, null, "Earn"), ". It answers one question honestly:", /*#__PURE__*/React.createElement(Hi, {
+  }, /*#__PURE__*/React.createElement(H, null, "⚖ Earn Ratio — the one number that runs the show (new)"), /*#__PURE__*/React.createElement(P, null, "Every campaign now carries a single number: ", /*#__PURE__*/React.createElement(Hi, null, "Earn"), ". It answers one question honestly:", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, " is this ad making us real profit \u2014 after our product margin, and counting the future orders of the NEW customers it wins?")), /*#__PURE__*/React.createElement(P, null, "How it's built, in one breath: your product margin (CM1, per brand \xD7 category, fed live from the sheet) says how many \u20B9 of sales it takes to earn \u20B91 of profit. Then, because a ", /*#__PURE__*/React.createElement(Hi, null, "new customer"), " comes back (~2.2 orders over time) while a repeat buyer is just one order, campaigns that actually acquire new users get an easier bar. That bar is the campaign's ", /*#__PURE__*/React.createElement(Hi, null, "floor"), ". ", /*#__PURE__*/React.createElement(Hi, null, "Earn = Direct ROAS \xF7 floor.")), /*#__PURE__*/React.createElement("div", {
+  }, " is this ad making us real profit — after our product margin, and counting the future orders of the NEW customers it wins?")), /*#__PURE__*/React.createElement(P, null, "How it's built, in one breath: your product margin (CM1, per brand × category, fed live from the sheet) says how many ₹ of sales it takes to earn ₹1 of profit. Then, because a ", /*#__PURE__*/React.createElement(Hi, null, "new customer"), " comes back (~2.2 orders over time) while a repeat buyer is just one order, campaigns that actually acquire new users get an easier bar. That bar is the campaign's ", /*#__PURE__*/React.createElement(Hi, null, "floor"), ". ", /*#__PURE__*/React.createElement(Hi, null, "Earn = Direct ROAS ÷ floor.")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
@@ -13189,49 +13249,49 @@ function HelpView() {
       fontSize: 11,
       lineHeight: 1.6
     }
-  }, text)))), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Read it instantly:"), " 1.0 = the ad exactly pays for itself. 1.8 = every rupee brings back \u20B91.80 of what it needs to. 0.5 = half the money is not coming back. Because each campaign is judged against", /*#__PURE__*/React.createElement(Hi, null, " its own"), " category margin and ", /*#__PURE__*/React.createElement(Hi, null, "its own"), " new-customer mix, an Earn of 1.2 means the same thing on Creatine as on Foot Cream \u2014 even though their breakeven ROAS differ 2x."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The actions write themselves:"), " ", /*#__PURE__*/React.createElement(Hi, {
+  }, text)))), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Read it instantly:"), " 1.0 = the ad exactly pays for itself. 1.8 = every rupee brings back ₹1.80 of what it needs to. 0.5 = half the money is not coming back. Because each campaign is judged against", /*#__PURE__*/React.createElement(Hi, null, " its own"), " category margin and ", /*#__PURE__*/React.createElement(Hi, null, "its own"), " new-customer mix, an Earn of 1.2 means the same thing on Creatine as on Foot Cream — even though their breakeven ROAS differ 2x."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The actions write themselves:"), " ", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, "\u2B06 Scale"), " (winner + room to grow \u2014 budget step sized by how big the buffer is, capped at proven demand) \xB7 ", /*#__PURE__*/React.createElement(Hi, {
+  }, "⬆ Scale"), " (winner + room to grow — budget step sized by how big the buffer is, capped at proven demand) · ", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, "\uD83D\uDCB0 Trim"), " (winning top-6 rank but overpaying vs the category price ladder \u2014 lower CPM, same rank, free margin) \xB7 ", /*#__PURE__*/React.createElement(Hi, {
+  }, "💰 Trim"), " (winning top-6 rank but overpaying vs the category price ladder — lower CPM, same rank, free margin) · ", /*#__PURE__*/React.createElement(Hi, {
     color: "#f59e0b"
-  }, "\uD83D\uDD27 Tune"), " \xB7", /*#__PURE__*/React.createElement(Hi, {
+  }, "🔧 Tune"), " ·", /*#__PURE__*/React.createElement(Hi, {
     color: "#f59e0b"
-  }, " \uD83D\uDC40 Watch"), " \xB7 ", /*#__PURE__*/React.createElement(Hi, {
+  }, " 👀 Watch"), " · ", /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "\u2702 Pull"), ". Every number respects the platform floors (budget \u2265\u20B9500, CPM \u2265\u20B9200); if both levers are exhausted it says Pause, never \"reduce 25%\"."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, "✂ Pull"), ". Every number respects the platform floors (budget ≥₹500, CPM ≥₹200); if both levers are exhausted it says Pause, never \"reduce 25%\"."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#2dd4bf"
-  }, "Spotlight is different"), " \u2014 Blinkit gives it no sales data, so it's judged on", /*#__PURE__*/React.createElement(Hi, null, " CCI"), " (cost per click vs category peers): Efficient / Pricey / Waste. A 0.04% CTR means 1 click per 2,500 views \u2014 that's an audience problem, not a bidding problem.")), /*#__PURE__*/React.createElement(Box, {
+  }, "Spotlight is different"), " — Blinkit gives it no sales data, so it's judged on", /*#__PURE__*/React.createElement(Hi, null, " CCI"), " (cost per click vs category peers): Efficient / Pricey / Waste. A 0.04% CTR means 1 click per 2,500 views — that's an audience problem, not a bidding problem.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#f59e0b"
-  }, /*#__PURE__*/React.createElement(H, null, "\u2301 Daily Brief \u2014 what each box means"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The chips on each row"), " tell you the change type: ", /*#__PURE__*/React.createElement(Hi, {
+  }, /*#__PURE__*/React.createElement(H, null, "⌁ Daily Brief — what each box means"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The chips on each row"), " tell you the change type: ", /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "Pause"), " \xB7", /*#__PURE__*/React.createElement(Hi, {
+  }, "Pause"), " ·", /*#__PURE__*/React.createElement(Hi, {
     color: "#f59e0b"
-  }, " Budget \u20B9X \u2192 \u20B9Y"), " \xB7 ", /*#__PURE__*/React.createElement(Hi, {
+  }, " Budget ₹X → ₹Y"), " · ", /*#__PURE__*/React.createElement(Hi, {
     color: "#93c5fd"
-  }, "Bids \xB1%"), " \xB7 ", /*#__PURE__*/React.createElement(Hi, null, "Remove keywords"), " \xB7", /*#__PURE__*/React.createElement(Hi, {
+  }, "Bids ±%"), " · ", /*#__PURE__*/React.createElement(Hi, null, "Remove keywords"), " ·", /*#__PURE__*/React.createElement(Hi, {
     color: "#f97316"
-  }, " \u26A1 Defend"), " (competitor attacked in the last 2 days \u2014 these sort first) \xB7", /*#__PURE__*/React.createElement(Hi, null, " \u270B manual"), " (no bulk template exists \u2014 do it in the panel)."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, " ⚡ Defend"), " (competitor attacked in the last 2 days — these sort first) ·", /*#__PURE__*/React.createElement(Hi, null, " ✋ manual"), " (no bulk template exists — do it in the panel)."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "\u26A0 Sudden changes"), " that have a safe counter-move are already \u26A1 rows here. The rest (market dips, patterns, positions not worth defending) are informational \u2014 they live in \uD83D\uDC40 Watching."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Where do suggestions come from?"), " The Earn engine: a campaign that's been losing real profit for 2 straight weeks gets a Pause/Budget row. One that's breakeven gets a Tune row naming the exact drag. A winner holding top rank while overpaying gets a Trim. A winner starved of budget gets a Scale. Healthy campaigns produce no rows at all \u2014 silence means fine."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, "⚠ Sudden changes"), " that have a safe counter-move are already ⚡ rows here. The rest (market dips, patterns, positions not worth defending) are informational — they live in 👀 Watching."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Where do suggestions come from?"), " The Earn engine: a campaign that's been losing real profit for 2 straight weeks gets a Pause/Budget row. One that's breakeven gets a Tune row naming the exact drag. A winner holding top rank while overpaying gets a Trim. A winner starved of budget gets a Scale. Healthy campaigns produce no rows at all — silence means fine."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "\uD83D\uDCE6 Qty Drops"), " \u2014 keywords selling fewer units than last month. The key number is", /*#__PURE__*/React.createElement(Hi, null, " \"pp share\""), " \u2014 did this keyword's SHARE of the category's sales fall, or did the whole category just have a slow month?", /*#__PURE__*/React.createElement(Hi, {
+  }, "📦 Qty Drops"), " — keywords selling fewer units than last month. The key number is", /*#__PURE__*/React.createElement(Hi, null, " \"pp share\""), " — did this keyword's SHARE of the category's sales fall, or did the whole category just have a slow month?", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
   }, " \"INLINE with category dip\""), " = market slowed, ads are fine, don't panic.", /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, " \"share lost\""), " = competitors or rank took your sales \u2014 act on that one."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, " \"share lost\""), " = competitors or rank took your sales — act on that one."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "\uD83D\uDCB8 Revert Budget Hikes"), " \u2014 you raised a budget recently, and the extra money is NOT bringing extra sales. Put the budget back to what it was."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, "💸 Revert Budget Hikes"), " — you raised a budget recently, and the extra money is NOT bringing extra sales. Put the budget back to what it was."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#f59e0b"
-  }, "\uD83D\uDCC9 Deteriorating"), " \u2014 campaigns getting worse this week, but not bad enough to cut yet. Watch them."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, "📉 Deteriorating"), " — campaigns getting worse this week, but not bad enough to cut yet. Watch them."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#8b5cf6"
-  }, "\uD83D\uDD01 Verdict Flips"), " \u2014 campaigns that were healthy last month and turned bad this month. The real news."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, "🔁 Verdict Flips"), " — campaigns that were healthy last month and turned bad this month. The real news."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, "\u2B06 Scale & Trim"), " \u2014 your winners, ranked by \u20B9 opportunity. Each row gives the exact number: raise the ", /*#__PURE__*/React.createElement(Hi, null, "budget"), " (money is the limit \u2014 step sized by how big the Earn buffer is), raise the ", /*#__PURE__*/React.createElement(Hi, null, "CPM"), "(visibility is the limit \u2014 never past the Max CPM shown), or ", /*#__PURE__*/React.createElement(Hi, {
+  }, "⬆ Scale & Trim"), " — your winners, ranked by ₹ opportunity. Each row gives the exact number: raise the ", /*#__PURE__*/React.createElement(Hi, null, "budget"), " (money is the limit — step sized by how big the Earn buffer is), raise the ", /*#__PURE__*/React.createElement(Hi, null, "CPM"), "(visibility is the limit — never past the Max CPM shown), or ", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, "\uD83D\uDCB0 Trim"), " (holding top rank while overpaying \u2014 lower the bid, keep the rank, pocket the margin)."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\u2B07 Export Excel"), " \u2014 everything above as a spreadsheet, one sheet per box, with filters. The top row of big sheets recalculates totals when you filter. Use it for deep dives or sharing.")), /*#__PURE__*/React.createElement(Box, {
+  }, "💰 Trim"), " (holding top rank while overpaying — lower the bid, keep the rank, pocket the margin)."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "⬇ Export Excel"), " — everything above as a spreadsheet, one sheet per box, with filters. The top row of big sheets recalculates totals when you filter. Use it for deep dives or sharing.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#8b5cf6"
-  }, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDCE1 Spike Radar \u2014 the piggy bank story"), /*#__PURE__*/React.createElement(P, null, "Blinkit's billing has a quirk. If your budget is \u20B92,000/day and the campaign only spends \u20B91,200 today, the unspent ", /*#__PURE__*/React.createElement(Hi, null, "\u20B9800 doesn't disappear \u2014 it goes into a piggy bank"), " (called the surplus). Blinkit is allowed to break that piggy bank later and spend it ON TOP of your daily budget \u2014 usually at month end, and usually at worse returns. That's how months get overspent \"without anyone touching anything\"."), /*#__PURE__*/React.createElement(P, null, "Spike Radar watches every campaign's piggy bank and tells you what's about to happen, traffic-light style:"), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(H, null, "📡 Spike Radar — the piggy bank story"), /*#__PURE__*/React.createElement(P, null, "Blinkit's billing has a quirk. If your budget is ₹2,000/day and the campaign only spends ₹1,200 today, the unspent ", /*#__PURE__*/React.createElement(Hi, null, "₹800 doesn't disappear — it goes into a piggy bank"), " (called the surplus). Blinkit is allowed to break that piggy bank later and spend it ON TOP of your daily budget — usually at month end, and usually at worse returns. That's how months get overspent \"without anyone touching anything\"."), /*#__PURE__*/React.createElement(P, null, "Spike Radar watches every campaign's piggy bank and tells you what's about to happen, traffic-light style:"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
@@ -13259,73 +13319,73 @@ function HelpView() {
       fontSize: 11,
       lineHeight: 1.6
     }
-  }, text)))), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The calculator (last 2 columns):"), " type what you actually WANT to spend per day into ", /*#__PURE__*/React.createElement(Hi, null, "\"Desired/d\""), ". The ", /*#__PURE__*/React.createElement(Hi, null, "\"Set To\""), " column instantly shows the number to enter in Blinkit. Yes, it will be higher than what you typed \u2014 that's on purpose: the gap is where the piggy bank drains out gently. Trust the number."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Click any row"), " to see the story in one line (\"built \u20B938K surplus over 14 days, Blinkit took \u20B922K back\u2026\") plus a chart \u2014 grey bars are budget, blue bars are spend, ", /*#__PURE__*/React.createElement(Hi, {
+  }, text)))), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The calculator (last 2 columns):"), " type what you actually WANT to spend per day into ", /*#__PURE__*/React.createElement(Hi, null, "\"Desired/d\""), ". The ", /*#__PURE__*/React.createElement(Hi, null, "\"Set To\""), " column instantly shows the number to enter in Blinkit. Yes, it will be higher than what you typed — that's on purpose: the gap is where the piggy bank drains out gently. Trust the number."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Click any row"), " to see the story in one line (\"built ₹38K surplus over 14 days, Blinkit took ₹22K back…\") plus a chart — grey bars are budget, blue bars are spend, ", /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
   }, "red bars are days Blinkit overspent your budget"), ".")), /*#__PURE__*/React.createElement(Box, {
     accent: "#22c55e"
-  }, /*#__PURE__*/React.createElement(H, null, "\u21C4 Reallocator \u2014 same money, more sales"), /*#__PURE__*/React.createElement(P, null, "Some campaigns have squeezed their market dry \u2014 giving them MORE money buys almost nothing extra. Others still convert every extra rupee well. The Reallocator finds both, using each campaign's own history, and says: ", /*#__PURE__*/React.createElement(Hi, null, "\"take \u20B9X/day from these (DONORS), give it to these (RECEIVERS)\""), " \u2014 with the new budget numbers written out."), /*#__PURE__*/React.createElement(P, null, "Hard rules it never breaks: money never crosses brands \xB7 Brand campaigns are never touched \xB7 only Gen Head / Gen Tail / Comp search campaigns play \xB7 max 15% moved from any campaign at a time \xB7 no budget goes below \u20B9500. Run it ", /*#__PURE__*/React.createElement(Hi, null, "once a week"), ": make the moves, let a week pass, run again."), /*#__PURE__*/React.createElement(P, null, "The key number is ", /*#__PURE__*/React.createElement(Hi, null, "Marginal ROAS"), " \u2014 what the NEXT rupee buys (different from average ROAS, which includes the easy first rupees). Donor at 0.6x + receiver at 3x = same money working 5x harder.")), /*#__PURE__*/React.createElement(Box, {
+  }, /*#__PURE__*/React.createElement(H, null, "⇄ Reallocator — same money, more sales"), /*#__PURE__*/React.createElement(P, null, "Some campaigns have squeezed their market dry — giving them MORE money buys almost nothing extra. Others still convert every extra rupee well. The Reallocator finds both, using each campaign's own history, and says: ", /*#__PURE__*/React.createElement(Hi, null, "\"take ₹X/day from these (DONORS), give it to these (RECEIVERS)\""), " — with the new budget numbers written out."), /*#__PURE__*/React.createElement(P, null, "Hard rules it never breaks: money never crosses brands · Brand campaigns are never touched · only Gen Head / Gen Tail / Comp search campaigns play · max 15% moved from any campaign at a time · no budget goes below ₹500. Run it ", /*#__PURE__*/React.createElement(Hi, null, "once a week"), ": make the moves, let a week pass, run again."), /*#__PURE__*/React.createElement(P, null, "The key number is ", /*#__PURE__*/React.createElement(Hi, null, "Marginal ROAS"), " — what the NEXT rupee buys (different from average ROAS, which includes the easy first rupees). Donor at 0.6x + receiver at 3x = same money working 5x harder.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#ef4444"
-  }, /*#__PURE__*/React.createElement(H, null, "\u2694 Comp Tracker \xB7 \uD83D\uDCD2 Change Impact \xB7 \uD83D\uDCA1 Opportunities"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, /*#__PURE__*/React.createElement(H, null, "⚔ Comp Tracker · 📒 Change Impact · 💡 Opportunities"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "\u2694 Comp Tracker"), " \u2014 one heat score per category: are competitors pushing? Heat combines rising CPMs on competitor keywords, our rank slipping, and new customers lost. Red (60+) = active bid war \u2014 defend your hero keywords. Green = quiet. Also shows ", /*#__PURE__*/React.createElement(Hi, null, "new customers gained per day"), " vs the previous 2 weeks."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, "⚔ Comp Tracker"), " — one heat score per category: are competitors pushing? Heat combines rising CPMs on competitor keywords, our rank slipping, and new customers lost. Red (60+) = active bid war — defend your hero keywords. Green = quiet. Also shows ", /*#__PURE__*/React.createElement(Hi, null, "new customers gained per day"), " vs the previous 2 weeks."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#3b82f6"
-  }, "\uD83D\uDCD2 Change Impact"), " \u2014 every budget/CPM change anyone made (found automatically in the data), what happened in the 7 days after, and whether the dashboard had suggested it.", /*#__PURE__*/React.createElement(Hi, {
+  }, "📒 Change Impact"), " — every budget/CPM change anyone made (found automatically in the data), what happened in the 7 days after, and whether the dashboard had suggested it.", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, " \u2713 Aligned"), " = change matched the verdict. ", /*#__PURE__*/React.createElement(Hi, {
+  }, " ✓ Aligned"), " = change matched the verdict. ", /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "\u2717 Contrary"), " = went against it. Compare the average impact of each \u2014 that's the proof of whether following the system pays."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, "✗ Contrary"), " = went against it. Compare the average impact of each — that's the proof of whether following the system pays."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, "\uD83D\uDCA1 Opportunities"), " \u2014 built from real Blinkit search volume (the BK Import Search tab). Two lists: ", /*#__PURE__*/React.createElement(Hi, null, "Expansion"), " = people search it, we don't target it. ", /*#__PURE__*/React.createElement(Hi, null, "Underfed"), " = we target it, it converts great, but we barely spend on it. Both sorted so the biggest misses are on top."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\uD83C\uDF19 on an alert"), " = impressions dropped but rank and hours stayed flat \u2014 the ad probably served at night after competitor budgets died. Not a real loss yet; the alert is softened and waits one more day before escalating.")), /*#__PURE__*/React.createElement(Box, null, /*#__PURE__*/React.createElement(H, null, "\uD83D\uDCD6 Words, translated"), /*#__PURE__*/React.createElement(Word, {
+  }, "💡 Opportunities"), " — built from real Blinkit search volume (the BK Import Search tab). Two lists: ", /*#__PURE__*/React.createElement(Hi, null, "Expansion"), " = people search it, we don't target it. ", /*#__PURE__*/React.createElement(Hi, null, "Underfed"), " = we target it, it converts great, but we barely spend on it. Both sorted so the biggest misses are on top."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "🌙 on an alert"), " = impressions dropped but rank and hours stayed flat — the ad probably served at night after competitor budgets died. Not a real loss yet; the alert is softened and waits one more day before escalating.")), /*#__PURE__*/React.createElement(Box, null, /*#__PURE__*/React.createElement(H, null, "📖 Words, translated"), /*#__PURE__*/React.createElement(Word, {
     w: "Spend/d"
   }, "Money spent per day, on average."), /*#__PURE__*/React.createElement(Word, {
     w: "D.ROAS"
-  }, "For every \u20B91 of ads, how many \u20B9 of sales came back. 2.0x = \u20B92 back per \u20B91 spent. Higher = better."), /*#__PURE__*/React.createElement(Word, {
+  }, "For every ₹1 of ads, how many ₹ of sales came back. 2.0x = ₹2 back per ₹1 spent. Higher = better."), /*#__PURE__*/React.createElement(Word, {
     w: "NUR"
   }, "Out of everyone who bought, how many were NEW customers. 60% = 6 of 10 buyers never bought before."), /*#__PURE__*/React.createElement(Word, {
     w: "CPM"
-  }, "What you pay for 1,000 people to see the ad. It's your bid \u2014 raise it to show up more / higher."), /*#__PURE__*/React.createElement(Word, {
+  }, "What you pay for 1,000 people to see the ad. It's your bid — raise it to show up more / higher."), /*#__PURE__*/React.createElement(Word, {
     w: "Rank"
   }, "Your average position on the page. 1 = top. Bigger number = buried lower."), /*#__PURE__*/React.createElement(Word, {
-    w: "\u0394 Contribution (pp)"
-  }, "How much of the category's total sales this keyword used to bring vs now, in percentage points. -2pp = it used to deliver 6% of sales, now 4% \u2014 someone took that share."), /*#__PURE__*/React.createElement(Word, {
+    w: "Δ Contribution (pp)"
+  }, "How much of the category's total sales this keyword used to bring vs now, in percentage points. -2pp = it used to deliver 6% of sales, now 4% — someone took that share."), /*#__PURE__*/React.createElement(Word, {
     w: "Marginal ROAS"
   }, "What the NEXT rupee buys in a campaign. Average ROAS counts the easy first rupees; marginal tells you if adding more money still works."), /*#__PURE__*/React.createElement(Word, {
     w: "Peer (P-number)"
-  }, "P78 = this campaign beats 78% of its same-segment siblings on ROAS. Low P in a stable segment = campaign problem. Everyone low at once = market problem (look for \uD83C\uDF10)."), /*#__PURE__*/React.createElement(Word, {
-    w: "\u21BA / \u23F3 on verdict"
-  }, "\u21BA = budget/CPM was changed and the verdict judges only the days AFTER the change (the campaign as it is now). \u23F3 = changed less than 5 days ago \u2014 still settling, judgement reserved."), /*#__PURE__*/React.createElement(Word, {
-    w: "Heat (0\u2013100)"
+  }, "P78 = this campaign beats 78% of its same-segment siblings on ROAS. Low P in a stable segment = campaign problem. Everyone low at once = market problem (look for 🌐)."), /*#__PURE__*/React.createElement(Word, {
+    w: "↺ / ⏳ on verdict"
+  }, "↺ = budget/CPM was changed and the verdict judges only the days AFTER the change (the campaign as it is now). ⏳ = changed less than 5 days ago — still settling, judgement reserved."), /*#__PURE__*/React.createElement(Word, {
+    w: "Heat (0–100)"
   }, "Competitor pressure on a category. CPM inflation + rank slips + customer loss, combined. 60+ = bid war."), /*#__PURE__*/React.createElement(Word, {
     w: "Aligned / Contrary"
   }, "Whether a budget/CPM change matched what the dashboard's verdict said at that moment. The Change Impact tab keeps score of which performs better."), /*#__PURE__*/React.createElement(Word, {
     w: "Searches/d (drr)"
-  }, "How many times people search a keyword on Blinkit per day \u2014 from your BK Import Search sheet. Demand proof before money moves."), /*#__PURE__*/React.createElement(Word, {
+  }, "How many times people search a keyword on Blinkit per day — from your BK Import Search sheet. Demand proof before money moves."), /*#__PURE__*/React.createElement(Word, {
     w: "Util %"
-  }, "How much of the daily budget actually got spent. 95% = budget nearly finished \u2014 it's capping you. 40% = money sitting unused."), /*#__PURE__*/React.createElement(Word, {
+  }, "How much of the daily budget actually got spent. 95% = budget nearly finished — it's capping you. 40% = money sitting unused."), /*#__PURE__*/React.createElement(Word, {
     w: "Hrs Live/d"
   }, "Hours per day the campaign was actually running. 14h means the budget ran out mid-day and you were invisible all evening."), /*#__PURE__*/React.createElement(Word, {
     w: "Surplus Bank"
-  }, "The piggy bank \u2014 unspent budget Blinkit can come back and spend later."), /*#__PURE__*/React.createElement(Word, {
+  }, "The piggy bank — unspent budget Blinkit can come back and spend later."), /*#__PURE__*/React.createElement(Word, {
     w: "Landing Rate"
   }, "What your real daily spend is heading towards if you change nothing (budget + piggy bank spread over remaining days)."), /*#__PURE__*/React.createElement(Word, {
     w: "Drain Cap/d"
-  }, "The most this campaign has ever managed to spend in a day \u2014 proof of how fast the piggy bank CAN empty."), /*#__PURE__*/React.createElement(Word, {
+  }, "The most this campaign has ever managed to spend in a day — proof of how fast the piggy bank CAN empty."), /*#__PURE__*/React.createElement(Word, {
     w: "Verdict / State"
-  }, "The dashboard's decision, from Earn Ratio: \uD83D\uDFE2 Earning (silent) / \uD83D\uDFE1 Breakeven (Tune) / \uD83D\uDD34 Burning (Watch \u2192 Pull). Spotlight shows Efficient / Pricey / Waste instead (click-cost based)."), /*#__PURE__*/React.createElement(Word, {
+  }, "The dashboard's decision, from Earn Ratio: 🟢 Earning (silent) / 🟡 Breakeven (Tune) / 🔴 Burning (Watch → Pull). Spotlight shows Efficient / Pricey / Waste instead (click-cost based)."), /*#__PURE__*/React.createElement(Word, {
     w: "Earn"
-  }, "THE number. Direct ROAS \xF7 this campaign's own profit floor. 1.0 = ad pays for itself in real margin (counting future orders of new customers). Above 1.15 = earning. Below 0.85 = burning."), /*#__PURE__*/React.createElement(Word, {
+  }, "THE number. Direct ROAS ÷ this campaign's own profit floor. 1.0 = ad pays for itself in real margin (counting future orders of new customers). Above 1.15 = earning. Below 0.85 = burning."), /*#__PURE__*/React.createElement(Word, {
     w: "Earn Floor"
-  }, "The minimum ROAS where this campaign breaks even in profit \u2014 from the category's CM1 margin (fed live from the sheet) and how many of its buyers are genuinely new. Thin margin or few new buyers = higher floor."), /*#__PURE__*/React.createElement(Word, {
-    w: "Burn \u20B9/d"
-  }, "For Burning campaigns: the daily contribution shortfall in rupees \u2014 what it costs per day to keep it running as-is."), /*#__PURE__*/React.createElement(Word, {
+  }, "The minimum ROAS where this campaign breaks even in profit — from the category's CM1 margin (fed live from the sheet) and how many of its buyers are genuinely new. Thin margin or few new buyers = higher floor."), /*#__PURE__*/React.createElement(Word, {
+    w: "Burn ₹/d"
+  }, "For Burning campaigns: the daily contribution shortfall in rupees — what it costs per day to keep it running as-is."), /*#__PURE__*/React.createElement(Word, {
     w: "CCI (Spotlight)"
   }, "Cost per click vs the category's median Spotlight CPC. Spotlight has no sales data from Blinkit, so clicks are the honest metric. 2.0 = paying double what peers pay per click."), /*#__PURE__*/React.createElement(Word, {
     w: "Max CPM"
-  }, "The highest bid this campaign can afford before it stops being profitable (Earn falls to 1.15). Shown on Scale-CPM rows \u2014 never bid past it.")), /*#__PURE__*/React.createElement(Box, {
+  }, "The highest bid this campaign can afford before it stops being profitable (Earn falls to 1.15). Shown on Scale-CPM rows — never bid past it.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#22c55e"
-  }, /*#__PURE__*/React.createElement(H, null, "\uD83E\uDDE0 If you remember only one thing"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+  }, /*#__PURE__*/React.createElement(H, null, "🧠 If you remember only one thing"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, "You never have to figure out what to do \u2014 it's written on every row."), " Daily Brief = what to fix today. Spike Radar = what's about to go wrong with budgets. \u23F3 No Action = what you've been ignoring (check Fridays). If a row ever confuses you, click it \u2014 the long explanation is inside.")));
+  }, "You never have to figure out what to do — it's written on every row."), " Daily Brief = what to fix today. Spike Radar = what's about to go wrong with budgets. ⏳ No Action = what you've been ignoring (check Fridays). If a row ever confuses you, click it — the long explanation is inside.")));
 }
 
 // ─── APP ─────────────────────────────────────────────────────────────────────
@@ -13731,7 +13791,7 @@ function App() {
       fontWeight: 600,
       borderBottom: '1px solid #991b1b'
     }
-  }, "\u26A0 Data schema drift \u2014 ", SCHEMA_WARNINGS.join(' · '), ". Columns auto-fell-back to last-known positions; verify the source sheet headers."), /*#__PURE__*/React.createElement("div", {
+  }, "⚠ Data schema drift — ", SCHEMA_WARNINGS.join(' · '), ". Columns auto-fell-back to last-known positions; verify the source sheet headers."), /*#__PURE__*/React.createElement("div", {
     style: {
       background: '#0d1117',
       borderBottom: '1px solid #1f2937',
@@ -13748,7 +13808,7 @@ function App() {
       fontWeight: 700,
       whiteSpace: 'nowrap'
     }
-  }, "\u26A1 Blinkit Ads"), /*#__PURE__*/React.createElement("div", {
+  }, "⚡ Blinkit Ads"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 3
@@ -13782,7 +13842,7 @@ function App() {
       padding: '2px 7px',
       borderRadius: 4
     }
-  }, "\uD83D\uDD34 ", totalCut, " Burning"), totalScale > 0 && /*#__PURE__*/React.createElement("span", {
+  }, "🔴 ", totalCut, " Burning"), totalScale > 0 && /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 10,
       color: '#22c55e',
@@ -13790,7 +13850,7 @@ function App() {
       padding: '2px 7px',
       borderRadius: 4
     }
-  }, "\uD83D\uDFE2 ", totalScale, " Earning"), /*#__PURE__*/React.createElement("span", {
+  }, "🟢 ", totalScale, " Earning"), /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 10
@@ -13810,7 +13870,7 @@ function App() {
       padding: '3px 10px',
       cursor: 'pointer'
     }
-  }, "\u21BA Refresh"))), /*#__PURE__*/React.createElement("div", {
+  }, "↺ Refresh"))), /*#__PURE__*/React.createElement("div", {
     style: {
       background: '#0a0e14',
       borderBottom: '1px solid #1f2937',
@@ -13847,7 +13907,7 @@ function App() {
       fontSize: 10,
       marginLeft: 'auto'
     }
-  }, periodLen, " days \xB7 Data ", toISODate(bounds.min), " \u2192 ", toISODate(bounds.max))), /*#__PURE__*/React.createElement("div", {
+  }, periodLen, " days · Data ", toISODate(bounds.min), " → ", toISODate(bounds.max))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',
@@ -13927,7 +13987,7 @@ function App() {
       fontSize: 9,
       marginLeft: 4
     }
-  }, toISODate(cmpStart), " \u2192 ", toISODate(cmpEnd)))), /*#__PURE__*/React.createElement("div", {
+  }, toISODate(cmpStart), " → ", toISODate(cmpEnd)))), /*#__PURE__*/React.createElement("div", {
     style: {
       padding: '16px 24px',
       maxWidth: 1440,
@@ -14046,7 +14106,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v18.2 fix briefCount TDZ (declared before tabs array)
+// build: v19a engine-fixes (dedup/pause-gate/-25%/drop-fixconv) + analyst-detail (Earn Ratio, no CM) + 👍7d + timeline-explainer + comp-cpm-guard · UI restructure (slider/on-deck/History/rebasing/Guide) pending
 
 </script>
 </body></html>
