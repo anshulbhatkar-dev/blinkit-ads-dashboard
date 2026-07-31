@@ -1297,6 +1297,45 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       category,
       hasMetrics
     } = data;
+
+    // CPM-responsiveness (per-campaign history): did higher-CPM days buy a better rank?
+    // Split this campaign's days by median CPM; compare impression-weighted rank of the
+    // higher-CPM half vs the lower half. Responsive = higher CPM → rank ≥1 position better.
+    // null = can't tell (too few days or no real CPM variation) → caller falls back to ladder.
+    let cpmResponsive = null;
+    (() => {
+      const byDay = {};
+      rows.forEach(r => {
+        if (!(r.cpm > 0 && r.position > 0 && r.impressions > 0)) return;
+        const dk = r.date.toDateString();
+        if (!byDay[dk]) byDay[dk] = {
+          cpmN: 0,
+          cpmI: 0,
+          posN: 0,
+          posI: 0
+        };
+        const d = byDay[dk];
+        d.cpmN += r.cpm * r.impressions;
+        d.cpmI += r.impressions;
+        d.posN += r.position * r.impressions;
+        d.posI += r.impressions;
+      });
+      const days = Object.values(byDay).map(d => ({
+        cpm: d.cpmN / d.cpmI,
+        rank: d.posN / d.posI
+      }));
+      if (days.length < 6) return;
+      const sorted = days.map(d => d.cpm).sort((a, b) => a - b);
+      const medCpm = sorted[Math.floor(sorted.length / 2)];
+      const hi = days.filter(d => d.cpm > medCpm),
+        lo = days.filter(d => d.cpm <= medCpm);
+      if (hi.length < 2 || lo.length < 2) return; // no real CPM variation to learn from
+      const med = arr => {
+        const a = arr.map(d => d.rank).sort((x, y) => x - y);
+        return a[Math.floor(a.length / 2)];
+      };
+      cpmResponsive = med(lo) - med(hi) >= 1; // lower rank number = better position
+    })();
     const totSpend = rows.reduce((s, r) => s + r.spend, 0);
     const totDS = rows.reduce((s, r) => s + r.directSales, 0);
     const totNU = rows.reduce((s, r) => s + r.newUsers, 0);
@@ -1619,6 +1658,7 @@ function aggregateCampaigns(allRows, ltvMap, startDate, endDate, campaignIndexMa
       earnState,
       earnPersist,
       burnPerDay,
+      cpmResponsive,
       p90Spend: p90SpendOf(key),
       totClicks,
       cpc,
@@ -11160,21 +11200,37 @@ function computeEarnAction(c, ladder) {
     };
   }
   if (!budCapped && c.avgPos != null && c.avgPos > 6 && curCpm && c.earn) {
-    // CPM-responsiveness guard: only bid up if the category ladder shows a higher CPM
-    // can actually win a better rank. Comp keywords are often CPM-insensitive (auction
-    // saturated) — doubling CPM doesn't move position — so don't suggest it there.
+    // Only CONFIDENTLY bid up if higher CPM has historically won a better rank for this
+    // campaign. Evidence order: (1) this campaign's own CPM-vs-rank history; (2) category
+    // ladder as fallback. If evidence says it won't move rank, still surface it — but as a
+    // judgment call (bid up only if you know the auction changed, else 🏳 to record "not chasing").
     const L = ladder && ladder[(c.category || '').toLowerCase()];
     const bestRank = L && L.length ? Math.min(...L.map(x => x.rank)) : null;
-    const cpmResponsive = bestRank != null && bestRank <= c.avgPos - 1; // ladder proves a better rank is buyable
-    const suppress = c.segment === 'Comp' && !cpmResponsive || L && L.length && !cpmResponsive;
-    if (!suppress) {
-      const maxCpm = rnd5(curCpm * (c.earn / EARN_HI)); // bid where Earn Ratio falls to 1.15
-      const next = Math.min(rnd5(curCpm * 1.2), maxCpm);
-      if (next > curCpm * 1.05) return {
+    const ladderResp = bestRank != null ? bestRank <= c.avgPos - 1 : null;
+    const resp = c.cpmResponsive != null ? c.cpmResponsive : ladderResp; // history first, ladder fallback
+    const maxCpm = rnd5(curCpm * (c.earn / EARN_HI)); // bid where Earn Ratio falls to 1.15
+    const next = Math.min(rnd5(curCpm * 1.2), maxCpm);
+    if (next > curCpm * 1.05) {
+      if (resp === true) return {
         kind: 'Scale',
         label: '⬆ Scale CPM',
         cpmRatio: next / curCpm,
-        detail: `Earn Ratio ${c.earn.toFixed(2)}, rank ${c.avgPos.toFixed(1)}, budget unspent → raise CPM ₹${Math.round(curCpm)} → ₹${next} (+20% step) · Max ₹${maxCpm} before Earn Ratio < ${EARN_HI}`
+        detail: `Earn Ratio ${c.earn.toFixed(2)}, rank ${c.avgPos.toFixed(1)}, budget unspent → raise CPM ₹${Math.round(curCpm)} → ₹${next} (+20% step) · Max ₹${maxCpm} · history: higher CPM has won better rank here`
+      };
+      // resp false, or unknown on a Comp campaign → judgment call, not a confident order
+      if (resp === false || resp == null && c.segment === 'Comp') return {
+        kind: 'Scale',
+        label: '⬆ Scale CPM',
+        cpmRatio: next / curCpm,
+        judgment: true,
+        detail: `Rank ${c.avgPos.toFixed(1)}, budget unspent — but raising CPM hasn't improved rank here historically. Judgment call: bid up only if you know the auction changed, else 🏳 to record you're not chasing.`
+      };
+      // unknown, non-Comp → allow a probe
+      return {
+        kind: 'Scale',
+        label: '⬆ Scale CPM',
+        cpmRatio: next / curCpm,
+        detail: `Earn Ratio ${c.earn.toFixed(2)}, rank ${c.avgPos.toFixed(1)}, budget unspent → raise CPM ₹${Math.round(curCpm)} → ₹${next} (+20% probe — no rank history yet to confirm CPM moves position)`
       };
     }
   }
@@ -11461,42 +11517,41 @@ function buildWorkOrders(campaigns, kwSnap, stratMap = {}, skipSet = new Set()) 
       const badSpend = bad.reduce((s, k) => s + k.spend, 0);
       const surgical = (a.kind === 'Tune' || a.kind === 'Pull') && tot > 0 && badSpend / tot >= 0.3 && bad.length;
       if (surgical) {
-        const removes = bad.filter(k => k.sales / k.spend / floor < 0.4);
-        const reprices = bad.filter(k => k.sales / k.spend / floor >= 0.4);
-        if (removes.length) orders.push({
+        // ONE combined keyword-work order per campaign (was two rows: remove + bids → looked like a duplicate)
+        const removes = bad.filter(k => k.sales / k.spend / floor < 0.4).map(k => ({
+          keyword: k.keyword,
+          matchType: (k.matchType || 'exact').toLowerCase()
+        }));
+        const reprices = bad.filter(k => k.sales / k.spend / floor >= 0.4).map(k => ({
+          keyword: k.keyword,
+          matchType: (k.matchType || 'exact').toLowerCase(),
+          bid: Math.max(200, rnd5(k.bid * 0.75))
+        }));
+        const parts = [];
+        if (removes.length) parts.push(`remove ${removes.length}`);
+        if (reprices.length) parts.push(`reprice ${reprices.length} −25%`);
+        orders.push({
           ...base,
-          file: 'remove',
-          rows: removes.map(k => ({
-            keyword: k.keyword,
-            matchType: (k.matchType || 'exact').toLowerCase()
-          })),
-          why: `${removes.length} keyword${removes.length > 1 ? 's' : ''} only burn money — remove, keep campaign`,
-          display: `Remove ${removes.length} keyword${removes.length > 1 ? 's' : ''}`,
-          worth: `stops ${fmt(removes.reduce((s, k) => s + k.spend, 0) / 14, 'rsk')}/d`
-        });
-        if (reprices.length) orders.push({
-          ...base,
-          file: 'bids',
-          rows: reprices.map(k => ({
-            keyword: k.keyword,
-            matchType: (k.matchType || 'exact').toLowerCase(),
-            bid: Math.max(200, rnd5(k.bid * 0.75))
-          })),
-          why: `${reprices.length} keyword${reprices.length > 1 ? 's' : ''} losing money — bids −25%, rest untouched`,
-          display: `Bids −25% (${reprices.length} of ${kws.length} keywords)`,
-          worth: ''
+          file: 'kw',
+          removeRows: removes,
+          bidRows: reprices,
+          rows: [...removes, ...reprices],
+          why: `${bad.length} keyword${bad.length > 1 ? 's' : ''} losing money — fixed surgically, rest untouched`,
+          display: `Fix ${removes.length + reprices.length} keyword${removes.length + reprices.length > 1 ? 's' : ''}: ${parts.join(' + ')}`,
+          worth: removes.length ? `stops ${fmt(bad.reduce((s, k) => s + k.spend, 0) / 14, 'rsk')}/d` : ''
         });
       } else {
         orders.push({
           ...base,
           file: 'bids',
+          judgment: a.judgment || false,
           rows: kws.map(k => ({
             keyword: k.keyword,
             matchType: (k.matchType || 'exact').toLowerCase(),
             bid: Math.max(200, rnd5(k.bid * a.cpmRatio))
           })),
-          why: a.kind === 'Trim' ? 'Holding top rank while overpaying — same rank, cheaper' : a.kind === 'Scale' ? 'Winner limited by visibility — bid up for rank' : 'Whole campaign overpaying vs market',
-          display: `Bids ×${a.cpmRatio.toFixed(2)} (all ${kws.length} keywords)`,
+          why: a.judgment ? '⚠ Judgment call — raising CPM hasn’t moved rank here historically; bid up only if the auction changed, else 🏳 to record you’re not chasing' : a.kind === 'Trim' ? 'Holding top rank while overpaying — same rank, cheaper' : a.kind === 'Scale' ? 'Winner limited by visibility — bid up for rank' : 'Whole campaign overpaying vs market',
+          display: `${a.judgment ? '⚠ ' : ''}Bids ×${a.cpmRatio.toFixed(2)} (all ${kws.length} keywords)`,
           worth: a.cpmRatio < 1 ? `saves ~${fmt((c.drr?.spend || 0) * (1 - a.cpmRatio), 'rsk')}/d` : ''
         });
       }
@@ -11535,6 +11590,7 @@ function WorkOrderSection({
   const [open, setOpen] = useState(() => new Set());
   const [genMsg, setGenMsg] = useState({});
   const [stratTick, setStratTick] = useState(0);
+  const [lastFlag, setLastFlag] = useState(null); // {campaign, label} — for the undo bar after a flag click
   const stratMap = useMemo(() => getStratMap(), [stratTick]);
   const kwSnap = useMemo(() => buildKwSnapshot(allRows, endDate), [allRows, endDate]);
   const defenceOrders = useMemo(() => buildDefenceOrders(alerts, campaigns, kwSnap).orders, [alerts, campaigns, kwSnap]);
@@ -11586,27 +11642,33 @@ function WorkOrderSection({
           bid: Math.max(200, rnd5(s.bid * 0.75))
         });
       });
-      const mk = (file, rows, disp, why) => rows.length && out.push({
-        campaign: b.campaign,
-        campaignId: cid?.campaignId || null,
-        brand: b.brand,
-        c: cid || {
-          earn: null,
-          drr: {
-            spend: (b.spend || 0) / (b.numDays || 1)
-          }
-        },
-        kind: 'Tune',
-        label: '🩸 Bleeder',
-        file,
-        rows,
-        display: disp,
-        why,
-        worth: `stops ~${fmt((b.bleedSpend || 0) / (b.numDays || 1) * 0.6, 'rsk')}/d leak`,
-        detail: `Campaign healthy (${b.croas.toFixed(2)}x) but ${b.bleedPct.toFixed(0)}% of spend sits in keywords below half that. Worst: ${(b.bleed || []).slice(0, 3).map(k => `"${k.keyword}" ${k.roas.toFixed(1)}x`).join(', ')}`
-      });
-      mk('remove', removes, `Remove ${removes.length} keyword${removes.length > 1 ? 's' : ''}`, 'Campaign healthy — these keywords only burn money');
-      mk('bids', reprices, `Bids −25% (${reprices.length} keyword${reprices.length > 1 ? 's' : ''})`, 'Campaign healthy — weak keywords repriced, rest untouched');
+      if (removes.length || reprices.length) {
+        const parts = [];
+        if (removes.length) parts.push(`remove ${removes.length}`);
+        if (reprices.length) parts.push(`reprice ${reprices.length} −25%`);
+        out.push({
+          // ONE combined row per campaign (was two: remove + bids)
+          campaign: b.campaign,
+          campaignId: cid?.campaignId || null,
+          brand: b.brand,
+          c: cid || {
+            earn: null,
+            drr: {
+              spend: (b.spend || 0) / (b.numDays || 1)
+            }
+          },
+          kind: 'Tune',
+          label: '🩸 Bleeder',
+          file: 'kw',
+          removeRows: removes,
+          bidRows: reprices,
+          rows: [...removes, ...reprices],
+          display: `Fix ${removes.length + reprices.length} keyword${removes.length + reprices.length > 1 ? 's' : ''}: ${parts.join(' + ')}`,
+          why: 'Campaign healthy — these keywords burn money, rest untouched',
+          worth: `stops ~${fmt((b.bleedSpend || 0) / (b.numDays || 1) * 0.6, 'rsk')}/d leak`,
+          detail: `Campaign healthy (${b.croas.toFixed(2)}x) but ${b.bleedPct.toFixed(0)}% of spend sits in keywords below half that. Worst: ${(b.bleed || []).slice(0, 3).map(k => `"${k.keyword}" ${k.roas.toFixed(1)}x`).join(', ')}`
+        });
+      }
     });
     // v18: ⚡ defence rows join the same list & files — fast clock, sorted first
     defenceOrders.forEach(o => out.push(o));
@@ -11659,14 +11721,16 @@ function WorkOrderSection({
       downloadCsv(`${bs}_budget_${dstr}.csv`, ['campaign_id', 'budget'], budgets.map(o => [o.campaignId, o.budget]));
       files.push('budget');
     }
-    const bids = grab('bids');
-    if (bids.length) {
-      downloadCsv(`${bs}_keyword_bids_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type', 'bid'], bids.flatMap(o => o.rows.map(r => [o.campaignId, r.keyword, r.matchType, r.bid])));
+    // bids: plain 'bids' orders + the bidRows half of combined 'kw' orders
+    const bidRows = picked.filter(o => o.campaignId && (o.file === 'bids' || o.file === 'kw')).flatMap(o => (o.file === 'kw' ? o.bidRows || [] : o.rows).map(r => [o.campaignId, r.keyword, r.matchType, r.bid]));
+    if (bidRows.length) {
+      downloadCsv(`${bs}_keyword_bids_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type', 'bid'], bidRows);
       files.push('bids');
     }
-    const removes = grab('remove');
-    if (removes.length) {
-      downloadCsv(`${bs}_remove_keywords_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type'], removes.flatMap(o => o.rows.map(r => [o.campaignId, r.keyword, r.matchType])));
+    // remove: plain 'remove' orders + the removeRows half of combined 'kw' orders
+    const removeRows = picked.filter(o => o.campaignId && (o.file === 'remove' || o.file === 'kw')).flatMap(o => (o.file === 'kw' ? o.removeRows || [] : o.rows).map(r => [o.campaignId, r.keyword, r.matchType]));
+    if (removeRows.length) {
+      downloadCsv(`${bs}_remove_keywords_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type'], removeRows);
       files.push('remove');
     }
     setGenMsg(m => ({
@@ -11715,7 +11779,38 @@ function WorkOrderSection({
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "files are Blinkit bulk-upload templates · one set per brand · click a row for the analyst detail")), Object.entries(byBrand).map(([brand, list]) => /*#__PURE__*/React.createElement("div", {
+  }, "files are Blinkit bulk-upload templates · one set per brand · click a row for the analyst detail")), lastFlag && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      background: 'rgba(107,114,128,0.12)',
+      border: '1px solid #374151',
+      borderRadius: 6,
+      padding: '4px 10px',
+      margin: '4px 0',
+      fontSize: 10,
+      color: '#9ca3af'
+    }
+  }, /*#__PURE__*/React.createElement("span", null, lastFlag.label, " — suppressed"), /*#__PURE__*/React.createElement("span", {
+    onClick: () => {
+      clearStratTag(lastFlag.campaign);
+      setStratTick(t => t + 1);
+      setLastFlag(null);
+    },
+    style: {
+      marginLeft: 'auto',
+      color: '#93c5fd',
+      cursor: 'pointer',
+      fontWeight: 700
+    }
+  }, "↩ undo"), /*#__PURE__*/React.createElement("span", {
+    onClick: () => setLastFlag(null),
+    style: {
+      color: '#6b7280',
+      cursor: 'pointer'
+    }
+  }, "✕")), Object.entries(byBrand).map(([brand, list]) => /*#__PURE__*/React.createElement("div", {
     key: brand,
     style: {
       marginTop: 10
@@ -11827,8 +11922,12 @@ function WorkOrderSection({
         e.stopPropagation();
         const r = window.prompt('Mark STRATEGIC for 30 days — suggestions stop, cost stays visible in Watching.\nReason (conquesting / launch / rank defence / seasonal):', 'conquesting');
         if (r) {
-          setStratTag(o.campaign, r);
+          setStratTag(o.campaign, r, 30);
           setStratTick(t => t + 1);
+          setLastFlag({
+            campaign: o.campaign,
+            label: `🏳 ${o.campaign} — strategic (30d)`
+          });
         }
       },
       title: "Known issue / deliberate spend — suppress for 30 days",
@@ -11842,6 +11941,10 @@ function WorkOrderSection({
         e.stopPropagation();
         setStratTag(o.campaign, 'acknowledged — recheck in a week', 7);
         setStratTick(t => t + 1);
+        setLastFlag({
+          campaign: o.campaign,
+          label: `👍 ${o.campaign} — snoozed (7d)`
+        });
       },
       title: "Call taken — snooze 7 days, then it comes back",
       style: {
@@ -14106,7 +14209,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v19a engine-fixes (dedup/pause-gate/-25%/drop-fixconv) + analyst-detail (Earn Ratio, no CM) + 👍7d + timeline-explainer + comp-cpm-guard · UI restructure (slider/on-deck/History/rebasing/Guide) pending
+// build: v19c = v19b + CPM-up only when per-campaign history shows it wins rank (ladder fallback, else 🏳 judgment call) · pending: slider/on-deck/History/rebasing/Guide + full week-over-week detail
 
 </script>
 </body></html>
