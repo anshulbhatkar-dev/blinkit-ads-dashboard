@@ -6501,6 +6501,25 @@ function CategorySalesView({
     const pk = `${r.brand}||${r.category}||${r.segment}||${r.keyword}`;
     return s + (prevMap[pk]?.drrDQ || 0);
   }, 0), [filtered, prevMap]);
+  // Per-category totals (incl organic) — each keyword's % is of its category, so a category sums to 100%
+  const catTotals = useMemo(() => {
+    const m = {};
+    filtered.forEach(r => {
+      const c = `${r.brand}||${r.category}`;
+      m[c] = (m[c] || 0) + (r.drrDQ || 0);
+    });
+    return m;
+  }, [filtered]);
+  const prevCatTotals = useMemo(() => {
+    const m = {};
+    filtered.forEach(r => {
+      const p = prevMap[`${r.brand}||${r.category}||${r.segment}||${r.keyword}`];
+      if (!p) return;
+      const c = `${r.brand}||${r.category}`;
+      m[c] = (m[c] || 0) + (p.drrDQ || 0);
+    });
+    return m;
+  }, [filtered, prevMap]);
   const fmtDQ = n => n == null ? '—' : n.toFixed(1);
   const fmtS = n => n == null ? '—' : n >= 100000 ? '₹' + (n / 100000).toFixed(1) + 'L' : n >= 1000 ? '₹' + (n / 1000).toFixed(1) + 'K' : '₹' + Math.round(n);
   const fmtR = n => n == null ? '—' : n.toFixed(2) + 'x';
@@ -6708,9 +6727,10 @@ function CategorySalesView({
     const hasCamps = Object.keys(row.campaigns || {}).length > 0;
     const isOrganic = row.segment === 'Organic';
 
-    // % contribution
-    const currPct = totalDrrDQ > 0 ? row.drrDQ / totalDrrDQ * 100 : null;
-    const prevPct = prevTotalDrrDQ > 0 && prevRow ? prevRow.drrDQ / prevTotalDrrDQ * 100 : null;
+    // % contribution — of THIS keyword's category (category sums to 100%, organic in base)
+    const _catKey = `${row.brand}||${row.category}`;
+    const currPct = catTotals[_catKey] > 0 ? row.drrDQ / catTotals[_catKey] * 100 : null;
+    const prevPct = prevCatTotals[_catKey] > 0 && prevRow ? prevRow.drrDQ / prevCatTotals[_catKey] * 100 : null;
     const deltaPct = currPct != null && prevPct != null ? currPct - prevPct : null;
 
     // Absolute delta DQty/d
@@ -7041,8 +7061,8 @@ function CategorySalesView({
       sortedCamps.forEach(([camp, cd]) => {
         const ck = `${kwKey}||${camp}`;
         const prevCd = prevMap[ck] || null;
-        const cCurrPct = totalDrrDQ > 0 ? cd.drrDQ / totalDrrDQ * 100 : null;
-        const cPrevPct = prevTotalDrrDQ > 0 && prevCd ? prevCd.drrDQ / prevTotalDrrDQ * 100 : null;
+        const cCurrPct = catTotals[_catKey] > 0 ? cd.drrDQ / catTotals[_catKey] * 100 : null;
+        const cPrevPct = prevCatTotals[_catKey] > 0 && prevCd ? prevCd.drrDQ / prevCatTotals[_catKey] * 100 : null;
         const cDeltaPct = cCurrPct != null && cPrevPct != null ? cCurrPct - cPrevPct : null;
         const cDeltaDQ = prevCd != null ? (cd.drrDQ ?? 0) - (prevCd.drrDQ ?? 0) : null;
         tableRows.push(/*#__PURE__*/React.createElement("tr", {
@@ -7686,14 +7706,20 @@ function SalesFlowView({
     labelSub,
     labelColor,
     curr,
-    hasChildren
+    hasChildren,
+    catTotal,
+    prevCatTotal
   }) => {
     const isExp = expanded.has(key);
     const prev = prevMap[prevKey] || null;
     const indent = level * 16;
     const rowBg = isExp ? 'rgba(30,58,95,0.15)' : level === 0 ? 'transparent' : level === 1 ? 'rgba(255,255,255,0.012)' : 'rgba(255,255,255,0.006)';
-    const currPct = totalDrrDQ > 0 ? curr.drrDQ / totalDrrDQ * 100 : null;
-    const prevPct = prevTotalDrrDQ > 0 && prev ? prev.drrDQ / prevTotalDrrDQ * 100 : null;
+
+    // Level 0 (category) = % of grand total; children = % of THEIR category (sum to 100% within category, organic in base)
+    const baseCur = level >= 1 && catTotal ? catTotal : totalDrrDQ;
+    const basePrev = level >= 1 && prevCatTotal ? prevCatTotal : prevTotalDrrDQ;
+    const currPct = baseCur > 0 ? curr.drrDQ / baseCur * 100 : null;
+    const prevPct = basePrev > 0 && prev ? prev.drrDQ / basePrev * 100 : null;
     const deltaPct = currPct != null && prevPct != null ? currPct - prevPct : null;
     const deltaDQ = prev != null ? (curr.drrDQ ?? 0) - (prev.drrDQ ?? 0) : null;
     tableRows.push(/*#__PURE__*/React.createElement("tr", {
@@ -7963,6 +7989,9 @@ function SalesFlowView({
       curr: cat,
       hasChildren: Object.keys(cat.segs || {}).length > 0
     });
+    const catTotal = cat.drrDQ,
+      prevCatTotal = (prevMap[ck] || {}).drrDQ; // rebase children to this category's 100%
+
     if (expanded.has(ck) && cat.segs) {
       const filtSegsRaw = segF.length ? Object.entries(cat.segs).filter(([s]) => segF.includes(s)) : Object.entries(cat.segs);
       const organicEntry = filtSegsRaw.find(([s]) => s === 'Organic');
@@ -7979,6 +8008,8 @@ function SalesFlowView({
           label: segLabel,
           labelColor: SEG_COLOR[seg] || '#6b7280',
           curr: sd,
+          catTotal,
+          prevCatTotal,
           hasChildren: Object.keys(sd.keywords || {}).length > 0
         });
         if (expanded.has(sk) && sd.keywords) {
@@ -7991,6 +8022,8 @@ function SalesFlowView({
               label: kw,
               labelColor: '#9ca3af',
               curr: kd,
+              catTotal,
+              prevCatTotal,
               hasChildren: Object.keys(kd.campaigns || {}).length > 0
             });
             if (expanded.has(kwk) && kd.campaigns) {
@@ -8002,6 +8035,8 @@ function SalesFlowView({
                   label: camp,
                   labelColor: '#6b7280',
                   curr: cd,
+                  catTotal,
+                  prevCatTotal,
                   hasChildren: false
                 });
               });
@@ -11317,6 +11352,219 @@ function clearStratTag(campaign) {
   } catch (e) {}
 }
 
+// ── ACTIVITY LOG (v20) — every "Generate Files" download, browser-local, daily counts ──
+const ACTIVITY_KEY = 'earn_activity_log';
+function logActivity(entry) {
+  try {
+    const log = JSON.parse(localStorage.getItem(ACTIVITY_KEY) || '[]');
+    log.push({
+      ts: Date.now(),
+      ...entry
+    });
+    localStorage.setItem(ACTIVITY_KEY, JSON.stringify(log.slice(-3000)));
+  } catch (e) {}
+}
+function getActivityLog() {
+  try {
+    return JSON.parse(localStorage.getItem(ACTIVITY_KEY) || '[]');
+  } catch (e) {
+    return [];
+  }
+}
+function HistoryView() {
+  const log = getActivityLog();
+  if (!log.length) return /*#__PURE__*/React.createElement(Card, {
+    style: {
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 12
+    }
+  }, "No activity yet. Each time you hit ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: '#9ca3af'
+    }
+  }, "Generate files"), " in the Daily Brief, that download gets logged here — day by day."));
+  const byDay = {};
+  log.forEach(e => {
+    const dk = new Date(e.ts).toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: '2-digit'
+    });
+    if (!byDay[dk]) byDay[dk] = {
+      dk,
+      ts: e.ts,
+      pauses: 0,
+      budgets: 0,
+      bidKeywords: 0,
+      removeKeywords: 0,
+      campaigns: 0,
+      downloads: 0,
+      brands: new Set()
+    };
+    const g = byDay[dk];
+    g.pauses += e.pauses || 0;
+    g.budgets += e.budgets || 0;
+    g.bidKeywords += e.bidKeywords || 0;
+    g.removeKeywords += e.removeKeywords || 0;
+    g.campaigns += e.campaigns || 0;
+    g.downloads += 1;
+    if (e.brand) g.brands.add(e.brand);
+    if (e.ts > g.ts) g.ts = e.ts;
+  });
+  const days = Object.values(byDay).sort((a, b) => b.ts - a.ts);
+  const now = Date.now();
+  const sum = since => log.filter(e => e.ts >= since).reduce((s, e) => ({
+    p: s.p + (e.pauses || 0),
+    b: s.b + (e.budgets || 0),
+    k: s.k + (e.bidKeywords || 0),
+    r: s.r + (e.removeKeywords || 0)
+  }), {
+    p: 0,
+    b: 0,
+    k: 0,
+    r: 0
+  });
+  const stat = o => `${o.p} pause · ${o.b} budget · ${o.k} bid-kw · ${o.r} remove-kw`;
+  const th = (t, r) => /*#__PURE__*/React.createElement("th", {
+    style: {
+      padding: '6px 8px',
+      textAlign: r ? 'right' : 'left',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600
+    }
+  }, t);
+  return /*#__PURE__*/React.createElement(Card, {
+    style: {
+      padding: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#f9fafb',
+      fontSize: 13,
+      fontWeight: 700,
+      marginBottom: 2
+    }
+  }, "🗓 Optimisation History"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginBottom: 10
+    }
+  }, "every \"Generate files\" download, day by day (this browser) · logs the action taken, not whether the CSV was uploaded — the Change Impact tab confirms what actually landed"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      marginBottom: 12,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: 'rgba(59,130,246,0.06)',
+      border: '1px solid #1f2937',
+      borderRadius: 8,
+      padding: '8px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 9
+    }
+  }, "LAST 7 DAYS"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#d1d5db',
+      fontSize: 11
+    }
+  }, stat(sum(now - 7 * 864e5)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: 'rgba(59,130,246,0.06)',
+      border: '1px solid #1f2937',
+      borderRadius: 8,
+      padding: '8px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 9
+    }
+  }, "LAST 30 DAYS"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#d1d5db',
+      fontSize: 11
+    }
+  }, stat(sum(now - 30 * 864e5))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto',
+      border: '1px solid #1f2937',
+      borderRadius: 8
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
+    style: {
+      borderBottom: '1px solid #1f2937',
+      background: '#0d1117'
+    }
+  }, th('Date'), th('Brands'), th('Downloads', 1), th('Campaigns', 1), th('Pause', 1), th('Budget', 1), th('Bid-kw', 1), th('Remove-kw', 1))), /*#__PURE__*/React.createElement("tbody", null, days.map(g => /*#__PURE__*/React.createElement("tr", {
+    key: g.dk,
+    style: {
+      borderBottom: '1px solid #111827',
+      color: '#d1d5db'
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      fontWeight: 600
+    }
+  }, g.dk), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      color: '#9ca3af',
+      fontSize: 10
+    }
+  }, [...g.brands].join(', ')), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right'
+    }
+  }, g.downloads), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right'
+    }
+  }, g.campaigns), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: g.pauses ? '#ef4444' : '#4b5563'
+    }
+  }, g.pauses), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right'
+    }
+  }, g.budgets), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right'
+    }
+  }, g.bidKeywords), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      color: g.removeKeywords ? '#f59e0b' : '#4b5563'
+    }
+  }, g.removeKeywords)))))));
+}
+
 // ⚡ Defence orders (v17): fast-clock alerts → tickable counter-moves, guardrailed.
 // Only Earning campaigns get defended; bids capped at Max CPM = cur × Earn/1.15.
 function buildDefenceOrders(alerts, campaigns, kwSnap) {
@@ -11529,7 +11777,7 @@ function buildWorkOrders(campaigns, kwSnap, stratMap = {}, skipSet = new Set()) 
     if (!a || a.kind === 'Settling' || a.kind === 'Watch') return;
     const ck = c.campaign.toLowerCase();
     if (skipSet.has(ck)) return; // defence acted today — fast clock wins
-    if (stratMap[ck] && (a.kind === 'Pull' || a.kind === 'Tune')) return; // 🏳 strategic — suppressed, priced in Watching
+    if (stratMap[ck]) return; // snoozed — suppressed for ANY order kind, still shown in Watching
     const base = {
       campaign: c.campaign,
       campaignId: c.campaignId,
@@ -11665,6 +11913,27 @@ function WorkOrderSection({
   const [genMsg, setGenMsg] = useState({});
   const [stratTick, setStratTick] = useState(0);
   const [lastFlag, setLastFlag] = useState(null); // {campaign, label} — for the undo bar after a flag click
+  const adjKey = 'earn_adj_' + (endDate ? endDate.toISOString().slice(0, 10) : 'x'); // per-day slider positions
+  const [adj, setAdj] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(adjKey) || '{}');
+    } catch (e) {
+      return {};
+    }
+  });
+  const setAdjVal = (k, v) => setAdj(p => {
+    const n = {
+      ...p,
+      [k]: {
+        ...(p[k] || {}),
+        ...v
+      }
+    };
+    try {
+      localStorage.setItem(adjKey, JSON.stringify(n));
+    } catch (e) {}
+    return n;
+  });
   const stratMap = useMemo(() => getStratMap(), [stratTick]);
   const kwSnap = useMemo(() => buildKwSnapshot(allRows, endDate), [allRows, endDate]);
   const defenceOrders = useMemo(() => buildDefenceOrders(alerts, campaigns, kwSnap).orders, [alerts, campaigns, kwSnap]);
@@ -11793,11 +12062,17 @@ function WorkOrderSection({
     }
     const budgets = grab('budget');
     if (budgets.length) {
-      downloadCsv(`${bs}_budget_${dstr}.csv`, ['campaign_id', 'budget'], budgets.map(o => [o.campaignId, o.budget]));
+      downloadCsv(`${bs}_budget_${dstr}.csv`, ['campaign_id', 'budget'], budgets.map(o => {
+        const a = adj[oKey(o)];
+        return [o.campaignId, Math.max(500, Math.round(a && a.budget != null ? a.budget : o.budget))];
+      }));
       files.push('budget');
     }
-    // bids: plain 'bids' orders + the bidRows half of combined 'kw' orders
-    const bidRows = picked.filter(o => o.campaignId && (o.file === 'bids' || o.file === 'kw')).flatMap(o => (o.file === 'kw' ? o.bidRows || [] : o.rows).map(r => [o.campaignId, r.keyword, r.matchType, r.bid]));
+    // bids: plain 'bids' orders + the bidRows half of combined 'kw' orders (× per-row slider intensity, ₹200 floor)
+    const bidRows = picked.filter(o => o.campaignId && (o.file === 'bids' || o.file === 'kw')).flatMap(o => {
+      const m = adj[oKey(o)] && adj[oKey(o)].bidMult || 1;
+      return (o.file === 'kw' ? o.bidRows || [] : o.rows).map(r => [o.campaignId, r.keyword, r.matchType, Math.max(200, Math.round(r.bid * m / 5) * 5)]);
+    });
     if (bidRows.length) {
       downloadCsv(`${bs}_keyword_bids_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type', 'bid'], bidRows);
       files.push('bids');
@@ -11808,6 +12083,15 @@ function WorkOrderSection({
       downloadCsv(`${bs}_remove_keywords_${dstr}.csv`, ['campaign_id', 'keyword_name', 'match_type'], removeRows);
       files.push('remove');
     }
+    if (files.length) logActivity({
+      date: dstr,
+      brand,
+      pauses: pauses.length,
+      budgets: budgets.length,
+      bidKeywords: bidRows.length,
+      removeKeywords: removeRows.length,
+      campaigns: new Set(picked.filter(o => o.campaignId).map(o => o.campaignId)).size
+    });
     setGenMsg(m => ({
       ...m,
       [brand]: files.length ? `${files.length} file${files.length > 1 ? 's' : ''} downloaded — upload each in the ${brand} Blinkit bulk panel${noId.length ? ` · ⚠ ${noId.length} skipped (no campaign ID in sheet)` : ''}` : 'No file-able rows selected'
@@ -11999,40 +12283,17 @@ function WorkOrderSection({
         fontWeight: 700,
         whiteSpace: 'nowrap'
       }
-    }, o.worth), (o.kind === 'Pull' || o.kind === 'Tune') && /*#__PURE__*/React.createElement("span", {
+    }, o.worth), /*#__PURE__*/React.createElement("span", {
       onClick: e => {
         e.stopPropagation();
-        const r = window.prompt('Mark STRATEGIC for 30 days — suggestions stop, cost stays visible in Watching.\nReason (conquesting / launch / rank defence / seasonal):', 'conquesting');
-        if (r) {
-          setStratTag(o.campaign, r, 30);
-          setStratTick(t => t + 1);
-          setLastFlag({
-            campaign: o.campaign,
-            label: `🏳 ${o.campaign} — strategic (30d)`
-          });
-        }
-      },
-      title: "Deliberate/strategic spend — suppress this suggestion for 30 days",
-      style: {
-        fontSize: 9,
-        cursor: 'pointer',
-        color: '#9ca3af',
-        border: '1px solid #374151',
-        borderRadius: 4,
-        padding: '1px 6px',
-        whiteSpace: 'nowrap'
-      }
-    }, "🏳 park 30d"), (o.kind === 'Pull' || o.kind === 'Tune') && /*#__PURE__*/React.createElement("span", {
-      onClick: e => {
-        e.stopPropagation();
-        setStratTag(o.campaign, 'acknowledged — recheck in a week', 7);
+        setStratTag(o.campaign, 'snoozed — recheck in a week', 7);
         setStratTick(t => t + 1);
         setLastFlag({
           campaign: o.campaign,
-          label: `👍 ${o.campaign} — snoozed (7d)`
+          label: `⏸ ${o.campaign} — snoozed 7 days`
         });
       },
-      title: "Call taken — snooze 7 days, then it comes back",
+      title: "Call taken / deliberate — snooze this suggestion for 7 days; it comes back after a week",
       style: {
         fontSize: 9,
         cursor: 'pointer',
@@ -12042,13 +12303,100 @@ function WorkOrderSection({
         padding: '1px 6px',
         whiteSpace: 'nowrap'
       }
-    }, "👍 snooze 7d"))), /*#__PURE__*/React.createElement("div", {
+    }, "⏸ snooze 7d"))), /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#9ca3af',
         fontSize: 10,
         marginTop: 1
       }
-    }, o.why), open.has(k) && /*#__PURE__*/React.createElement("div", {
+    }, o.why), sel.has(k) && (o.file === 'budget' || o.file === 'bids' || o.file === 'kw') && (() => {
+      if (o.file === 'budget') {
+        const cur = Math.round(o.c.currentDailyBudget || o.budget);
+        const isUp = o.kind === 'Scale';
+        const safeCap = isUp ? Math.round((o.c.p90Spend || o.budget) * 1.1) : cur;
+        const min = isUp ? Math.min(cur, o.budget) : 500;
+        const max = isUp ? Math.max(o.budget, safeCap, cur + 5) : cur;
+        const val = Math.round(adj[k] && adj[k].budget != null ? adj[k].budget : o.budget);
+        const beyond = isUp && val > safeCap;
+        return /*#__PURE__*/React.createElement("div", {
+          onClick: e => e.stopPropagation(),
+          style: {
+            marginTop: 5,
+            display: 'flex',
+            gap: 8,
+            alignItems: 'center',
+            fontSize: 10
+          }
+        }, /*#__PURE__*/React.createElement("span", {
+          style: {
+            color: '#6b7280',
+            whiteSpace: 'nowrap'
+          }
+        }, "Set budget"), /*#__PURE__*/React.createElement("input", {
+          type: "range",
+          min: min,
+          max: max,
+          step: 5,
+          value: val,
+          onChange: e => setAdjVal(k, {
+            budget: Math.max(500, +e.target.value)
+          }),
+          style: {
+            flex: 1,
+            maxWidth: 220,
+            accentColor: beyond ? '#f59e0b' : '#3b82f6'
+          }
+        }), /*#__PURE__*/React.createElement("span", {
+          style: {
+            color: beyond ? '#f59e0b' : '#d1d5db',
+            fontWeight: 700,
+            whiteSpace: 'nowrap'
+          }
+        }, "₹", cur.toLocaleString('en-IN'), " → ₹", val.toLocaleString('en-IN')), beyond && /*#__PURE__*/React.createElement("span", {
+          style: {
+            color: '#f59e0b',
+            fontSize: 9,
+            whiteSpace: 'nowrap'
+          }
+        }, "⚠ beyond proven demand"));
+      }
+      const mult = adj[k] && adj[k].bidMult != null ? adj[k].bidMult : 1;
+      return /*#__PURE__*/React.createElement("div", {
+        onClick: e => e.stopPropagation(),
+        style: {
+          marginTop: 5,
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+          fontSize: 10
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#6b7280',
+          whiteSpace: 'nowrap'
+        }
+      }, "Bid intensity"), /*#__PURE__*/React.createElement("input", {
+        type: "range",
+        min: 0.7,
+        max: 1.3,
+        step: 0.05,
+        value: mult,
+        onChange: e => setAdjVal(k, {
+          bidMult: +e.target.value
+        }),
+        style: {
+          flex: 1,
+          maxWidth: 180,
+          accentColor: '#3b82f6'
+        }
+      }), /*#__PURE__*/React.createElement("span", {
+        style: {
+          color: '#d1d5db',
+          fontWeight: 700,
+          whiteSpace: 'nowrap'
+        }
+      }, "×", mult.toFixed(2), " on suggested bids · floor ₹200"));
+    })(), open.has(k) && /*#__PURE__*/React.createElement("div", {
       style: {
         marginTop: 5,
         padding: '7px 10px',
@@ -13514,7 +13862,7 @@ function HelpView() {
     accent: "#3b82f6"
   }, /*#__PURE__*/React.createElement(H, null, "⚖ Earn Ratio — the one number that runs the show (new)"), /*#__PURE__*/React.createElement(P, null, "Every campaign now carries a single number: ", /*#__PURE__*/React.createElement(Hi, null, "Earn"), ". It answers one question honestly:", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
-  }, " is this ad making us real profit — after our product margin, and counting the future orders of the NEW customers it wins?")), /*#__PURE__*/React.createElement(P, null, "How it's built, in one breath: your product margin (CM1, per brand × category, fed live from the sheet) says how many ₹ of sales it takes to earn ₹1 of profit. Then, because a ", /*#__PURE__*/React.createElement(Hi, null, "new customer"), " comes back (~2.2 orders over time) while a repeat buyer is just one order, campaigns that actually acquire new users get an easier bar. That bar is the campaign's ", /*#__PURE__*/React.createElement(Hi, null, "floor"), ". ", /*#__PURE__*/React.createElement(Hi, null, "Earn = Direct ROAS ÷ floor.")), /*#__PURE__*/React.createElement("div", {
+  }, " is this ad making us real profit — after our product margin, and counting the future orders of the NEW customers it wins?")), /*#__PURE__*/React.createElement(P, null, "How it's built, in one breath: your product's contribution margin (per brand × category, fed live from the sheet) says how many ₹ of sales it takes to earn ₹1 of profit. Then, because a ", /*#__PURE__*/React.createElement(Hi, null, "new customer"), " comes back (~2.2 orders over time) while a repeat buyer is just one order, campaigns that actually acquire new users get an easier bar. That bar is the campaign's ", /*#__PURE__*/React.createElement(Hi, null, "floor"), ". ", /*#__PURE__*/React.createElement(Hi, null, "Earn = Direct ROAS ÷ floor.")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
@@ -13554,7 +13902,13 @@ function HelpView() {
     color: "#ef4444"
   }, "✂ Pull"), ". Every number respects the platform floors (budget ≥₹500, CPM ≥₹200); if both levers are exhausted it says Pause, never \"reduce 25%\"."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#2dd4bf"
-  }, "Spotlight is different"), " — Blinkit gives it no sales data, so it's judged on", /*#__PURE__*/React.createElement(Hi, null, " CCI"), " (cost per click vs category peers): Efficient / Pricey / Waste. A 0.04% CTR means 1 click per 2,500 views — that's an audience problem, not a bidding problem.")), /*#__PURE__*/React.createElement(Box, {
+  }, "Spotlight is different"), " — Blinkit gives it no sales data, so it's judged on", /*#__PURE__*/React.createElement(Hi, null, " CCI"), " (cost per click vs category peers): Efficient / Pricey / Waste. A 0.04% CTR means 1 click per 2,500 views — that's an audience problem, not a bidding problem."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#93c5fd"
+  }, "Why the same ROAS can be Earning on one campaign and Burning on another:"), " Earn Ratio rewards bringing in ", /*#__PURE__*/React.createElement(Hi, null, "new"), " customers. A campaign pulling lots of new buyers gets an easier bar — they reorder, so a slightly lossy first sale still pays off. One mostly re-selling to ", /*#__PURE__*/React.createElement(Hi, null, "existing"), " customers gets a tougher bar — they'd likely have bought anyway. ", /*#__PURE__*/React.createElement(Hi, null, "NUR (new-user rate) is the dial: more new customers → more room."), " So two campaigns both at 2.1x ROAS can land on opposite sides — the one acquiring is Earning, the one harvesting is Burning."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "One number across Generic, Comp and Reco:"), " profit is profit — ₹1 of margin is worth the same whatever keyword won it. There's no \"Comp gets a softer ROAS rule\" — Comp campaigns bring more new users, so their bar drops ", /*#__PURE__*/React.createElement(Hi, null, "automatically"), " through NUR, not a hand-set exception. ", /*#__PURE__*/React.createElement(Hi, null, "Brand"), " campaigns are shown but", /*#__PURE__*/React.createElement(Hi, null, " not scored"), " — they're defensive/always-on, so you don't cut a brand-defence term for low first-order ROAS."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
+    color: "#93c5fd"
+  }, "Two clocks:"), " ", /*#__PURE__*/React.createElement(Hi, {
+    color: "#f97316"
+  }, "⚡ = last 2 days"), " (sudden attacks — defend fast); everything else = ", /*#__PURE__*/React.createElement(Hi, null, "last 7 days vs the week before"), " (steady performance). A budget cut only triggers after", /*#__PURE__*/React.createElement(Hi, null, " two bad weeks"), ", so you never react to a one-off blip."), /*#__PURE__*/React.createElement(H, null, "FAQ"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\"My Comp campaign was fine at 2x ROAS — why Burning now?\""), " 2x was a hand-set rule; the bar is now your real margin, credited for repeat. If that category breaks even near ~2.9x, 2x is a loss."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\"Why no floor / margin number on the rows?\""), " Deliberate — rows stay jargon-free. Earn Ratio bakes the margin in: below 1 = losing, above 1 = making money. The mechanics live here in the Guide."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\"Same ROAS, different call — bug?\""), " No — it's the new-user mix (above)."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "\"Brand campaign shows metrics but no action?\""), " By design — Brand is defensive, shown for info, never auto-cut.")), /*#__PURE__*/React.createElement(Box, {
     accent: "#f59e0b"
   }, /*#__PURE__*/React.createElement(H, null, "⌁ Daily Brief — what each box means"), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The chips on each row"), " tell you the change type: ", /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
@@ -14026,9 +14380,6 @@ function App() {
     id: 'brief',
     label: `⌁ Daily Brief${briefCount ? ` (${briefCount})` : ''}`
   }, {
-    id: 'watching',
-    label: '👀 Watching'
-  }, {
     id: 'portfolio',
     label: 'Portfolio'
   }, {
@@ -14064,6 +14415,9 @@ function App() {
   }, {
     id: 'opps',
     label: '💡 Opportunities'
+  }, {
+    id: 'history',
+    label: '🗓 History'
   }, {
     id: 'guide',
     label: '❓ Guide'
@@ -14288,7 +14642,13 @@ function App() {
     }
   }, /*#__PURE__*/React.createElement("div", {
     className: "fade-in"
-  }, tab === 'brief' && /*#__PURE__*/React.createElement(DailyBriefView, {
+  }, tab === 'brief' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement(DailyBriefView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns,
     alerts: alerts,
@@ -14299,19 +14659,32 @@ function App() {
     catPrev: catPrev,
     allRows: allRows,
     mode: "brief"
-  }), tab === 'watching' && /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: '1px solid #1f2937',
+      paddingTop: 12,
+      marginTop: 2
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 11,
+      fontWeight: 700,
+      marginBottom: 2
+    }
+  }, "👀 On deck — brewing, not yet actionable"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginBottom: 10
+    }
+  }, "read-only · graduates into the Brief on its own when it becomes actionable · nothing here is downloadable"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(DefenceSection, {
-    alerts: alerts,
-    campaigns: campaigns,
-    allRows: allRows,
-    endDate: bounds.max,
-    reviewOnly: true
-  }), /*#__PURE__*/React.createElement(DailyBriefView, {
+  }, /*#__PURE__*/React.createElement(DailyBriefView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns,
     alerts: alerts,
@@ -14322,7 +14695,13 @@ function App() {
     catPrev: catPrev,
     allRows: allRows,
     mode: "watching"
-  })), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
+  }), /*#__PURE__*/React.createElement(DefenceSection, {
+    alerts: alerts,
+    campaigns: campaigns,
+    allRows: allRows,
+    endDate: bounds.max,
+    reviewOnly: true
+  })))), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns
   }), tab === 'scorecard' && /*#__PURE__*/React.createElement(ScorecardView, {
@@ -14354,7 +14733,7 @@ function App() {
     endDate: bounds.max
   }), tab === 'comp' && /*#__PURE__*/React.createElement(CompTrackerView, {
     comp: comp
-  }), tab === 'ledger' && /*#__PURE__*/React.createElement(ChangeLedgerView, {
+  }), tab === 'history' && /*#__PURE__*/React.createElement(HistoryView, null), tab === 'ledger' && /*#__PURE__*/React.createElement(ChangeLedgerView, {
     ledger: ledger
   }), tab === 'opps' && /*#__PURE__*/React.createElement(OpportunitiesView, {
     opps: opps
@@ -14399,7 +14778,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v19f = v19e + flag buttons labeled (🏳 park 30d / 👍 snooze 7d) + grouped right-aligned (consistent position, read as actions not status) · pending: slider/on-deck/History/rebasing/Guide
+// build: v21 = v20 + Sales-Flow/Cat-Sales per-category %-rebasing (organic in base) + Guide (NUR/one-metric/two-clocks/FAQ) + Watching folded into Brief as read-only On-deck (tab removed) · ALL PLANNED UPDATES IN
 
 </script>
 </body></html>
