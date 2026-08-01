@@ -9236,6 +9236,7 @@ function DefenceSection({
   const [sel, setSel] = useState(() => new Set());
   const [open, setOpen] = useState(() => new Set());
   const [genMsg, setGenMsg] = useState({});
+  const [revOpen, setRevOpen] = useState(false); // 👁 review list collapsed by default
   const kwSnap = useMemo(() => buildKwSnapshot(allRows, endDate), [allRows, endDate]);
   const {
     orders,
@@ -9458,65 +9459,96 @@ function DefenceSection({
         color: '#ef4444'
       }
     }, " · ⚠ no campaign ID — will be skipped"))));
-  })))), review.length > 0 && /*#__PURE__*/React.createElement(Card, {
-    style: {
-      padding: 16
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#9ca3af',
-      fontSize: 11,
-      fontWeight: 700,
-      marginBottom: 8
-    }
-  }, "👁 Sudden changes — review only, no safe counter-move (", review.length, ")"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#4b5563',
-      fontSize: 9,
-      marginBottom: 8
-    }
-  }, "market dips, daypart patterns, losing positions not worth defending, campaigns mid-settling — informational; anything defendable is already a ⚡ row in the Daily Brief"), review.slice(0, 20).map(({
-    a,
-    c,
-    note
-  }, i) => /*#__PURE__*/React.createElement("div", {
-    key: i,
-    style: {
-      padding: '5px 8px',
-      borderBottom: '1px solid #111827'
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      gap: 8,
-      alignItems: 'baseline',
-      flexWrap: 'wrap'
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#e5e7eb',
-      fontSize: 11,
-      fontWeight: 600
-    }
-  }, a.campaign), /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: '#6b7280',
-      fontSize: 9
-    }
-  }, (a.flags || []).map(f => f.label).join(' · ')), /*#__PURE__*/React.createElement("span", {
-    style: {
-      marginLeft: 'auto',
-      color: '#f97316',
-      fontSize: 10,
-      fontWeight: 700
-    }
-  }, fmt(a.severity, 'rsk'), "/d")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#6b7280',
-      fontSize: 10,
-      marginTop: 1
-    }
-  }, note || a.cause || '—')))));
+  })))), review.length > 0 && (() => {
+    const settling = review.filter(r => /settl/i.test(r.note || ''));
+    const rest = review.filter(r => !/settl/i.test(r.note || ''));
+    return /*#__PURE__*/React.createElement(Card, {
+      style: {
+        padding: 16
+      }
+    }, settling.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#6b7280',
+        fontSize: 10,
+        marginBottom: rest.length ? 8 : 0
+      }
+    }, "⏸ ", /*#__PURE__*/React.createElement("b", {
+      style: {
+        color: '#9ca3af'
+      }
+    }, settling.length, " settling"), " — changed in the last week, holding for post-change data before any move"), rest.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      onClick: () => setRevOpen(o => !o),
+      style: {
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: 8,
+        flexWrap: 'wrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#9ca3af',
+        fontSize: 11,
+        fontWeight: 700
+      }
+    }, "👁 ", rest.length, " sudden move", rest.length !== 1 ? 's' : '', " — nothing to act on"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#4b5563',
+        fontSize: 9
+      }
+    }, "market dips · daypart · not worth defending · anything defendable is already a ⚡ row in the Brief"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 'auto',
+        color: '#6b7280',
+        fontSize: 9
+      }
+    }, revOpen ? 'hide ▲' : 'expand ▼')), revOpen && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 6
+      }
+    }, rest.slice(0, 40).map(({
+      a,
+      c,
+      note
+    }, i) => /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        padding: '5px 8px',
+        borderBottom: '1px solid #111827'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'baseline',
+        flexWrap: 'wrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        fontWeight: 600
+      }
+    }, a.campaign), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#6b7280',
+        fontSize: 9
+      }
+    }, (a.flags || []).map(f => f.label).join(' · ')), /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 'auto',
+        color: '#f97316',
+        fontSize: 10,
+        fontWeight: 700
+      }
+    }, fmt(a.severity, 'rsk'), "/d")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#6b7280',
+        fontSize: 10,
+        marginTop: 1
+      }
+    }, note || a.cause || '—'))))));
+  })());
 }
 function DailyBriefView({
   campaigns,
@@ -9532,6 +9564,7 @@ function DailyBriefView({
 }) {
   const [done, setDone] = useState(new Set());
   const [copied, setCopied] = useState(false);
+  const [watchTick, setWatchTick] = useState(0); // re-render on act-now / wait from the On-the-clock strip
   const toggleDone = id => setDone(p => {
     const n = new Set(p);
     n.has(id) ? n.delete(id) : n.add(id);
@@ -10443,31 +10476,116 @@ function DailyBriefView({
     }));
   })(), reduces.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "👀",
-    title: "Watch — first burning week, no action yet",
+    title: "On the clock — 1 bad week",
     accent: "#f59e0b",
     count: reduces.length,
-    sub: "a third of these self-correct · burns a second week → appears in Daily Brief automatically"
-  }, reduces.map(c => /*#__PURE__*/React.createElement(Row, {
-    key: 'watch_' + c.campaign,
-    id: 'watch_' + c.campaign,
-    badge: c.verdict,
-    name: c.campaign,
-    tag: `${SEG_SHORT[c.segment] || c.segment || ''} · Earn ${c.earn != null ? c.earn.toFixed(2) : '—'}${c.earnFloor ? ` (floor ${c.earnFloor.toFixed(1)}x)` : ''}`,
-    impact: c.burnPerDay != null ? `${fmt(c.burnPerDay, 'rsk')}/d burn` : `${fmt(c.drr?.spend, 'rsk')}/d`,
-    impactColor: "#f59e0b",
-    action: c.earnAction ? c.earnAction.detail : 'first bad week — waiting for confirmation'
-  }))), /*#__PURE__*/React.createElement("div", {
+    sub: "a third self-correct · a second bad week → becomes a budget cut in the Brief automatically · or act early / wait"
+  }, reduces.map(c => {
+    const ck = c.campaign.toLowerCase();
+    const acted = getForceAct()[ck];
+    return /*#__PURE__*/React.createElement("div", {
+      key: 'watch_' + c.campaign,
+      style: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'flex-start',
+        padding: '5px 8px',
+        borderBottom: '1px solid #111827',
+        flexWrap: 'wrap'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 8,
+        alignItems: 'baseline',
+        flexWrap: 'wrap'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        fontWeight: 600
+      }
+    }, c.campaign), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#6b7280',
+        fontSize: 9
+      }
+    }, SEG_SHORT[c.segment] || c.segment || '', " · Earn Ratio ", c.earn != null ? c.earn.toFixed(2) : '—'), /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: 'auto',
+        color: '#f59e0b',
+        fontSize: 10,
+        fontWeight: 700
+      }
+    }, c.burnPerDay != null ? `${fmt(c.burnPerDay, 'rsk')}/d burn` : `${fmt(c.drr?.spend, 'rsk')}/d`)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#6b7280',
+        fontSize: 10,
+        marginTop: 1
+      }
+    }, acted ? '⬆ Acting now — a budget cut for this is in the Brief above (1 week of data, overriding the 2-week check)' : c.earnAction ? c.earnAction.detail : 'first bad week — waiting for confirmation')), !acted && /*#__PURE__*/React.createElement("span", {
+      onClick: () => {
+        setForceAct(c.campaign);
+        setWatchTick(t => t + 1);
+      },
+      title: "Act on it now — pushes a budget-cut order into the Brief (overrides the 2-week wait)",
+      style: {
+        fontSize: 9,
+        cursor: 'pointer',
+        color: '#fca5a5',
+        border: '1px solid #7f1d1d',
+        borderRadius: 4,
+        padding: '1px 6px',
+        whiteSpace: 'nowrap'
+      }
+    }, "⬆ act now"), acted && /*#__PURE__*/React.createElement("span", {
+      onClick: () => {
+        clearForceAct(c.campaign);
+        setWatchTick(t => t + 1);
+      },
+      style: {
+        fontSize: 9,
+        cursor: 'pointer',
+        color: '#93c5fd',
+        border: '1px solid #374151',
+        borderRadius: 4,
+        padding: '1px 6px',
+        whiteSpace: 'nowrap'
+      }
+    }, "↩ undo"), /*#__PURE__*/React.createElement("span", {
+      onClick: () => {
+        setStratTag(c.campaign, 'waited — recheck in a week', 7);
+        setWatchTick(t => t + 1);
+      },
+      title: "Give it another week — snooze 7 days",
+      style: {
+        fontSize: 9,
+        cursor: 'pointer',
+        color: '#9ca3af',
+        border: '1px solid #374151',
+        borderRadius: 4,
+        padding: '1px 6px',
+        whiteSpace: 'nowrap'
+      }
+    }, "⏭ wait 7d"));
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
       gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
       gap: 14
     }
   }, qtyDrops.length > 0 && /*#__PURE__*/React.createElement(Sec, {
-    icon: "📦",
-    title: "Qty Drops — Keyword Level",
+    icon: "📉",
+    title: "Qty Drops A — Biggest Share Loss",
     accent: "#ef4444",
     count: qtyDrops.length,
-    sub: "ranked by share-of-sales lost (Δpp) · INLINE = market dipped too"
+    sub: "losing share within its own category (Δpp) — the competitive signal · INLINE = market dipped too"
   }, qtyDrops.slice(0, 12).map(({
     r,
     pq,
@@ -10477,13 +10595,36 @@ function DailyBriefView({
     deltaPP,
     catChg
   }) => /*#__PURE__*/React.createElement(Row, {
-    key: 'qd_' + r.brand + r.category + r.segment + r.keyword,
-    id: 'qd_' + r.brand + r.category + r.segment + r.keyword,
+    key: 'qda_' + r.brand + r.category + r.segment + r.keyword,
+    id: 'qda_' + r.brand + r.category + r.segment + r.keyword,
     name: `"${r.keyword}"`,
     tag: `${r.brand} · ${r.category} · ${SEG_SHORT[r.segment] || r.segment}`,
-    impact: deltaPP != null ? `${deltaPP > 0 ? '+' : ''}${deltaPP.toFixed(1)}pp share` : `${(cq - pq).toFixed(1)}/d`,
+    impact: deltaPP != null ? `${deltaPP > 0 ? '+' : ''}${deltaPP.toFixed(1)}pp share` : '—',
     impactColor: "#ef4444",
-    action: `${pq.toFixed(1)} → ${cq.toFixed(1)} units/d (▼${Math.round((pq - cq) / pq * 100)}%) · share ${contribPrev != null ? contribPrev.toFixed(1) : '—'}% → ${contribNow != null ? contribNow.toFixed(1) : '—'}%`,
+    action: `share ${contribPrev != null ? contribPrev.toFixed(1) : '—'}% → ${contribNow != null ? contribNow.toFixed(1) : '—'}% · ${pq.toFixed(1)} → ${cq.toFixed(1)} units/d`,
+    meta: inlineVerdict(deltaPP, catChg)
+  }))), qtyDrops.length > 0 && /*#__PURE__*/React.createElement(Sec, {
+    icon: "📦",
+    title: "Qty Drops B — Biggest Volume Drop",
+    accent: "#ef4444",
+    count: qtyDrops.length,
+    sub: "most units/day lost (materiality) — GMV walking out"
+  }, [...qtyDrops].sort((a, b) => b.pq - b.cq - (a.pq - a.cq)).slice(0, 12).map(({
+    r,
+    pq,
+    cq,
+    contribNow,
+    contribPrev,
+    deltaPP,
+    catChg
+  }) => /*#__PURE__*/React.createElement(Row, {
+    key: 'qdb_' + r.brand + r.category + r.segment + r.keyword,
+    id: 'qdb_' + r.brand + r.category + r.segment + r.keyword,
+    name: `"${r.keyword}"`,
+    tag: `${r.brand} · ${r.category} · ${SEG_SHORT[r.segment] || r.segment}`,
+    impact: `▼${(pq - cq).toFixed(1)}/d`,
+    impactColor: "#ef4444",
+    action: `${pq.toFixed(1)} → ${cq.toFixed(1)} units/d (▼${Math.round((pq - cq) / pq * 100)}%) · share ${deltaPP != null ? (deltaPP > 0 ? '+' : '') + deltaPP.toFixed(1) + 'pp' : '—'}`,
     meta: inlineVerdict(deltaPP, catChg)
   }))), deteriorating.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "📉",
@@ -11371,6 +11512,40 @@ function getActivityLog() {
     return [];
   }
 }
+
+// ── FORCE-ACT (v22) — "act now" on an On-the-clock (wk-1 burning) item promotes it to a Brief order ──
+const FORCEACT_KEY = 'earn_force_act';
+function getForceAct() {
+  try {
+    const m = JSON.parse(localStorage.getItem(FORCEACT_KEY) || '{}');
+    const now = Date.now();
+    let ch = false;
+    Object.keys(m).forEach(k => {
+      if (!m[k] || m[k] < now) {
+        delete m[k];
+        ch = true;
+      }
+    });
+    if (ch) localStorage.setItem(FORCEACT_KEY, JSON.stringify(m));
+    return m;
+  } catch (e) {
+    return {};
+  }
+}
+function setForceAct(campaign) {
+  try {
+    const m = getForceAct();
+    m[campaign.toLowerCase()] = Date.now() + 3 * 864e5;
+    localStorage.setItem(FORCEACT_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
+function clearForceAct(campaign) {
+  try {
+    const m = getForceAct();
+    delete m[campaign.toLowerCase()];
+    localStorage.setItem(FORCEACT_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
 function HistoryView() {
   const log = getActivityLog();
   if (!log.length) return /*#__PURE__*/React.createElement(Card, {
@@ -11772,10 +11947,31 @@ function buildKwSnapshot(allRows, refDate) {
 function buildWorkOrders(campaigns, kwSnap, stratMap = {}, skipSet = new Set()) {
   const rnd5 = v => Math.round(v / 5) * 5;
   const orders = [];
+  const forceAct = getForceAct();
   campaigns.forEach(c => {
     const a = c.earnAction;
-    if (!a || a.kind === 'Settling' || a.kind === 'Watch') return;
+    if (!a || a.kind === 'Settling') return;
     const ck = c.campaign.toLowerCase();
+    if (a.kind === 'Watch') {
+      // wk-1 burning: skipped UNLESS user hit "act now" on the On-the-clock strip
+      if (!forceAct[ck] || skipSet.has(ck) || stratMap[ck]) return;
+      const cur = c.currentDailyBudget;
+      const nb = cur ? Math.max(500, Math.round(cur * 0.75 / 5) * 5) : null;
+      if (nb && nb < cur) orders.push({
+        campaign: c.campaign,
+        campaignId: c.campaignId,
+        brand: c.brand,
+        c,
+        kind: 'Pull',
+        label: '✂ Pull (acted early)',
+        file: 'budget',
+        budget: nb,
+        why: 'Acted early from On-the-clock — 1 bad week, overriding the 2-week wait',
+        display: `Budget ₹${Math.round(cur).toLocaleString('en-IN')} → ₹${nb.toLocaleString('en-IN')}`,
+        worth: c.burnPerDay ? `cuts ${fmt(c.burnPerDay * 0.5, 'rsk')}/d burn` : ''
+      });
+      return;
+    }
     if (skipSet.has(ck)) return; // defence acted today — fast clock wins
     if (stratMap[ck]) return; // snoozed — suppressed for ANY order kind, still shown in Watching
     const base = {
@@ -14778,7 +14974,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 ReactDOM.createRoot(document.getElementById('root')).render(/*#__PURE__*/React.createElement(ErrorBoundary, null, /*#__PURE__*/React.createElement(App, null)));
-// build: v21 = v20 + Sales-Flow/Cat-Sales per-category %-rebasing (organic in base) + Guide (NUR/one-metric/two-clocks/FAQ) + Watching folded into Brief as read-only On-deck (tab removed) · ALL PLANNED UPDATES IN
+// build: v22 = v21 + on-deck refinement: 👁 review collapsed to one-liner + settling extracted · Watch→"On the clock" with ⬆ act-now (promotes to Brief) / ⏭ wait 7d · Qty Drops split A (share loss) / B (volume drop)
 
 </script>
 </body></html>
