@@ -402,6 +402,35 @@ const EARN_STATE_CFG = {
   }
 };
 
+// Shared Earn Ratio computation — used by Keywords, Scorecard, Sales Flow, Cat Sales.
+// Returns {floor, earn, state}. state ∈ Earning/Breakeven/Burning/Insufficient/No Floor/null.
+function earnRatioFor(directRoas, nur, cm1Pct, directQty, spend) {
+  if (cm1Pct == null || cm1Pct <= 0) return {
+    floor: null,
+    earn: null,
+    state: 'No Floor'
+  };
+  if (directQty != null && spend != null && directQty < EARN_INSUF_UNITS && spend / 1 < EARN_INSUF_SPEND && directRoas == null) return {
+    floor: null,
+    earn: null,
+    state: 'Insufficient'
+  };
+  const nurEff = nur == null || isNaN(nur) ? 0.5 : Math.max(0, Math.min(1, nur));
+  const floor = 1 / cm1Pct / (nurEff * EARN_R + (1 - nurEff));
+  if (directRoas == null) return {
+    floor,
+    earn: null,
+    state: null
+  };
+  const earn = directRoas / floor;
+  const state = earn >= EARN_HI ? 'Earning' : earn >= EARN_LO ? 'Breakeven' : 'Burning';
+  return {
+    floor,
+    earn,
+    state
+  };
+}
+
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
 function metricScore(v, floor, healthy, strong) {
@@ -540,7 +569,8 @@ const FIELD_ALIASES = {
     totalRoasRaw: ['total roas'],
     segment: ['final head/not head', 'final head not head'],
     brand: ['brand'],
-    category: ['gc category', 'category']
+    category: ['gc category', 'category'],
+    compBrand: ['comp brand name', 'comp brand']
   },
   Reco: {
     date: ['date ist', 'date'],
@@ -655,7 +685,8 @@ const FALLBACK_IDX = {
     totalRoasRaw: 20,
     segment: 36,
     brand: 27,
-    category: 28
+    category: 28,
+    compBrand: 29
   },
   Reco: {
     date: 1,
@@ -812,6 +843,7 @@ function extractRow(row, type, C) {
     segment: s('segment') || null,
     brand: s('brand'),
     category: s('category'),
+    compBrand: s('compBrand') || null,
     hasMetrics: true
   };
   if (type === 'Reco') return {
@@ -1092,6 +1124,7 @@ async function fetchAllDataFromSheets() {
   // salesAgg[`${brand}||${cat}`][dateTimestamp] = totalUnits
   // Dates are in DD-MM-YYYY format (e.g. "01-03-2026" = 1 March 2026)
   const salesAgg = {};
+  const salesNetAgg = {}; // net revenue (col J) per brand||category per date — for Net Rev/STR%
   const salesRows = parseCSV(salesText);
   // Resolve Sales-import columns by header name (fallback to fixed positions).
   let sH = -1;
@@ -1113,7 +1146,8 @@ async function fetchAllDataFromSheets() {
   const sDate = colS(['date'], 1),
     sUnits = colS(['units'], 4),
     sBrand = colS(['brand'], 7),
-    sCat = colS(['gc cat', 'gc category', 'category'], 8);
+    sCat = colS(['gc cat', 'gc category', 'category'], 8),
+    sNet = colS(['net revenue', 'net revenu', 'net rev'], 9);
   if (sH >= 0 && sHdr.indexOf('gc cat') < 0 && sHdr.indexOf('gc category') < 0) {
     SCHEMA_WARNINGS.push('Sales Import: category column not found by name — using last-known position');
   }
@@ -1132,6 +1166,9 @@ async function fetchAllDataFromSheets() {
     if (!salesAgg[k]) salesAgg[k] = {};
     const ts = d.getTime();
     salesAgg[k][ts] = (salesAgg[k][ts] || 0) + units;
+    const netRev = parseFloat(String(row[sNet] || '').replace(/,/g, '')) || 0;
+    if (!salesNetAgg[k]) salesNetAgg[k] = {};
+    salesNetAgg[k][ts] = (salesNetAgg[k][ts] || 0) + netRev;
   });
 
   // ── Parse CM1 block (same Sales import tab, side block at cols M+) ──────────
@@ -1182,6 +1219,7 @@ async function fetchAllDataFromSheets() {
     ltvMap,
     campaignIndexMap,
     salesAgg,
+    salesNetAgg,
     kwVolume,
     cm1Map,
     cutoffDate
@@ -1816,8 +1854,9 @@ function aggregateKeywords(allRows, ltvMap, startDate, endDate, campaignIndexMap
 
 // ─── KEYWORD-LEVEL AGGREGATION (flattened to keyword, with campaign drill-down) ──
 
-function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignIndexMap = {}) {
+function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignIndexMap = {}, cm1Map = {}) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
+  const cm1For = (b, c) => cm1Map[`${(b || '').toLowerCase()}|${(c || '').toLowerCase()}`] || null;
   const windowRows = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.keyword && r.type === 'Search');
 
   // Group by keyword only (across all campaigns)
@@ -1889,6 +1928,9 @@ function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignInde
       const cCpmI = cCpmR.reduce((s, r) => s + r.impressions, 0);
       const cPosR = cr.filter(r => r.position > 0 && r.impressions > 0);
       const cPosI = cPosR.reduce((s, r) => s + r.impressions, 0);
+      const cRoas = cSpend > 0 ? cDS / cSpend : null,
+        cNur = cQty > 0 ? cNU / cQty : null;
+      const cEr = earnRatioFor(cRoas, cNur, cm1For(cd.brand, cd.category), cDQ, cSpend);
       campaigns[camp] = {
         campaign: cd.campaign,
         brand: cd.brand,
@@ -1899,8 +1941,11 @@ function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignInde
         newUsers: cNU,
         directQty: cDQ,
         impressions: cImp,
-        roas: cSpend > 0 ? cDS / cSpend : null,
-        nur: cQty > 0 ? cNU / cQty : null,
+        roas: cRoas,
+        nur: cNur,
+        earn: cEr.earn,
+        earnFloor: cEr.floor,
+        earnState: cEr.state,
         avgCpm: cCpmI > 0 ? cCpmR.reduce((s, r) => s + r.cpm * r.impressions, 0) / cCpmI : null,
         avgPos: cPosI > 0 ? cPosR.reduce((s, r) => s + r.position * r.impressions, 0) / cPosI : null,
         drr: {
@@ -1915,6 +1960,7 @@ function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignInde
 
     // Pick primary brand/segment from highest-spend campaign
     const topCamp = Object.values(campaigns).sort((a, b) => (b.spend || 0) - (a.spend || 0))[0];
+    const kwEr = earnRatioFor(roas, nur, cm1For(topCamp?.brand, topCamp?.category), totDQ, totSpend);
     return {
       keyword: g.keyword,
       brand: topCamp?.brand || '',
@@ -1933,7 +1979,10 @@ function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignInde
       nur,
       avgPos,
       avgCpm,
-      campaigns
+      campaigns,
+      earn: kwEr.earn,
+      earnFloor: kwEr.floor,
+      earnState: kwEr.state
     };
   }).sort((a, b) => (b.spend || 0) - (a.spend || 0));
 }
@@ -1943,7 +1992,10 @@ function aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignInde
 function computeMetrics(rows, numDays) {
   const totSpend = rows.reduce((s, r) => s + (r.spend || 0), 0);
   const totDS = rows.reduce((s, r) => s + (r.directSales || 0), 0);
+  const totIS = rows.reduce((s, r) => s + (r.indirectSales || 0), 0);
   const totDQ = rows.reduce((s, r) => s + (r.directQty || 0), 0);
+  const totIQ = rows.reduce((s, r) => s + (r.indirectQty || 0), 0);
+  const totNU = rows.reduce((s, r) => s + (r.newUsers || 0), 0);
   const totImp = rows.reduce((s, r) => s + (r.impressions || 0), 0);
   const cpmRows = rows.filter(r => r.cpm > 0 && r.impressions > 0);
   const cpmImp = cpmRows.reduce((s, r) => s + r.impressions, 0);
@@ -1967,23 +2019,37 @@ function computeMetrics(rows, numDays) {
     spend: totSpend,
     directSales: totDS,
     impressions: totImp,
+    indirectSales: totIS,
+    indirectQty: totIQ,
+    newUsers: totNU,
     avgCpm,
     avgPos,
     currentDailyBudget,
     directRoas: totSpend > 0 ? totDS / totSpend : null,
+    totalRoas: totSpend > 0 ? (totDS + totIS) / totSpend : null,
+    nur: totDQ > 0 ? Math.min(totNU / totDQ, 1) : null,
     drrDQ: totDQ / numDays,
     drrSpend: totSpend / numDays,
     drrImp: totImp / numDays,
+    drrNU: totNU / numDays,
     numDays
   };
 }
 
 // Flat keyword-level aggregation for Cat. Sales tab
 // Returns: [{brand, category, segment, keyword, ...metrics, campaigns:{name→metrics}}]
-function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}, salesAgg = {}) {
+function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}, salesAgg = {}, salesNetAgg = {}, cm1Map = {}) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
   const win = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.hasMetrics);
   const VALID_SEGS = new Set(['Generic Head', 'Generic Tail', 'Comp', 'Brand', 'Add to Index']);
+  const cm1For = (b, c) => cm1Map[`${(b || '').toLowerCase()}|${(c || '').toLowerCase()}`] || null;
+  const attachEarn = (node, b, c) => {
+    const er = earnRatioFor(node.directRoas, node.nur, cm1For(b, c), node.directQty, node.spend);
+    node.earn = er.earn;
+    node.earnFloor = er.floor;
+    node.earnState = er.state;
+    return node;
+  };
 
   // Campaign-level segment: use mode (most common) per campaign from row data
   const campaignSegCounts = {};
@@ -2035,10 +2101,10 @@ function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}
     const allRows2 = [];
     const campaigns = {};
     Object.entries(camps).forEach(([camp, rows]) => {
-      campaigns[camp] = computeMetrics(rows, numDays);
+      campaigns[camp] = attachEarn(computeMetrics(rows, numDays), brand, category);
       allRows2.push(...rows);
     });
-    return {
+    const row = {
       brand,
       category,
       segment,
@@ -2046,6 +2112,7 @@ function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}
       ...computeMetrics(allRows2, numDays),
       campaigns
     };
+    return attachEarn(row, brand, category);
   });
 
   // Add Organic rows: one per brand||category that has sales import data
@@ -2082,7 +2149,7 @@ function aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap = {}
 }
 
 // Nested Category → Segment → Keyword → Campaign aggregation for Sales Flow tab
-function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {}, salesAgg = {}) {
+function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {}, salesAgg = {}, salesNetAgg = {}, cm1Map = {}) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
   const win = allRows.filter(r => r.date >= startDate && r.date <= endDate && r.hasMetrics);
   const VALID_SEGS_BC = new Set(['Generic Head', 'Generic Tail', 'Comp', 'Brand', 'Add to Index']);
@@ -2165,19 +2232,60 @@ function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {},
         impressions: 0,
         avgCpm: null,
         directRoas: null,
+        nur: null,
         numDays,
         keywords: {}
       };
     }
     const adMet = computeMetrics(allCatRows, numDays);
-    // Category-level drrDQ = total (ads + organic); other metrics stay ad-only
-    return {
+
+    // ── Net Revenue (Sales-import col J), STR%, Spend Contribution %, Earn Ratio ──
+    let catNetRev = 0;
+    Object.entries(salesNetAgg[salesKey] || {}).forEach(([ts, v]) => {
+      const d = new Date(parseInt(ts));
+      if (d >= startDate && d <= endDate) catNetRev += v;
+    });
+    const catDenomDQ = totalSalesDQ > 0 ? totalSalesDQ : totalAdDQ; // qty base for net-rev split
+    const catSpend = adMet.spend || 0;
+    const cm1Pct = cm1Map[`${(brand || '').toLowerCase()}|${(category || '').toLowerCase()}`] || null;
+    // decorate a node in place: net rev split by qty, STR = spend÷netRev, spend% of cat, earn ratio
+    const decorate = node => {
+      const dq = node.directQty || 0;
+      node.netRev = catDenomDQ > 0 ? catNetRev * (dq / catDenomDQ) : 0;
+      node.drrNetRev = node.netRev / numDays;
+      node.str = node.netRev > 0 ? (node.spend || 0) / node.netRev : null; // spend-to-netrev ratio
+      node.spendPct = catSpend > 0 ? (node.spend || 0) / catSpend * 100 : 0;
+      const er = earnRatioFor(node.directRoas, node.nur, cm1Pct, node.directQty, node.spend);
+      node.earn = er.earn;
+      node.earnFloor = er.floor;
+      node.earnState = er.state;
+      return node;
+    };
+    Object.values(segs).forEach(seg => {
+      decorate(seg);
+      Object.values(seg.keywords || {}).forEach(kw => {
+        decorate(kw);
+        Object.values(kw.campaigns || {}).forEach(camp => decorate(camp));
+      });
+    });
+
+    // Category-level: net rev = full cat, STR = catSpend÷netRev, spend% = 100 (base)
+    const cat = {
       brand,
       category,
       ...adMet,
       drrDQ: totalSalesDQ > 0 ? totalSalesDQ / numDays : adMet.drrDQ,
       segs
     };
+    cat.netRev = catNetRev;
+    cat.drrNetRev = catNetRev / numDays;
+    cat.str = catNetRev > 0 ? catSpend / catNetRev : null;
+    cat.spendPct = catSpend > 0 ? 100 : 0;
+    const catEr = earnRatioFor(adMet.directRoas, adMet.nur, cm1Pct, adMet.directQty, adMet.spend);
+    cat.earn = catEr.earn;
+    cat.earnFloor = catEr.floor;
+    cat.earnState = catEr.state;
+    return cat;
   });
 }
 function getDateBounds(allRows) {
@@ -4501,6 +4609,18 @@ function ScorecardView({
       });
       return d > 0 ? n / d : null;
     })();
+    const subEarn = (() => {
+      let n = 0,
+        d = 0;
+      filtered.forEach(c => {
+        if (c.earn != null && c.drr?.spend > 0) {
+          n += c.earn * (c.drr?.spend || 0);
+          d += c.drr?.spend || 0;
+        }
+      });
+      return d > 0 ? n / d : null;
+    })();
+    const subEarnColor = subEarn == null ? '#4b5563' : subEarn >= EARN_HI ? '#22c55e' : subEarn >= EARN_LO ? '#f59e0b' : '#ef4444';
     return /*#__PURE__*/React.createElement("tr", {
       style: {
         borderBottom: '2px solid #1f2937',
@@ -4655,9 +4775,13 @@ function ScorecardView({
       }
     }), /*#__PURE__*/React.createElement("td", {
       style: {
-        padding: '6px 8px'
+        padding: '6px 8px',
+        textAlign: 'right',
+        fontSize: 11,
+        fontWeight: 700,
+        color: subEarnColor
       }
-    }), /*#__PURE__*/React.createElement("td", {
+    }, subEarn != null ? subEarn.toFixed(2) : '—'), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '6px 8px'
       }
@@ -5648,6 +5772,18 @@ function KeywordScorecardView({
   const subQty = useMemo(() => filtered.reduce((s, k) => s + (k.drr?.totalQty || 0), 0), [filtered]);
   const subDRoas = useMemo(() => subSpend > 0 ? subSales / subSpend : null, [subSales, subSpend]);
   const subNUR = useMemo(() => subQty > 0 ? subNU / subQty : null, [subNU, subQty]);
+  const subEarn = useMemo(() => {
+    let num = 0,
+      den = 0;
+    filtered.forEach(k => {
+      if (k.earn != null && k.drr?.spend > 0) {
+        num += k.earn * k.drr.spend;
+        den += k.drr.spend;
+      }
+    });
+    return den > 0 ? num / den : null;
+  }, [filtered]);
+  const earnCol = st => st === 'Earning' ? '#22c55e' : st === 'Breakeven' ? '#f59e0b' : st === 'Burning' ? '#ef4444' : '#4b5563';
   const subRank = useMemo(() => {
     let num = 0,
       den = 0;
@@ -5845,10 +5981,13 @@ function KeywordScorecardView({
   }, "Sales/d"), /*#__PURE__*/React.createElement(Th, {
     col: "roas",
     align: "right"
-  }, "ROAS"), /*#__PURE__*/React.createElement(Th, {
+  }, "D.ROAS"), /*#__PURE__*/React.createElement(Th, {
     col: "nur",
     align: "right"
   }, "NUR"), /*#__PURE__*/React.createElement(Th, {
+    col: "earn",
+    align: "right"
+  }, "Earn Ratio"), /*#__PURE__*/React.createElement(Th, {
     col: "avgPos",
     align: "right"
   }, "Rank"), /*#__PURE__*/React.createElement(Th, {
@@ -5945,6 +6084,14 @@ function KeywordScorecardView({
       color: subNUR != null ? mColor(subNUR, 0.3, 0.5, 0.66) : '#4b5563'
     }
   }, subNUR != null ? fmt(subNUR, '%') : '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 8px',
+      textAlign: 'right',
+      fontSize: 11,
+      fontWeight: 700,
+      color: earnCol(subEarn != null ? subEarn >= EARN_HI ? 'Earning' : subEarn >= EARN_LO ? 'Breakeven' : 'Burning' : null)
+    }
+  }, subEarn != null ? subEarn.toFixed(2) : '—'), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 8px',
       textAlign: 'right',
@@ -6124,6 +6271,19 @@ function KeywordScorecardView({
       healthy: bm?.nurH,
       strong: bm?.nurS,
       type: "%"
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 8px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap',
+        fontWeight: 700,
+        fontSize: 11,
+        color: earnCol(k.earnState)
+      },
+      title: k.earnFloor != null ? `Earn = D.ROAS ÷ floor ${k.earnFloor.toFixed(2)}x` : 'no floor'
+    }, k.earn != null ? k.earn.toFixed(2) : '—', /*#__PURE__*/React.createElement(PctChg, {
+      curr: k.earn,
+      prev: pk?.earn
     })), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 8px',
@@ -6322,6 +6482,18 @@ function KeywordScorecardView({
       }, cd.nur != null ? (cd.nur * 100).toFixed(0) + '%' : '—'), /*#__PURE__*/React.createElement("td", {
         style: {
           padding: '4px 8px',
+          textAlign: 'right',
+          fontSize: 10,
+          fontWeight: 700,
+          whiteSpace: 'nowrap',
+          color: earnCol(cd.earnState)
+        }
+      }, cd.earn != null ? cd.earn.toFixed(2) : '—', /*#__PURE__*/React.createElement(PctChg, {
+        curr: cd.earn,
+        prev: pcd?.earn
+      })), /*#__PURE__*/React.createElement("td", {
+        style: {
+          padding: '4px 8px',
           color: '#9ca3af',
           textAlign: 'right',
           fontSize: 10,
@@ -6464,6 +6636,8 @@ function CategorySalesView({
     if (col === 'drrDQ') return obj.drrDQ ?? null;
     if (col === 'drrSpend') return obj.drrSpend ?? null;
     if (col === 'droas') return obj.directRoas ?? null;
+    if (col === 'nur') return obj.nur ?? null;
+    if (col === 'earn') return obj.earn ?? null;
     if (col === 'cpm') return obj.avgCpm ?? null;
     return null;
   };
@@ -6524,6 +6698,9 @@ function CategorySalesView({
   const fmtS = n => n == null ? '—' : n >= 100000 ? '₹' + (n / 100000).toFixed(1) + 'L' : n >= 1000 ? '₹' + (n / 1000).toFixed(1) + 'K' : '₹' + Math.round(n);
   const fmtR = n => n == null ? '—' : n.toFixed(2) + 'x';
   const fmtCPM = n => n == null ? '—' : '₹' + Math.round(n).toLocaleString('en-IN');
+  const fmtPc = n => n == null ? '—' : (n * 100).toFixed(0) + '%';
+  const fmtE = n => n == null ? '—' : n.toFixed(2);
+  const earnCol = st => st === 'Earning' ? '#22c55e' : st === 'Breakeven' ? '#f59e0b' : st === 'Burning' ? '#ef4444' : '#4b5563';
   const pct = (c, p) => !p || c == null ? null : (c - p) / Math.abs(p) * 100;
   const DPct = ({
     curr,
@@ -6610,24 +6787,74 @@ function CategorySalesView({
     'Generic Tail': 'Gen Tail'
   };
 
-  // Subtotal computation
-  const subTotalDQ = useMemo(() => filtered.reduce((s, r) => s + (r.drrDQ || 0), 0), [filtered]);
-  const subTotalSpend = useMemo(() => filtered.reduce((s, r) => s + (r.drrSpend || 0), 0), [filtered]);
-  const subDeltaDQ = useMemo(() => filtered.reduce((s, r) => {
-    const pk = `${r.brand}||${r.category}||${r.segment}||${r.keyword}`;
-    return s + ((r.drrDQ ?? 0) - (prevMap[pk]?.drrDQ ?? 0));
-  }, 0), [filtered, prevMap]);
-  const subRoas = useMemo(() => {
-    let num = 0,
-      den = 0;
+  // Subtotal computation — current + prev (weighted), so TOTAL row captures Δ like child rows
+  const sub = useMemo(() => {
+    let dq = 0,
+      spend = 0,
+      roasNum = 0,
+      roasDen = 0,
+      nurNum = 0,
+      nurDen = 0,
+      earnNum = 0,
+      earnDen = 0;
+    let pDq = 0,
+      pSpend = 0,
+      pRoasNum = 0,
+      pRoasDen = 0,
+      pNurNum = 0,
+      pNurDen = 0,
+      pEarnNum = 0,
+      pEarnDen = 0;
     filtered.forEach(r => {
+      dq += r.drrDQ || 0;
+      spend += r.drrSpend || 0;
       if (r.directRoas != null && r.drrSpend > 0) {
-        num += r.directRoas * r.drrSpend;
-        den += r.drrSpend;
+        roasNum += r.directRoas * r.drrSpend;
+        roasDen += r.drrSpend;
+      }
+      if (r.nur != null && r.drrDQ > 0) {
+        nurNum += r.nur * r.drrDQ;
+        nurDen += r.drrDQ;
+      }
+      if (r.earn != null && r.drrSpend > 0) {
+        earnNum += r.earn * r.drrSpend;
+        earnDen += r.drrSpend;
+      }
+      const p = prevMap[`${r.brand}||${r.category}||${r.segment}||${r.keyword}`];
+      if (p) {
+        pDq += p.drrDQ || 0;
+        pSpend += p.drrSpend || 0;
+        if (p.directRoas != null && p.drrSpend > 0) {
+          pRoasNum += p.directRoas * p.drrSpend;
+          pRoasDen += p.drrSpend;
+        }
+        if (p.nur != null && p.drrDQ > 0) {
+          pNurNum += p.nur * p.drrDQ;
+          pNurDen += p.drrDQ;
+        }
+        if (p.earn != null && p.drrSpend > 0) {
+          pEarnNum += p.earn * p.drrSpend;
+          pEarnDen += p.drrSpend;
+        }
       }
     });
-    return den > 0 ? num / den : null;
-  }, [filtered]);
+    return {
+      dq,
+      spend,
+      roas: roasDen > 0 ? roasNum / roasDen : null,
+      nur: nurDen > 0 ? nurNum / nurDen : null,
+      earn: earnDen > 0 ? earnNum / earnDen : null,
+      pDq,
+      pSpend,
+      pRoas: pRoasDen > 0 ? pRoasNum / pRoasDen : null,
+      pNur: pNurDen > 0 ? pNurNum / pNurDen : null,
+      pEarn: pEarnDen > 0 ? pEarnNum / pEarnDen : null
+    };
+  }, [filtered, prevMap]);
+  const subTotalDQ = sub.dq,
+    subTotalSpend = sub.spend,
+    subRoas = sub.roas,
+    subDeltaDQ = sub.dq - sub.pDq;
 
   // Build table rows
   const tableRows = [];
@@ -6684,7 +6911,10 @@ function CategorySalesView({
       fontSize: 11,
       whiteSpace: 'nowrap'
     }
-  }, fmtDQ(subTotalDQ)), /*#__PURE__*/React.createElement("td", {
+  }, fmtDQ(subTotalDQ), /*#__PURE__*/React.createElement(DPct, {
+    curr: sub.dq,
+    prev: sub.pDq
+  })), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px',
       textAlign: 'right',
@@ -6692,7 +6922,10 @@ function CategorySalesView({
       fontSize: 11,
       whiteSpace: 'nowrap'
     }
-  }, fmtS(subTotalSpend)), /*#__PURE__*/React.createElement("td", {
+  }, fmtS(subTotalSpend), /*#__PURE__*/React.createElement(DPct, {
+    curr: sub.spend,
+    prev: sub.pSpend
+  })), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px',
       textAlign: 'right',
@@ -6700,7 +6933,33 @@ function CategorySalesView({
       whiteSpace: 'nowrap',
       color: subRoas != null ? mColor(subRoas, 0.5, 1.5, 3.0) : '#4b5563'
     }
-  }, fmtR(subRoas)), /*#__PURE__*/React.createElement("td", {
+  }, fmtR(subRoas), /*#__PURE__*/React.createElement(DPct, {
+    curr: sub.roas,
+    prev: sub.pRoas
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtPc(sub.nur), /*#__PURE__*/React.createElement(DPct, {
+    curr: sub.nur,
+    prev: sub.pNur
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      fontSize: 11,
+      whiteSpace: 'nowrap',
+      fontWeight: 700,
+      color: earnCol(sub.earn != null ? sub.earn >= EARN_HI ? 'Earning' : sub.earn >= EARN_LO ? 'Breakeven' : 'Burning' : null)
+    }
+  }, fmtE(sub.earn), /*#__PURE__*/React.createElement(DPct, {
+    curr: sub.earn,
+    prev: sub.pEarn
+  })), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px',
       textAlign: 'right',
@@ -6748,7 +7007,7 @@ function CategorySalesView({
             background: 'transparent'
           }
         }, /*#__PURE__*/React.createElement("td", {
-          colSpan: 11,
+          colSpan: 13,
           style: {
             padding: '4px 10px',
             borderTop: '1px dashed #1f2937',
@@ -6960,6 +7219,57 @@ function CategorySalesView({
         fontSize: 9
       }
     }, fmtR(prevRow.directRoas)))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, isOrganic ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#374151',
+        fontSize: 10
+      }
+    }, "—") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 600,
+        color: '#9ca3af',
+        fontSize: 11
+      }
+    }, fmtPc(row.nur), /*#__PURE__*/React.createElement(DPct, {
+      curr: row.nur,
+      prev: prevRow?.nur
+    })), prevRow?.nur != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 9
+      }
+    }, fmtPc(prevRow.nur)))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      },
+      title: row.earnFloor != null ? `Earn = D.ROAS ÷ floor ${row.earnFloor.toFixed(2)}x` : 'no floor'
+    }, isOrganic ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#374151',
+        fontSize: 10
+      }
+    }, "—") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 700,
+        fontSize: 11,
+        color: earnCol(row.earnState)
+      }
+    }, fmtE(row.earn), /*#__PURE__*/React.createElement(DPct, {
+      curr: row.earn,
+      prev: prevRow?.earn
+    })), prevRow?.earn != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 9
+      }
+    }, fmtE(prevRow.earn)))), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         textAlign: 'right',
@@ -7177,6 +7487,33 @@ function CategorySalesView({
           style: {
             padding: '4px 10px',
             textAlign: 'right',
+            color: '#9ca3af',
+            fontSize: 10,
+            whiteSpace: 'nowrap'
+          }
+        }, fmtPc(cd.nur), prevCd?.nur != null && /*#__PURE__*/React.createElement("div", {
+          style: {
+            color: '#374151',
+            fontSize: 8
+          }
+        }, fmtPc(prevCd.nur))), /*#__PURE__*/React.createElement("td", {
+          style: {
+            padding: '4px 10px',
+            textAlign: 'right',
+            fontSize: 10,
+            whiteSpace: 'nowrap',
+            fontWeight: 700,
+            color: earnCol(cd.earnState)
+          }
+        }, fmtE(cd.earn), prevCd?.earn != null && /*#__PURE__*/React.createElement("div", {
+          style: {
+            color: '#374151',
+            fontSize: 8
+          }
+        }, fmtE(prevCd.earn))), /*#__PURE__*/React.createElement("td", {
+          style: {
+            padding: '4px 10px',
+            textAlign: 'right',
             color: '#6b7280',
             fontSize: 10,
             whiteSpace: 'nowrap'
@@ -7381,6 +7718,14 @@ function CategorySalesView({
     label: "D.ROAS",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
+    col: "nur",
+    label: "NUR %",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "earn",
+    label: "Earn Ratio",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
     col: "cpm",
     label: "CPM",
     right: true
@@ -7461,7 +7806,12 @@ function SalesFlowView({
     if (!obj) return null;
     if (col === 'drrDQ') return obj.drrDQ ?? null;
     if (col === 'drrSpend') return obj.drrSpend ?? null;
+    if (col === 'netrev') return obj.drrNetRev ?? null;
+    if (col === 'spendpct') return obj.spendPct ?? null;
+    if (col === 'str') return obj.str ?? null;
     if (col === 'droas') return obj.directRoas ?? null;
+    if (col === 'nur') return obj.nur ?? null;
+    if (col === 'earn') return obj.earn ?? null;
     if (col === 'cpm') return obj.avgCpm ?? null;
     return null;
   };
@@ -7509,6 +7859,10 @@ function SalesFlowView({
   const fmtS = n => n == null ? '—' : n >= 100000 ? '₹' + (n / 100000).toFixed(1) + 'L' : n >= 1000 ? '₹' + (n / 1000).toFixed(1) + 'K' : '₹' + Math.round(n);
   const fmtR = n => n == null ? '—' : n.toFixed(2) + 'x';
   const fmtCPM = n => n == null ? '—' : '₹' + Math.round(n).toLocaleString('en-IN');
+  const fmtPc = n => n == null ? '—' : (n * 100).toFixed(0) + '%'; // fraction → %
+  const fmtSp = n => n == null ? '—' : n.toFixed(0) + '%'; // already a % number
+  const fmtE = n => n == null ? '—' : n.toFixed(2);
+  const earnCol = st => st === 'Earning' ? '#22c55e' : st === 'Breakeven' ? '#f59e0b' : st === 'Burning' ? '#ef4444' : '#4b5563';
   const pctChg = (c, p) => !p || c == null ? null : (c - p) / Math.abs(p) * 100;
   const DPct = ({
     curr,
@@ -7595,26 +7949,84 @@ function SalesFlowView({
     'Generic Tail': 'Gen Tail'
   };
 
-  // Subtotal
-  const sfSubSpend = useMemo(() => filtered.reduce((s, c) => s + (c.drrSpend || 0), 0), [filtered]);
-  const sfSubRoas = useMemo(() => {
-    let num = 0,
-      den = 0;
+  // Subtotal — current + prev (weighted), so the TOTAL row captures Δ like child rows
+  const sfSub = useMemo(() => {
+    let spend = 0,
+      netrev = 0,
+      dq = 0,
+      roasNum = 0,
+      roasDen = 0,
+      nurNum = 0,
+      nurDen = 0,
+      earnNum = 0,
+      earnDen = 0;
+    let pSpend = 0,
+      pNetrev = 0,
+      pDq = 0,
+      pRoasNum = 0,
+      pRoasDen = 0,
+      pNurNum = 0,
+      pNurDen = 0,
+      pEarnNum = 0,
+      pEarnDen = 0;
     filtered.forEach(c => {
+      spend += c.drrSpend || 0;
+      netrev += c.drrNetRev || 0;
+      dq += c.drrDQ || 0;
       if (c.directRoas != null && c.drrSpend > 0) {
-        num += c.directRoas * c.drrSpend;
-        den += c.drrSpend;
+        roasNum += c.directRoas * c.drrSpend;
+        roasDen += c.drrSpend;
+      }
+      if (c.nur != null && c.drrDQ > 0) {
+        nurNum += c.nur * c.drrDQ;
+        nurDen += c.drrDQ;
+      }
+      if (c.earn != null && c.drrSpend > 0) {
+        earnNum += c.earn * c.drrSpend;
+        earnDen += c.drrSpend;
+      }
+      const p = prevMap[`${c.brand}||${c.category}`];
+      if (p) {
+        pSpend += p.drrSpend || 0;
+        pNetrev += p.drrNetRev || 0;
+        pDq += p.drrDQ || 0;
+        if (p.directRoas != null && p.drrSpend > 0) {
+          pRoasNum += p.directRoas * p.drrSpend;
+          pRoasDen += p.drrSpend;
+        }
+        if (p.nur != null && p.drrDQ > 0) {
+          pNurNum += p.nur * p.drrDQ;
+          pNurDen += p.drrDQ;
+        }
+        if (p.earn != null && p.drrSpend > 0) {
+          pEarnNum += p.earn * p.drrSpend;
+          pEarnDen += p.drrSpend;
+        }
       }
     });
-    return den > 0 ? num / den : null;
-  }, [filtered]);
-  const sfSubDeltaDQ = useMemo(() => filtered.reduce((s, c) => {
-    const pk = `${c.brand}||${c.category}`;
-    return s + ((c.drrDQ ?? 0) - (prevMap[pk]?.drrDQ ?? 0));
-  }, 0), [filtered, prevMap]);
+    return {
+      spend,
+      netrev,
+      dq,
+      roas: roasDen > 0 ? roasNum / roasDen : null,
+      nur: nurDen > 0 ? nurNum / nurDen : null,
+      earn: earnDen > 0 ? earnNum / earnDen : null,
+      str: netrev > 0 ? spend / netrev : null,
+      pSpend,
+      pNetrev,
+      pDq,
+      pRoas: pRoasDen > 0 ? pRoasNum / pRoasDen : null,
+      pNur: pNurDen > 0 ? pNurNum / pNurDen : null,
+      pEarn: pEarnDen > 0 ? pEarnNum / pEarnDen : null,
+      pStr: pNetrev > 0 ? pSpend / pNetrev : null
+    };
+  }, [filtered, prevMap]);
+  const sfSubSpend = sfSub.spend,
+    sfSubRoas = sfSub.roas;
+  const sfSubDeltaDQ = sfSub.dq - sfSub.pDq;
   const tableRows = [];
 
-  // Subtotal row (pushed first, before pushRow calls)
+  // Subtotal row (pushed first, before pushRow calls) — 15 columns, Δ vs prev on each metric
   tableRows.push(/*#__PURE__*/React.createElement("tr", {
     key: "__subtotal__",
     style: {
@@ -7662,7 +8074,10 @@ function SalesFlowView({
       fontSize: 11,
       whiteSpace: 'nowrap'
     }
-  }, fmtDQ(totalDrrDQ)), /*#__PURE__*/React.createElement("td", {
+  }, fmtDQ(totalDrrDQ), /*#__PURE__*/React.createElement(DPct, {
+    curr: sfSub.dq,
+    prev: sfSub.pDq
+  })), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px',
       textAlign: 'right',
@@ -7670,7 +8085,40 @@ function SalesFlowView({
       fontSize: 11,
       whiteSpace: 'nowrap'
     }
-  }, fmtS(sfSubSpend)), /*#__PURE__*/React.createElement("td", {
+  }, fmtS(sfSub.netrev), /*#__PURE__*/React.createElement(DPct, {
+    curr: sfSub.netrev,
+    prev: sfSub.pNetrev
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#e5e7eb',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtS(sfSubSpend), /*#__PURE__*/React.createElement(DPct, {
+    curr: sfSub.spend,
+    prev: sfSub.pSpend
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 11
+    }
+  }, "100%"), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      fontSize: 11,
+      whiteSpace: 'nowrap',
+      color: sfSub.str != null ? mColor(sfSub.str, 0.6, 0.35, 0.2) : '#4b5563'
+    }
+  }, fmtPc(sfSub.str), /*#__PURE__*/React.createElement(DPct, {
+    curr: sfSub.str,
+    prev: sfSub.pStr,
+    invert: true
+  })), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px',
       textAlign: 'right',
@@ -7678,7 +8126,33 @@ function SalesFlowView({
       whiteSpace: 'nowrap',
       color: sfSubRoas != null ? mColor(sfSubRoas, 0.5, 1.5, 3.0) : '#4b5563'
     }
-  }, fmtR(sfSubRoas)), /*#__PURE__*/React.createElement("td", {
+  }, fmtR(sfSubRoas), /*#__PURE__*/React.createElement(DPct, {
+    curr: sfSub.roas,
+    prev: sfSub.pRoas
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtPc(sfSub.nur), /*#__PURE__*/React.createElement(DPct, {
+    curr: sfSub.nur,
+    prev: sfSub.pNur
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      fontSize: 11,
+      whiteSpace: 'nowrap',
+      fontWeight: 700,
+      color: earnCol(sfSub.earn != null ? sfSub.earn >= EARN_HI ? 'Earning' : sfSub.earn >= EARN_LO ? 'Breakeven' : 'Burning' : null)
+    }
+  }, fmtE(sfSub.earn), /*#__PURE__*/React.createElement(DPct, {
+    curr: sfSub.earn,
+    prev: sfSub.pEarn
+  })), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px',
       textAlign: 'right',
@@ -7867,6 +8341,26 @@ function SalesFlowView({
         color: '#e5e7eb',
         fontSize: 11
       }
+    }, fmtS(curr.drrNetRev), /*#__PURE__*/React.createElement(DPct, {
+      curr: curr.drrNetRev,
+      prev: prev?.drrNetRev
+    })), prev?.drrNetRev != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 9
+      }
+    }, fmtS(prev.drrNetRev))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 600,
+        color: '#e5e7eb',
+        fontSize: 11
+      }
     }, fmtS(curr.drrSpend), /*#__PURE__*/React.createElement(DPct, {
       curr: curr.drrSpend,
       prev: prev?.drrSpend
@@ -7876,6 +8370,51 @@ function SalesFlowView({
         fontSize: 9
       }
     }, fmtS(prev.drrSpend))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 600,
+        color: '#9ca3af',
+        fontSize: 11
+      }
+    }, fmtSp(curr.spendPct), prev?.spendPct != null && curr.spendPct != null && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 9,
+        fontWeight: 700,
+        marginLeft: 3,
+        color: Math.abs(curr.spendPct - prev.spendPct) < 0.1 ? '#4b5563' : curr.spendPct > prev.spendPct ? '#22c55e' : '#ef4444'
+      }
+    }, curr.spendPct > prev.spendPct ? '+' : '', (curr.spendPct - prev.spendPct).toFixed(1), "pp")), prev?.spendPct != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 9
+      }
+    }, fmtSp(prev.spendPct))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 600,
+        fontSize: 11,
+        color: curr.str != null ? mColor(curr.str, 0.6, 0.35, 0.2) : '#4b5563'
+      }
+    }, fmtPc(curr.str), /*#__PURE__*/React.createElement(DPct, {
+      curr: curr.str,
+      prev: prev?.str,
+      invert: true
+    })), prev?.str != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 9
+      }
+    }, fmtPc(prev.str))), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         textAlign: 'right',
@@ -7896,6 +8435,47 @@ function SalesFlowView({
         fontSize: 9
       }
     }, fmtR(prev.directRoas))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 600,
+        color: '#9ca3af',
+        fontSize: 11
+      }
+    }, fmtPc(curr.nur), /*#__PURE__*/React.createElement(DPct, {
+      curr: curr.nur,
+      prev: prev?.nur
+    })), prev?.nur != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 9
+      }
+    }, fmtPc(prev.nur))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
+      },
+      title: curr.earnFloor != null ? `Earn = D.ROAS ÷ floor ${curr.earnFloor.toFixed(2)}x` : 'no floor'
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 700,
+        fontSize: 11,
+        color: earnCol(curr.earnState)
+      }
+    }, fmtE(curr.earn), /*#__PURE__*/React.createElement(DPct, {
+      curr: curr.earn,
+      prev: prev?.earn
+    })), prev?.earn != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 9
+      }
+    }, fmtE(prev.earn))), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         textAlign: 'right',
@@ -8142,7 +8722,7 @@ function SalesFlowView({
     col: "_name",
     label: "Category / Segment / Keyword / Campaign"
   }), /*#__PURE__*/React.createElement(ThS, {
-    label: "% Contrib (Δpp)",
+    label: "Qty Contrib (Δpp)",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "deltaDQ",
@@ -8153,12 +8733,32 @@ function SalesFlowView({
     label: "DQty / day",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
+    col: "netrev",
+    label: "Net Rev / day",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
     col: "drrSpend",
     label: "Spend / day",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
+    col: "spendpct",
+    label: "Spend %",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "str",
+    label: "STR %",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
     col: "droas",
     label: "D.ROAS",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "nur",
+    label: "NUR %",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "earn",
+    label: "Earn Ratio",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "cpm",
@@ -9060,6 +9660,7 @@ function LoadingScreen({
         ltvMap,
         campaignIndexMap,
         salesAgg,
+        salesNetAgg,
         kwVolume,
         cm1Map
       } = await fetchAllDataFromSheets();
@@ -9071,6 +9672,7 @@ function LoadingScreen({
         ltvMap,
         campaignIndexMap,
         salesAgg,
+        salesNetAgg,
         kwVolume,
         cm1Map
       });
@@ -13161,199 +13763,436 @@ function ChangeLedgerView({
 // Competitor pressure per brand×category: comp-keyword CPM trend, our rank,
 // new users gained/lost, impressions — current 14d vs prior 14d. Heat 0–100.
 
-function computeCompTracker(allRows, refDate) {
-  if (!refDate) return {
-    rows: []
-  };
-  const DAY = 864e5;
-  const curStart = new Date(refDate.getTime() - 13 * DAY);
-  const prvStart = new Date(refDate.getTime() - 27 * DAY);
-  const mkB = () => ({
-    cpmN: 0,
-    cpmI: 0,
-    posN: 0,
-    posI: 0,
-    imp: 0,
-    spend: 0,
-    sales: 0,
-    nu: 0,
-    days: new Set(),
-    compSpend: 0,
-    compImp: 0,
-    compCpmN: 0,
-    compCpmI: 0,
-    compPosN: 0,
-    compPosI: 0
-  });
-  const grp = {};
-  allRows.forEach(r => {
-    if (r.type !== 'Search' || !r.date || r.date < prvStart || r.date > refDate || !r.category) return;
-    const k = `${r.brand || ''}||${r.category}`;
-    if (!grp[k]) grp[k] = {
-      brand: r.brand,
+// Comp Tracker tree: Category → Competitor brand (compBrand / col AD) → Campaign.
+// Metrics per node from OUR competitor-conquest campaigns. Δ vs the selected date filter's prior window.
+function computeCompTree(allRows, startDate, endDate) {
+  const numDays = Math.round((endDate - startDate) / 864e5) + 1;
+  const win = allRows.filter(r => r.type === 'Search' && r.date >= startDate && r.date <= endDate && r.category && r.compBrand);
+  const cats = {};
+  win.forEach(r => {
+    const ck = `${r.brand || ''}||${r.category}`;
+    if (!cats[ck]) cats[ck] = {
+      brand: r.brand || '',
       category: r.category,
-      cur: mkB(),
-      prv: mkB()
+      rows: [],
+      comps: {}
     };
-    const b = r.date >= curStart ? grp[k].cur : grp[k].prv;
-    b.imp += r.impressions || 0;
-    b.spend += r.spend || 0;
-    b.sales += r.directSales || 0;
-    b.nu += r.newUsers || 0;
-    b.days.add(r.date.toDateString());
-    if (r.cpm > 0 && r.impressions > 0) {
-      b.cpmN += r.cpm * r.impressions;
-      b.cpmI += r.impressions;
-    }
-    if (r.position > 0 && r.impressions > 0) {
-      b.posN += r.position * r.impressions;
-      b.posI += r.impressions;
-    }
-    if (r.segment === 'Comp') {
-      b.compSpend += r.spend || 0;
-      b.compImp += r.impressions || 0;
-      if (r.cpm > 0 && r.impressions > 0) {
-        b.compCpmN += r.cpm * r.impressions;
-        b.compCpmI += r.impressions;
-      }
-      if (r.position > 0 && r.impressions > 0) {
-        b.compPosN += r.position * r.impressions;
-        b.compPosI += r.impressions;
-      }
-    }
+    cats[ck].rows.push(r);
+    const cb = r.compBrand;
+    if (!cats[ck].comps[cb]) cats[ck].comps[cb] = {
+      compBrand: cb,
+      rows: [],
+      camps: {}
+    };
+    cats[ck].comps[cb].rows.push(r);
+    const camp = r.campaign || '(no campaign)';
+    if (!cats[ck].comps[cb].camps[camp]) cats[ck].comps[cb].camps[camp] = [];
+    cats[ck].comps[cb].camps[camp].push(r);
   });
-  const rows = [];
-  Object.values(grp).forEach(g => {
-    const cd = g.cur.days.size || 1,
-      pd = g.prv.days.size || 1;
-    if (g.cur.spend / cd < 300 || g.prv.days.size < 7) return;
-    const w = (n, i) => i > 0 ? n / i : null;
-    const cpmC = w(g.cur.cpmN, g.cur.cpmI),
-      cpmP = w(g.prv.cpmN, g.prv.cpmI);
-    const rkC = w(g.cur.posN, g.cur.posI),
-      rkP = w(g.prv.posN, g.prv.posI);
-    const ccpmC = w(g.cur.compCpmN, g.cur.compCpmI),
-      ccpmP = w(g.prv.compCpmN, g.prv.compCpmI);
-    const crkC = w(g.cur.compPosN, g.cur.compPosI),
-      crkP = w(g.prv.compPosN, g.prv.compPosI);
-    const nuC = g.cur.nu / cd,
-      nuP = g.prv.nu / pd;
-    const cpmD = cpmC != null && cpmP > 0 ? (cpmC - cpmP) / cpmP * 100 : null;
-    const ccpmD = ccpmC != null && ccpmP > 0 ? (ccpmC - ccpmP) / ccpmP * 100 : null;
-    const rkD = rkC != null && rkP != null ? rkC - rkP : null;
-    const crkD = crkC != null && crkP != null ? crkC - crkP : null;
-    const nuD = nuP > 0 ? (nuC - nuP) / nuP * 100 : null;
-    let heat = 0;
-    if (ccpmD != null) heat += ccpmD >= 20 ? 40 : ccpmD >= 10 ? 25 : ccpmD >= 5 ? 10 : 0;
-    if (crkD != null) heat += crkD >= 2 ? 30 : crkD >= 1 ? 18 : 0;
-    if (rkD != null) heat += rkD >= 1.5 ? 15 : rkD >= 0.8 ? 8 : 0;
-    if (nuD != null) heat += nuD <= -20 ? 15 : nuD <= -10 ? 8 : 0;
-    heat = Math.min(100, heat);
-    rows.push({
-      brand: g.brand,
-      category: g.category,
-      cpmC,
-      cpmD,
-      ccpmC,
-      ccpmD,
-      rkC,
-      rkD,
-      crkC,
-      crkD,
-      nuC,
-      nuP,
-      nuD,
-      compSpendD: g.cur.compSpend / cd,
-      heat
+  return Object.values(cats).map(c => {
+    const comps = {};
+    Object.values(c.comps).forEach(cb => {
+      const campaigns = {};
+      Object.entries(cb.camps).forEach(([camp, rows]) => {
+        campaigns[camp] = computeMetrics(rows, numDays);
+      });
+      comps[cb.compBrand] = {
+        ...computeMetrics(cb.rows, numDays),
+        campaigns
+      };
     });
+    return {
+      brand: c.brand,
+      category: c.category,
+      ...computeMetrics(c.rows, numDays),
+      comps
+    };
   });
-  rows.sort((a, b) => b.heat - a.heat);
-  return {
-    rows
-  };
 }
 function CompTrackerView({
-  comp
+  comp,
+  compPrev
 }) {
   const [brandF, setBrandF] = useState([]);
-  const brands = [...new Set(comp.rows.map(r => r.brand).filter(Boolean))].sort();
-  const shown = brandF.length ? comp.rows.filter(r => brandF.includes(r.brand)) : comp.rows;
-  const heatColor = h => h >= 60 ? '#ef4444' : h >= 35 ? '#f97316' : h >= 15 ? '#f59e0b' : '#22c55e';
-  const cell = (v, fmt, badWhenUp = true) => {
-    if (v == null) return /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#374151'
-      }
-    }, "—");
-    const bad = badWhenUp ? v > 0 : v < 0;
-    const col = Math.abs(v) < (fmt === 'pp' ? 0.3 : 3) ? '#6b7280' : bad ? '#ef4444' : '#22c55e';
-    const txt = fmt === 'pp' ? `${v > 0 ? '+' : ''}${v.toFixed(1)}` : `${v > 0 ? '+' : ''}${v.toFixed(0)}%`;
+  const [compF, setCompF] = useState([]);
+  const [expanded, setExp] = useState(new Set());
+  const [sort, setSort] = useState({
+    col: 'drrSpend',
+    dir: -1
+  });
+  const rows = Array.isArray(comp) ? comp : [];
+  const brands = useMemo(() => [...new Set(rows.map(r => r.brand).filter(Boolean))].sort(), [rows]);
+  const compBrands = useMemo(() => {
+    const s = new Set();
+    rows.forEach(r => Object.keys(r.comps || {}).forEach(cb => s.add(cb)));
+    return [...s].sort();
+  }, [rows]);
+  const prevMap = useMemo(() => {
+    const m = {};
+    const pr = Array.isArray(compPrev) ? compPrev : [];
+    pr.forEach(c => {
+      const ck = `${c.brand}||${c.category}`;
+      m[ck] = c;
+      Object.entries(c.comps || {}).forEach(([cb, cd]) => {
+        m[`${ck}||${cb}`] = cd;
+        Object.entries(cd.campaigns || {}).forEach(([camp, pd]) => {
+          m[`${ck}||${cb}||${camp}`] = pd;
+        });
+      });
+    });
+    return m;
+  }, [compPrev]);
+  const toggle = k => setExp(p => {
+    const n = new Set(p);
+    n.has(k) ? n.delete(k) : n.add(k);
+    return n;
+  });
+  const toggleSort = col => setSort(s => ({
+    col,
+    dir: s.col === col ? -s.dir : -1
+  }));
+  const filtered = useMemo(() => {
+    let out = rows;
+    if (brandF.length) out = out.filter(r => brandF.includes(r.brand));
+    if (compF.length) out = out.filter(r => Object.keys(r.comps || {}).some(cb => compF.includes(cb)));
+    return out;
+  }, [rows, brandF, compF]);
+  const getV = (o, col) => o ? o[col] ?? null : null;
+  const sortByCol = arr => [...arr].sort((a, b) => {
+    const av = getV(a, sort.col),
+      bv = getV(b, sort.col);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return sort.dir * (av - bv);
+  });
+  const sortPairs = pairs => [...pairs].sort((a, b) => {
+    const av = getV(a[1], sort.col),
+      bv = getV(b[1], sort.col);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return sort.dir * (av - bv);
+  });
+  const fmtS = n => n == null ? '—' : n >= 100000 ? '₹' + (n / 100000).toFixed(1) + 'L' : n >= 1000 ? '₹' + (n / 1000).toFixed(1) + 'K' : '₹' + Math.round(n);
+  const fmtR = n => n == null ? '—' : n.toFixed(2) + 'x';
+  const fmtCPM = n => n == null ? '—' : '₹' + Math.round(n).toLocaleString('en-IN');
+  const fmtPc = n => n == null ? '—' : (n * 100).toFixed(0) + '%';
+  const fmtN = n => n == null ? '—' : n.toFixed(1);
+  const pctChg = (c, p) => !p || c == null ? null : (c - p) / Math.abs(p) * 100;
+  const DPct = ({
+    curr,
+    prev,
+    invert
+  }) => {
+    const d = pctChg(curr, prev);
+    if (d == null) return null;
+    const good = invert ? d <= 0 : d >= 0;
+    const col = Math.abs(d) < 0.5 ? '#4b5563' : good ? '#22c55e' : '#ef4444';
     return /*#__PURE__*/React.createElement("span", {
       style: {
+        fontSize: 9,
         color: col,
+        fontWeight: 700,
+        marginLeft: 4
+      }
+    }, d > 0 ? '▲' : '▼', Math.abs(d).toFixed(0), "%");
+  };
+  const Th = ({
+    col,
+    label
+  }) => /*#__PURE__*/React.createElement("th", {
+    onClick: () => toggleSort(col),
+    style: {
+      padding: '7px 10px',
+      textAlign: 'right',
+      color: sort.col === col ? '#93c5fd' : '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      cursor: 'pointer',
+      whiteSpace: 'nowrap',
+      userSelect: 'none',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      zIndex: 2,
+      borderBottom: '1px solid #1f2937'
+    }
+  }, label, sort.col === col ? sort.dir > 0 ? ' ↑' : ' ↓' : '');
+  const tableRows = [];
+  const metricCells = (o, prev) => /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: '#c4b5fd',
+      fontSize: 11
+    }
+  }, fmtN(o.drrNU), /*#__PURE__*/React.createElement(DPct, {
+    curr: o.drrNU,
+    prev: prev?.drrNU
+  })), prev?.drrNU != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 9
+    }
+  }, fmtN(prev.drrNU))), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: '#9ca3af',
+      fontSize: 11
+    }
+  }, fmtPc(o.nur), /*#__PURE__*/React.createElement(DPct, {
+    curr: o.nur,
+    prev: prev?.nur
+  })), prev?.nur != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 9
+    }
+  }, fmtPc(prev.nur))), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      fontSize: 11,
+      color: o.directRoas != null ? mColor(o.directRoas, 0.5, 1.5, 3.0) : '#4b5563'
+    }
+  }, fmtR(o.directRoas), /*#__PURE__*/React.createElement(DPct, {
+    curr: o.directRoas,
+    prev: prev?.directRoas
+  })), prev?.directRoas != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 9
+    }
+  }, fmtR(prev.directRoas))), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: '#a78bfa',
+      fontSize: 11
+    }
+  }, fmtR(o.totalRoas), /*#__PURE__*/React.createElement(DPct, {
+    curr: o.totalRoas,
+    prev: prev?.totalRoas
+  })), prev?.totalRoas != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 9
+    }
+  }, fmtR(prev.totalRoas))), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: '#e5e7eb',
+      fontSize: 11
+    }
+  }, fmtS(o.drrSpend), /*#__PURE__*/React.createElement(DPct, {
+    curr: o.drrSpend,
+    prev: prev?.drrSpend
+  })), prev?.drrSpend != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 9
+    }
+  }, fmtS(prev.drrSpend))), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: '#9ca3af',
+      fontSize: 11
+    }
+  }, fmtCPM(o.avgCpm), /*#__PURE__*/React.createElement(DPct, {
+    curr: o.avgCpm,
+    prev: prev?.avgCpm,
+    invert: true
+  })), prev?.avgCpm != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 9
+    }
+  }, fmtCPM(prev.avgCpm))), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '5px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 600,
+      color: '#e5e7eb',
+      fontSize: 11
+    }
+  }, fmtN(o.drrDQ), /*#__PURE__*/React.createElement(DPct, {
+    curr: o.drrDQ,
+    prev: prev?.drrDQ
+  })), prev?.drrDQ != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#374151',
+      fontSize: 9
+    }
+  }, fmtN(prev.drrDQ))));
+  sortByCol(filtered).forEach(cat => {
+    const ck = `${cat.brand}||${cat.category}`;
+    const isExp = expanded.has(ck);
+    const hasComps = Object.keys(cat.comps || {}).length > 0;
+    tableRows.push(/*#__PURE__*/React.createElement("tr", {
+      key: ck,
+      onClick: hasComps ? () => toggle(ck) : undefined,
+      style: {
+        borderBottom: '1px solid #111827',
+        background: isExp ? 'rgba(30,58,95,0.15)' : 'transparent',
+        cursor: hasComps ? 'pointer' : 'default'
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        minWidth: 200
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#4b5563',
+        fontSize: 9,
+        minWidth: 10,
+        display: 'inline-block',
+        transform: isExp ? 'rotate(90deg)' : 'none',
+        transition: 'transform 0.15s'
+      }
+    }, "▶"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: BRAND_COLORS[cat.brand] || '#9ca3af',
+        fontSize: 10,
         fontWeight: 600
       }
-    }, txt);
-  };
-  const totNuC = shown.reduce((s, r) => s + (r.nuC || 0), 0);
-  const totNuP = shown.reduce((s, r) => s + (r.nuP || 0), 0);
+    }, cat.brand), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#e5e7eb',
+        fontSize: 11,
+        fontWeight: 600
+      }
+    }, cat.category))), metricCells(cat, prevMap[ck])));
+    if (isExp && cat.comps) {
+      const pairs = Object.entries(cat.comps);
+      const generic = pairs.filter(([cb]) => /generic/i.test(cb));
+      const named = sortPairs(pairs.filter(([cb]) => !/generic/i.test(cb)));
+      [...named, ...generic].forEach(([cb, cd]) => {
+        const compKey = `${ck}||${cb}`;
+        const cExp = expanded.has(compKey);
+        const hasCamps = Object.keys(cd.campaigns || {}).length > 0;
+        tableRows.push(/*#__PURE__*/React.createElement("tr", {
+          key: compKey,
+          onClick: hasCamps ? () => toggle(compKey) : undefined,
+          style: {
+            borderBottom: '1px solid #0d1117',
+            background: cExp ? 'rgba(30,58,95,0.10)' : 'rgba(255,255,255,0.012)',
+            cursor: hasCamps ? 'pointer' : 'default'
+          }
+        }, /*#__PURE__*/React.createElement("td", {
+          style: {
+            padding: '5px 10px 5px 28px'
+          }
+        }, /*#__PURE__*/React.createElement("div", {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5
+          }
+        }, hasCamps ? /*#__PURE__*/React.createElement("span", {
+          style: {
+            color: '#4b5563',
+            fontSize: 9,
+            minWidth: 10,
+            display: 'inline-block',
+            transform: cExp ? 'rotate(90deg)' : 'none',
+            transition: 'transform 0.15s'
+          }
+        }, "▶") : /*#__PURE__*/React.createElement("span", {
+          style: {
+            minWidth: 10,
+            display: 'inline-block'
+          }
+        }), /*#__PURE__*/React.createElement("span", {
+          style: {
+            color: /generic/i.test(cb) ? '#6b7280' : '#f59e0b',
+            fontSize: 11,
+            fontWeight: 600
+          }
+        }, cb))), metricCells(cd, prevMap[compKey])));
+        if (cExp && cd.campaigns) {
+          sortPairs(Object.entries(cd.campaigns)).forEach(([camp, pd]) => {
+            const campKey = `${compKey}||${camp}`;
+            tableRows.push(/*#__PURE__*/React.createElement("tr", {
+              key: campKey,
+              style: {
+                borderBottom: '1px solid #0d1117',
+                background: 'rgba(255,255,255,0.006)'
+              }
+            }, /*#__PURE__*/React.createElement("td", {
+              style: {
+                padding: '4px 10px 4px 48px',
+                maxWidth: 280
+              }
+            }, /*#__PURE__*/React.createElement("span", {
+              style: {
+                color: '#6b7280',
+                fontSize: 10,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                display: 'block'
+              },
+              title: camp
+            }, camp)), metricCells(pd, prevMap[campKey])));
+          });
+        }
+      });
+    }
+  });
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
-      gap: 12
+      gap: 10
     }
   }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      gap: 10,
-      flexWrap: 'wrap'
-    }
-  }, [{
-    label: 'Hottest Category',
-    val: shown[0] ? `${shown[0].category} (${shown[0].heat})` : '—',
-    color: shown[0] ? heatColor(shown[0].heat) : '#6b7280'
-  }, {
-    label: 'Categories Under Pressure (heat ≥35)',
-    val: shown.filter(r => r.heat >= 35).length,
-    color: '#f97316'
-  }, {
-    label: 'New Users/d (14d)',
-    val: Math.round(totNuC).toLocaleString('en-IN'),
-    color: '#8b5cf6'
-  }, {
-    label: 'vs Prior 14d',
-    val: totNuP > 0 ? `${(totNuC - totNuP) / totNuP * 100 >= 0 ? '+' : ''}${((totNuC - totNuP) / totNuP * 100).toFixed(0)}%` : '—',
-    color: totNuC >= totNuP ? '#22c55e' : '#ef4444'
-  }].map(({
-    label,
-    val,
-    color
-  }) => /*#__PURE__*/React.createElement("div", {
-    key: label,
-    style: {
-      flex: 1,
-      minWidth: 150,
-      background: '#0d1117',
-      border: '1px solid #1f2937',
-      borderRadius: 8,
-      padding: '12px 14px'
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: '#4b5563',
-      fontSize: 9,
-      fontWeight: 600,
-      textTransform: 'uppercase',
-      marginBottom: 4
-    }
-  }, label), /*#__PURE__*/React.createElement("div", {
-    style: {
-      color,
-      fontSize: 16,
-      fontWeight: 700
-    }
-  }, val)))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 8,
@@ -13365,18 +14204,47 @@ function CompTrackerView({
     onChange: setBrandF,
     options: brands,
     placeholder: "All Brands"
-  }), /*#__PURE__*/React.createElement("span", {
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: compF,
+    onChange: setCompF,
+    options: compBrands,
+    placeholder: "All Competitors"
+  }), brandF.length || compF.length ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setBrandF([]);
+      setCompF([]);
+    },
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      background: 'transparent',
+      border: 'none',
+      cursor: 'pointer'
+    }
+  }, "✕ Clear") : null, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setExp(new Set()),
+    style: {
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: '#6b7280',
+      borderRadius: 4,
+      padding: '3px 8px',
+      fontSize: 9,
+      cursor: 'pointer',
+      marginLeft: 8
+    }
+  }, "Collapse All"), /*#__PURE__*/React.createElement("span", {
     style: {
       color: '#4b5563',
       fontSize: 9,
       marginLeft: 'auto'
     }
-  }, "current 14d vs prior 14d · heat = comp-keyword CPM inflation + rank slips + new-user loss · 🌙 daypart squeezes are soft-flagged in alerts, not here")), /*#__PURE__*/React.createElement("div", {
+  }, "Category → competitor (col AD) → campaign · our conquest performance · curr (top) · prev (bottom) · Δ vs prior window of the date filter")), /*#__PURE__*/React.createElement("div", {
     style: {
       overflowX: 'auto',
       borderRadius: 10,
       border: '1px solid #1f2937',
-      maxHeight: '68vh',
+      maxHeight: '72vh',
       overflowY: 'auto'
     }
   }, /*#__PURE__*/React.createElement("table", {
@@ -13385,153 +14253,50 @@ function CompTrackerView({
       borderCollapse: 'collapse',
       fontSize: 11
     }
-  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", {
-    style: {
-      borderBottom: '1px solid #1f2937'
-    }
-  }, ['Heat', 'Brand · Category', 'Comp CPM (Δ%)', 'Comp Rank (Δ)', 'Our CPM (Δ%)', 'Our Rank (Δ)', 'NU/d (Δ%)', 'Comp Spend/d', 'Read'].map(h => /*#__PURE__*/React.createElement("th", {
-    key: h,
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
     style: {
       padding: '7px 10px',
+      textAlign: 'left',
       color: '#6b7280',
       fontSize: 9,
       fontWeight: 600,
       textTransform: 'uppercase',
+      letterSpacing: '0.06em',
       background: '#0a0e14',
       position: 'sticky',
       top: 0,
       zIndex: 2,
-      textAlign: ['Heat', 'Brand · Category', 'Read'].includes(h) ? 'left' : 'right',
-      whiteSpace: 'nowrap'
+      borderBottom: '1px solid #1f2937'
     }
-  }, h)))), /*#__PURE__*/React.createElement("tbody", null, shown.map((r, i) => {
-    const hc = heatColor(r.heat);
-    const read = r.heat >= 60 ? 'Active bid war — defend head terms, check pricing' : r.heat >= 35 ? 'Pressure building — watch CPMs, pre-empt on hero keywords' : r.heat >= 15 ? 'Mild movement — monitor' : 'Quiet';
-    return /*#__PURE__*/React.createElement("tr", {
-      key: i,
-      style: {
-        borderBottom: '1px solid #111827',
-        background: r.heat >= 60 ? 'rgba(239,68,68,0.04)' : 'transparent'
-      }
-    }, /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: 34,
-        height: 6,
-        background: '#1f2937',
-        borderRadius: 3,
-        overflow: 'hidden'
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: `${r.heat}%`,
-        height: '100%',
-        background: hc
-      }
-    })), /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: hc,
-        fontWeight: 700,
-        fontSize: 11
-      }
-    }, r.heat))), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        whiteSpace: 'nowrap'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: BRAND_COLORS[r.brand] || '#9ca3af',
-        fontSize: 10,
-        fontWeight: 600
-      }
-    }, r.brand), /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#e5e7eb',
-        fontSize: 11,
-        marginLeft: 6
-      }
-    }, r.category)), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        whiteSpace: 'nowrap'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#d1d5db'
-      }
-    }, r.ccpmC != null ? '₹' + Math.round(r.ccpmC) : '—'), " ", cell(r.ccpmD, '%')), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        whiteSpace: 'nowrap'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#d1d5db'
-      }
-    }, r.crkC != null ? r.crkC.toFixed(1) : '—'), " ", cell(r.crkD, 'pp')), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        whiteSpace: 'nowrap'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#9ca3af'
-      }
-    }, r.cpmC != null ? '₹' + Math.round(r.cpmC) : '—'), " ", cell(r.cpmD, '%')), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        whiteSpace: 'nowrap'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#9ca3af'
-      }
-    }, r.rkC != null ? r.rkC.toFixed(1) : '—'), " ", cell(r.rkD, 'pp')), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        whiteSpace: 'nowrap'
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#d1d5db'
-      }
-    }, Math.round(r.nuC)), " ", cell(r.nuD, '%', false)), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        textAlign: 'right',
-        color: '#9ca3af'
-      }
-    }, r.compSpendD >= 1000 ? '₹' + (r.compSpendD / 1000).toFixed(1) + 'K' : '₹' + Math.round(r.compSpendD)), /*#__PURE__*/React.createElement("td", {
-      style: {
-        padding: '6px 10px',
-        color: '#9ca3af',
-        fontSize: 10,
-        maxWidth: 220
-      }
-    }, read));
-  }), shown.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
-    colSpan: 9,
+  }, "Category / Competitor / Campaign"), /*#__PURE__*/React.createElement(Th, {
+    col: "drrNU",
+    label: "New Cust/d"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "nur",
+    label: "NUR %"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "directRoas",
+    label: "D.ROAS"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "totalRoas",
+    label: "T.ROAS"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "drrSpend",
+    label: "Spend/d"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "avgCpm",
+    label: "CPM"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "drrDQ",
+    label: "DQty/d"
+  }))), /*#__PURE__*/React.createElement("tbody", null, tableRows, filtered.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    colSpan: 8,
     style: {
       padding: 40,
       textAlign: 'center',
       color: '#4b5563'
     }
-  }, "Not enough comp-keyword data yet."))))));
+  }, "No competitor-tagged campaigns in this window. (Comp brand = col AD in \"This Month- Product Listing\".)"))))));
 }
 
 // ─── OPPORTUNITIES (BK search volume feed) ───────────────────────────────────
@@ -14241,6 +15006,7 @@ function App() {
     ltvMap,
     campaignIndexMap,
     salesAgg,
+    salesNetAgg,
     kwVolume,
     cm1Map
   }) => {
@@ -14253,6 +15019,7 @@ function App() {
       ltvMap,
       campaignIndexMap: campaignIndexMap || {},
       salesAgg: salesAgg || {},
+      salesNetAgg: salesNetAgg || {},
       kwVolume: kwVolume || {},
       cm1Map: cm1Map || {},
       bounds,
@@ -14369,9 +15136,11 @@ function App() {
       startDate,
       endDate,
       campaignIndexMap,
-      salesAgg
+      salesAgg,
+      salesNetAgg,
+      cm1Map
     } = appState;
-    return aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap, salesAgg);
+    return aggregateForCatSales(allRows, startDate, endDate, campaignIndexMap, salesAgg, salesNetAgg, cm1Map);
   }, [appState]);
   const catPrev = useMemo(() => {
     if (!appState || !prevCampaigns) return null;
@@ -14380,9 +15149,11 @@ function App() {
     const {
       allRows,
       campaignIndexMap,
-      salesAgg
+      salesAgg,
+      salesNetAgg,
+      cm1Map
     } = appState;
-    return aggregateForCatSales(allRows, r.pStart, r.pEnd, campaignIndexMap, salesAgg);
+    return aggregateForCatSales(allRows, r.pStart, r.pEnd, campaignIndexMap, salesAgg, salesNetAgg, cm1Map);
   }, [appState, prevCampaigns, getPrevRange]);
 
   // Sales Flow aggregations (nested Category→Segment→Keyword→Campaign)
@@ -14393,9 +15164,11 @@ function App() {
       startDate,
       endDate,
       campaignIndexMap,
-      salesAgg
+      salesAgg,
+      salesNetAgg,
+      cm1Map
     } = appState;
-    return aggregateByCategory(allRows, startDate, endDate, campaignIndexMap, salesAgg);
+    return aggregateByCategory(allRows, startDate, endDate, campaignIndexMap, salesAgg, salesNetAgg, cm1Map);
   }, [appState]);
   const sfPrev = useMemo(() => {
     if (!appState || !prevCampaigns) return null;
@@ -14404,9 +15177,11 @@ function App() {
     const {
       allRows,
       campaignIndexMap,
-      salesAgg
+      salesAgg,
+      salesNetAgg,
+      cm1Map
     } = appState;
-    return aggregateByCategory(allRows, r.pStart, r.pEnd, campaignIndexMap, salesAgg);
+    return aggregateByCategory(allRows, r.pStart, r.pEnd, campaignIndexMap, salesAgg, salesNetAgg, cm1Map);
   }, [appState, prevCampaigns, getPrevRange]);
 
   // Keyword aggregations (flattened to keyword level with per-campaign drill-down)
@@ -14419,7 +15194,7 @@ function App() {
       startDate,
       endDate
     } = appState;
-    return aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignIndexMap);
+    return aggregateKeywordsByKw(allRows, ltvMap, startDate, endDate, campaignIndexMap, appState.cm1Map);
   }, [appState]);
   const kwPrev = useMemo(() => {
     if (!appState) return null;
@@ -14430,7 +15205,7 @@ function App() {
       ltvMap,
       campaignIndexMap
     } = appState;
-    return aggregateKeywordsByKw(allRows, ltvMap, r.pStart, r.pEnd, campaignIndexMap);
+    return aggregateKeywordsByKw(allRows, ltvMap, r.pStart, r.pEnd, campaignIndexMap, appState.cm1Map);
   }, [appState, getPrevRange]);
 
   // Keyword × campaign grain for the Excel export (selected period)
@@ -14481,11 +15256,15 @@ function App() {
     return computeChangeLedger(appState.allRows, appState.ltvMap, appState.bounds.max);
   }, [appState]);
   const comp = useMemo(() => {
-    if (!appState) return {
-      rows: []
-    };
-    return computeCompTracker(appState.allRows, appState.bounds.max);
+    if (!appState) return [];
+    return computeCompTree(appState.allRows, appState.startDate, appState.endDate);
   }, [appState]);
+  const compPrev = useMemo(() => {
+    if (!appState) return [];
+    const r = getPrevRange();
+    if (!r) return [];
+    return computeCompTree(appState.allRows, r.pStart, r.pEnd);
+  }, [appState, getPrevRange]);
   const opps = useMemo(() => {
     if (!appState) return {
       expansion: [],
@@ -14651,7 +15430,14 @@ function App() {
       fontWeight: 700,
       whiteSpace: 'nowrap'
     }
-  }, "⚡ Blinkit Ads"), /*#__PURE__*/React.createElement("div", {
+  }, "⚡ Blinkit Ads"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontSize: 9,
+      fontWeight: 600,
+      whiteSpace: 'nowrap'
+    }
+  }, "v23"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 3
@@ -14928,7 +15714,8 @@ function App() {
     allRows: allRows,
     endDate: bounds.max
   }), tab === 'comp' && /*#__PURE__*/React.createElement(CompTrackerView, {
-    comp: comp
+    comp: comp,
+    compPrev: compPrev
   }), tab === 'history' && /*#__PURE__*/React.createElement(HistoryView, null), tab === 'ledger' && /*#__PURE__*/React.createElement(ChangeLedgerView, {
     ledger: ledger
   }), tab === 'opps' && /*#__PURE__*/React.createElement(OpportunitiesView, {
