@@ -1146,8 +1146,20 @@ async function fetchAllDataFromSheets() {
   const sDate = colS(['date'], 1),
     sUnits = colS(['units'], 4),
     sBrand = colS(['brand'], 7),
-    sCat = colS(['gc cat', 'gc category', 'category'], 8),
-    sNet = colS(['net revenue', 'net revenu', 'net rev'], 9);
+    sCat = colS(['gc cat', 'gc category', 'category'], 8);
+  // Net Revenue = col J (index 9). "Net Revenue" ALSO appears in the CM1 side-block (cols M+),
+  // so restrict the name search to the left table (before the CM1 block's 'gmv') — else we'd
+  // read the side-block column, which is blank in the left rows → ₹0 everywhere.
+  const _gmvIdx = sHdr.indexOf('gmv');
+  const _leftMax = _gmvIdx >= 0 ? _gmvIdx : sHdr.length;
+  const colSLeft = (names, fb) => {
+    for (const nm of names) {
+      const i = sHdr.indexOf(nm);
+      if (i >= 0 && i < _leftMax) return i;
+    }
+    return fb;
+  };
+  const sNet = colSLeft(['net revenue', 'net revenu', 'net rev'], 9);
   if (sH >= 0 && sHdr.indexOf('gc cat') < 0 && sHdr.indexOf('gc category') < 0) {
     SCHEMA_WARNINGS.push('Sales Import: category column not found by name — using last-known position');
   }
@@ -7811,6 +7823,7 @@ function SalesFlowView({
     if (col === 'str') return obj.str ?? null;
     if (col === 'droas') return obj.directRoas ?? null;
     if (col === 'nur') return obj.nur ?? null;
+    if (col === 'nuday') return obj.drrNU ?? null;
     if (col === 'earn') return obj.earn ?? null;
     if (col === 'cpm') return obj.avgCpm ?? null;
     return null;
@@ -7954,6 +7967,7 @@ function SalesFlowView({
     let spend = 0,
       netrev = 0,
       dq = 0,
+      nu = 0,
       roasNum = 0,
       roasDen = 0,
       nurNum = 0,
@@ -7963,6 +7977,7 @@ function SalesFlowView({
     let pSpend = 0,
       pNetrev = 0,
       pDq = 0,
+      pNu = 0,
       pRoasNum = 0,
       pRoasDen = 0,
       pNurNum = 0,
@@ -7973,6 +7988,7 @@ function SalesFlowView({
       spend += c.drrSpend || 0;
       netrev += c.drrNetRev || 0;
       dq += c.drrDQ || 0;
+      nu += c.drrNU || 0;
       if (c.directRoas != null && c.drrSpend > 0) {
         roasNum += c.directRoas * c.drrSpend;
         roasDen += c.drrSpend;
@@ -7990,6 +8006,7 @@ function SalesFlowView({
         pSpend += p.drrSpend || 0;
         pNetrev += p.drrNetRev || 0;
         pDq += p.drrDQ || 0;
+        pNu += p.drrNU || 0;
         if (p.directRoas != null && p.drrSpend > 0) {
           pRoasNum += p.directRoas * p.drrSpend;
           pRoasDen += p.drrSpend;
@@ -8008,6 +8025,7 @@ function SalesFlowView({
       spend,
       netrev,
       dq,
+      nu,
       roas: roasDen > 0 ? roasNum / roasDen : null,
       nur: nurDen > 0 ? nurNum / nurDen : null,
       earn: earnDen > 0 ? earnNum / earnDen : null,
@@ -8015,6 +8033,7 @@ function SalesFlowView({
       pSpend,
       pNetrev,
       pDq,
+      pNu,
       pRoas: pRoasDen > 0 ? pRoasNum / pRoasDen : null,
       pNur: pNurDen > 0 ? pNurNum / pNurDen : null,
       pEarn: pEarnDen > 0 ? pEarnNum / pEarnDen : null,
@@ -8140,6 +8159,17 @@ function SalesFlowView({
   }, fmtPc(sfSub.nur), /*#__PURE__*/React.createElement(DPct, {
     curr: sfSub.nur,
     prev: sfSub.pNur
+  })), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#c4b5fd',
+      fontSize: 11,
+      whiteSpace: 'nowrap'
+    }
+  }, sfSub.nu != null ? sfSub.nu.toFixed(1) : '—', /*#__PURE__*/React.createElement(DPct, {
+    curr: sfSub.nu,
+    prev: sfSub.pNu
   })), /*#__PURE__*/React.createElement("td", {
     style: {
       padding: '6px 10px',
@@ -8459,6 +8489,26 @@ function SalesFlowView({
         padding: '5px 10px',
         textAlign: 'right',
         whiteSpace: 'nowrap'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 600,
+        color: '#c4b5fd',
+        fontSize: 11
+      }
+    }, curr.drrNU != null ? curr.drrNU.toFixed(1) : '—', /*#__PURE__*/React.createElement(DPct, {
+      curr: curr.drrNU,
+      prev: prev?.drrNU
+    })), prev?.drrNU != null && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#374151',
+        fontSize: 9
+      }
+    }, prev.drrNU.toFixed(1))), /*#__PURE__*/React.createElement("td", {
+      style: {
+        padding: '5px 10px',
+        textAlign: 'right',
+        whiteSpace: 'nowrap'
       },
       title: curr.earnFloor != null ? `Earn = D.ROAS ÷ floor ${curr.earnFloor.toFixed(2)}x` : 'no floor'
     }, /*#__PURE__*/React.createElement("div", {
@@ -8755,6 +8805,10 @@ function SalesFlowView({
   }), /*#__PURE__*/React.createElement(Th, {
     col: "nur",
     label: "NUR %",
+    right: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "nuday",
+    label: "NU / day",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "earn",
@@ -13765,9 +13819,12 @@ function ChangeLedgerView({
 
 // Comp Tracker tree: Category → Competitor brand (compBrand / col AD) → Campaign.
 // Metrics per node from OUR competitor-conquest campaigns. Δ vs the selected date filter's prior window.
+const OWN_BRAND_TOKENS = new Set(['bebodywise', 'manmatters', 'littlejoys']);
+const isOwnBrandTag = s => OWN_BRAND_TOKENS.has(String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
 function computeCompTree(allRows, startDate, endDate) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
-  const win = allRows.filter(r => r.type === 'Search' && r.date >= startDate && r.date <= endDate && r.category && r.compBrand);
+  // Exclude our own brands from the competitor column (brand-defense tags aren't competitors).
+  const win = allRows.filter(r => r.type === 'Search' && r.date >= startDate && r.date <= endDate && r.category && r.compBrand && !isOwnBrandTag(r.compBrand));
   const cats = {};
   win.forEach(r => {
     const ck = `${r.brand || ''}||${r.category}`;
