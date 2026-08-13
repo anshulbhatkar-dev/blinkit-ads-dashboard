@@ -1037,8 +1037,12 @@ async function fetchAllDataFromSheets() {
   try {
     Object.keys(localStorage).filter(k => k.startsWith('blinkit_sheet_')).forEach(k => localStorage.removeItem(k));
   } catch (e) {}
+
+  // CACHE_VER: bump when the sheet schema changes (e.g. Net Revenue col added) so old
+  // cached CSVs are ignored automatically — no manual ↺ Refresh needed after a deploy.
+  const CACHE_VER = 'v23net';
   const fetchWithCache = async gid => {
-    const cacheKey = `blinkit_sheet_${gid}`;
+    const cacheKey = `blinkit_sheet_${CACHE_VER}_${gid}`;
     const cached = await idbGet(cacheKey);
     if (cached && cached.ts && Date.now() - cached.ts < CACHE_TTL) return cached.data;
     const r = await fetch(SHEET_BASE + gid);
@@ -2261,10 +2265,11 @@ function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {},
     const catSpend = adMet.spend || 0;
     const cm1Pct = cm1Map[`${(brand || '').toLowerCase()}|${(category || '').toLowerCase()}`] || null;
     // decorate a node in place: net rev split by qty, STR = spend÷netRev, spend% of cat, earn ratio
+    const hasNet = catNetRev > 0; // Sales-import has net-rev rows in this window
     const decorate = node => {
       const dq = node.directQty || 0;
-      node.netRev = catDenomDQ > 0 ? catNetRev * (dq / catDenomDQ) : 0;
-      node.drrNetRev = node.netRev / numDays;
+      node.netRev = hasNet && catDenomDQ > 0 ? catNetRev * (dq / catDenomDQ) : null;
+      node.drrNetRev = node.netRev != null ? node.netRev / numDays : null;
       node.str = node.netRev > 0 ? (node.spend || 0) / node.netRev : null; // spend-to-netrev ratio
       node.spendPct = catSpend > 0 ? (node.spend || 0) / catSpend * 100 : 0;
       const er = earnRatioFor(node.directRoas, node.nur, cm1Pct, node.directQty, node.spend);
@@ -2289,8 +2294,8 @@ function aggregateByCategory(allRows, startDate, endDate, campaignIndexMap = {},
       drrDQ: totalSalesDQ > 0 ? totalSalesDQ / numDays : adMet.drrDQ,
       segs
     };
-    cat.netRev = catNetRev;
-    cat.drrNetRev = catNetRev / numDays;
+    cat.netRev = hasNet ? catNetRev : null;
+    cat.drrNetRev = hasNet ? catNetRev / numDays : null;
     cat.str = catNetRev > 0 ? catSpend / catNetRev : null;
     cat.spendPct = catSpend > 0 ? 100 : 0;
     const catEr = earnRatioFor(adMet.directRoas, adMet.nur, cm1Pct, adMet.directQty, adMet.spend);
@@ -3309,6 +3314,138 @@ function HBarChart({
   }));
 }
 
+// Donut + legend showing value/day AND % contribution — zero mental math.
+// data: [{label, value, color}]. fmtVal formats the value (e.g. ₹/day).
+function DonutChart({
+  data,
+  fmtVal,
+  size = 150,
+  valLabel = ''
+}) {
+  const rows = data.filter(d => (d.value || 0) > 0).sort((a, b) => b.value - a.value);
+  const total = rows.reduce((s, d) => s + d.value, 0);
+  const R = size / 2,
+    r = R * 0.58,
+    cx = R,
+    cy = R;
+  let acc = 0;
+  const arc = (frac0, frac1) => {
+    const a0 = frac0 * 2 * Math.PI - Math.PI / 2,
+      a1 = frac1 * 2 * Math.PI - Math.PI / 2;
+    const large = frac1 - frac0 > 0.5 ? 1 : 0;
+    const x0 = cx + R * Math.cos(a0),
+      y0 = cy + R * Math.sin(a0),
+      x1 = cx + R * Math.cos(a1),
+      y1 = cy + R * Math.sin(a1);
+    const xi1 = cx + r * Math.cos(a1),
+      yi1 = cy + r * Math.sin(a1),
+      xi0 = cx + r * Math.cos(a0),
+      yi0 = cy + r * Math.sin(a0);
+    return `M ${x0} ${y0} A ${R} ${R} 0 ${large} 1 ${x1} ${y1} L ${xi1} ${yi1} A ${r} ${r} 0 ${large} 0 ${xi0} ${yi0} Z`;
+  };
+  const segs = rows.map(d => {
+    const f0 = acc / total;
+    acc += d.value;
+    const f1 = acc / total;
+    return {
+      d,
+      path: total > 0 ? arc(f0, f1) : ''
+    };
+  });
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 16,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: size,
+    height: size,
+    viewBox: `0 0 ${size} ${size}`,
+    style: {
+      flexShrink: 0
+    }
+  }, segs.map((s, i) => /*#__PURE__*/React.createElement("path", {
+    key: i,
+    d: s.path,
+    fill: s.d.color,
+    opacity: 0.88
+  })), rows.length === 0 && /*#__PURE__*/React.createElement("circle", {
+    cx: cx,
+    cy: cy,
+    r: R,
+    fill: "#1f2937"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: cx,
+    y: cy - 4,
+    textAnchor: "middle",
+    fill: "#e5e7eb",
+    fontSize: "13",
+    fontWeight: "700"
+  }, fmtVal(total)), /*#__PURE__*/React.createElement("text", {
+    x: cx,
+    y: cy + 11,
+    textAnchor: "middle",
+    fill: "#4b5563",
+    fontSize: "8"
+  }, valLabel || 'total')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 150,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 5
+    }
+  }, rows.map((d, i) => {
+    const pct = total > 0 ? d.value / total * 100 : 0;
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        fontSize: 11
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 9,
+        height: 9,
+        borderRadius: 2,
+        background: d.color,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#9ca3af',
+        flex: 1,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      },
+      title: d.label
+    }, d.label), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#e5e7eb',
+        fontWeight: 600,
+        minWidth: 58,
+        textAlign: 'right'
+      }
+    }, fmtVal(d.value)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#6b7280',
+        minWidth: 38,
+        textAlign: 'right'
+      }
+    }, pct.toFixed(0), "%"));
+  }), rows.length === 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 10
+    }
+  }, "No spend in window")));
+}
+
 // ─── CAMPAIGN DETAIL (DRILL-DOWN) ────────────────────────────────────────────
 
 function CampaignDetail({
@@ -3919,10 +4056,23 @@ function CampaignDetail({
 
 // ─── PORTFOLIO VIEW ──────────────────────────────────────────────────────────
 
+// 4-bucket verdict grouping (was 10+ states) — Earning / Breakeven / Burning / Not Scored.
+const VGROUP_ORDER = ['Earning', 'Breakeven', 'Burning', 'Not Scored'];
+const VGROUP_COLOR = {
+  'Earning': '#22c55e',
+  'Breakeven': '#f59e0b',
+  'Burning': '#ef4444',
+  'Not Scored': '#60a5fa'
+};
+const vGroup = v => v === 'Earning' || v === 'Breakeven' || v === 'Burning' ? v : 'Not Scored';
 function PortfolioView({
   campaigns,
-  prevCampaigns
+  prevCampaigns,
+  netRevDrr,
+  pNetRevDrr
 }) {
+  const [segBrand, setSegBrand] = useState('All'); // brand filter for Spend-by-Segment donut
+
   const active = campaigns.filter(c => c.verdict !== 'Inactive' && c.verdict !== 'Unindexed');
   const totalSpend = campaigns.reduce((s, c) => s + (c.spend || 0), 0);
   const totalSales = campaigns.reduce((s, c) => s + (c.directSales || 0), 0);
@@ -3931,44 +4081,51 @@ function PortfolioView({
   const avgRoas = totalSpend > 0 ? totalSales / totalSpend : null;
   const totalQty = campaigns.reduce((s, c) => s + (c.totalQty || 0), 0);
   const avgNur = totalQty > 0 ? totalNU / totalQty : null;
-
-  // DRR — use first campaign's numDays (all same period)
   const numDays = campaigns.length > 0 ? campaigns[0].numDays || 1 : 1;
   const drrSpend = totalSpend / numDays;
   const drrSales = totalSales / numDays;
   const drrImp = totalImp / numDays;
   const drrNU = totalNU / numDays;
-
-  // Portfolio utilization (Search campaigns only — those with budget data)
+  // STR% = ad spend/day ÷ net revenue/day (net rev from Sales import; may be — if window has no rows)
+  const str = netRevDrr != null && netRevDrr > 0 ? drrSpend / netRevDrr : null;
+  const pStr = pNetRevDrr != null && pNetRevDrr > 0 && prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.spend || 0), 0) / pNetRevDrr : null;
   const utilCamps = campaigns.filter(c => c.utilization !== null);
   const avgUtil = utilCamps.length > 0 ? utilCamps.reduce((s, c) => s + c.utilization, 0) / utilCamps.length : null;
-
-  // Previous period for MoM — also DRR
   const pDrrSpend = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.spend || 0), 0) : 0;
   const pDrrSales = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.directSales || 0), 0) : 0;
   const pDrrImp = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.impressions || 0), 0) : 0;
   const pDrrNU = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.drr?.newUsers || 0), 0) : 0;
-  // keep legacy pSpend etc for chart comparisons
-  const pSpend = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.spend || 0), 0) : 0;
-  const pSales = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.directSales || 0), 0) : 0;
-  const pImp = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.impressions || 0), 0) : 0;
-  const pNU = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.newUsers || 0), 0) : 0;
-  const byVerdict = VERDICT_ORDER.map(v => ({
-    verdict: v,
-    spend: campaigns.filter(c => c.verdict === v).reduce((s, c) => s + (c.spend || 0), 0),
-    count: campaigns.filter(c => c.verdict === v).length
-  })).filter(x => x.count > 0);
+  const pTotalNU = prevCampaigns ? prevCampaigns.reduce((s, c) => s + (c.newUsers || 0), 0) : 0;
+
+  // Verdict → 4 groups, with spend/day + count + % of spend
+  const byGroup = VGROUP_ORDER.map(g => {
+    const cs = campaigns.filter(c => vGroup(c.verdict) === g);
+    const spend = cs.reduce((s, c) => s + (c.spend || 0), 0);
+    return {
+      group: g,
+      count: cs.length,
+      drrSpend: spend / numDays,
+      pct: totalSpend > 0 ? spend / totalSpend * 100 : 0,
+      color: VGROUP_COLOR[g]
+    };
+  }).filter(x => x.count > 0);
   const brands = [...new Set(campaigns.map(c => c.brand).filter(Boolean))];
   const byBrand = brands.map(b => ({
-    brand: b,
-    spend: campaigns.filter(c => c.brand === b).reduce((s, c) => s + (c.spend || 0), 0),
+    label: b,
+    value: campaigns.filter(c => c.brand === b).reduce((s, c) => s + (c.spend || 0), 0) / numDays,
     color: BRAND_COLORS[b] || '#6b7280'
-  })).sort((a, b) => b.spend - a.spend);
-  const segs = [...new Set(campaigns.map(c => c.segment).filter(Boolean))];
-  const bySeg = segs.map(s => ({
-    seg: SEG_SHORT[s] || s,
-    spend: campaigns.filter(c => c.segment === s).reduce((t, c) => t + (c.spend || 0), 0)
-  })).sort((a, b) => b.spend - a.spend);
+  })).sort((a, b) => b.value - a.value);
+
+  // Spend by segment — brand-filterable
+  const segSource = segBrand === 'All' ? campaigns : campaigns.filter(c => c.brand === segBrand);
+  const segNumDays = numDays;
+  const segs = [...new Set(segSource.map(c => c.segment).filter(Boolean))];
+  const SEG_PAL = ['#3b82f6', '#8b5cf6', '#22c55e', '#f59e0b', '#ef4444', '#14b8a6', '#ec4899', '#a3e635', '#f97316', '#60a5fa', '#c084fc', '#2dd4bf', '#facc15', '#fb7185'];
+  const bySeg = segs.map((s, i) => ({
+    label: SEG_SHORT[s] || s,
+    value: segSource.filter(c => c.segment === s).reduce((t, c) => t + (c.spend || 0), 0) / segNumDays,
+    color: SEG_PAL[i % SEG_PAL.length]
+  })).sort((a, b) => b.value - a.value);
   const statBox = (label, val, sub, prev, accent, rawVal) => /*#__PURE__*/React.createElement(Card, {
     style: {
       flex: 1,
@@ -3994,7 +4151,7 @@ function PortfolioView({
       fontSize: 20,
       fontWeight: 700
     }
-  }, val), prev > 0 && /*#__PURE__*/React.createElement(Delta, {
+  }, val), prev != null && prev > 0 && /*#__PURE__*/React.createElement(Delta, {
     current: rawVal !== undefined ? rawVal : val,
     previous: prev
   })), sub && /*#__PURE__*/React.createElement("div", {
@@ -4004,6 +4161,7 @@ function PortfolioView({
       marginTop: 2
     }
   }, sub));
+  const fmtDay = v => fmt(v, 'rsk');
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -4013,10 +4171,10 @@ function PortfolioView({
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))',
+      gridTemplateColumns: 'repeat(auto-fill, minmax(165px, 1fr))',
       gap: 10
     }
-  }, statBox('Avg Daily Spend', fmt(drrSpend, 'rsk'), `${campaigns.length} campaigns · ${numDays}d`, pDrrSpend, '#3b82f6', drrSpend), statBox('Avg Daily Sales', fmt(drrSales, 'rsk'), avgRoas ? `ROAS ${avgRoas.toFixed(2)}x` : '—', pDrrSales, '#22c55e', drrSales), statBox('Avg Daily New Users', fmt(drrNU, 'int'), avgNur ? `NUR ${fmt(avgNur, '%')}` : '—', pDrrNU, '#8b5cf6', drrNU), statBox('Avg Daily Impressions', fmt(drrImp, 'int'), `${active.length} active`, pDrrImp, '#f59e0b', drrImp), avgUtil !== null && statBox('Avg Utilization', `${(avgUtil * 100).toFixed(0)}%`, `${utilCamps.length} campaigns`, null, avgUtil >= 0.9 ? '#ef4444' : avgUtil >= 0.7 ? '#22c55e' : '#f59e0b'), statBox('Earning', campaigns.filter(c => c.verdict === 'Earning').length, `${campaigns.filter(c => c.verdict === 'Burning').length} burning`, null, '#22c55e')), /*#__PURE__*/React.createElement("div", {
+  }, statBox('Spend / day', fmt(drrSpend, 'rsk'), `${campaigns.length} campaigns · ${numDays}d`, pDrrSpend, '#3b82f6', drrSpend), statBox('Sales / day', fmt(drrSales, 'rsk'), avgRoas ? `ROAS ${avgRoas.toFixed(2)}x` : '—', pDrrSales, '#22c55e', drrSales), statBox('STR %', str != null ? (str * 100).toFixed(0) + '%' : '—', 'spend ÷ net revenue', pStr != null ? pStr * 100 : null, str != null && str <= 0.35 ? '#22c55e' : str != null && str <= 0.6 ? '#f59e0b' : '#ef4444', str != null ? str * 100 : undefined), statBox('New Customers / day', fmt(drrNU, 'int'), avgNur ? `NUR ${fmt(avgNur, '%')}` : '—', pDrrNU, '#8b5cf6', drrNU), statBox('New Customers Added', fmt(totalNU, 'int'), `over ${numDays}d`, pTotalNU, '#c084fc', totalNU), statBox('Impressions / day', fmt(drrImp, 'int'), `${active.length} active`, pDrrImp, '#f59e0b', drrImp), avgUtil !== null && statBox('Utilization', `${(avgUtil * 100).toFixed(0)}%`, `${utilCamps.length} campaigns`, null, avgUtil >= 0.9 ? '#ef4444' : avgUtil >= 0.7 ? '#22c55e' : '#f59e0b'), statBox('Earning', campaigns.filter(c => c.verdict === 'Earning').length, `${campaigns.filter(c => c.verdict === 'Burning').length} burning`, null, '#22c55e')), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
       gridTemplateColumns: '1fr 1fr',
@@ -4031,85 +4189,85 @@ function PortfolioView({
       letterSpacing: '0.08em',
       marginBottom: 14
     }
-  }, "Spend by Verdict"), /*#__PURE__*/React.createElement(VBarChart, {
-    data: byVerdict,
-    xKey: "verdict",
-    yKey: "spend",
-    colorFn: d => (VERDICT_CFG[d.verdict] || {
-      color: '#6b7280'
-    }).color,
-    height: 180
-  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+  }, "Spend by Verdict ", /*#__PURE__*/React.createElement("span", {
     style: {
-      color: '#9ca3af',
-      fontSize: 10,
-      fontWeight: 600,
-      textTransform: 'uppercase',
-      letterSpacing: '0.08em',
-      marginBottom: 14
+      color: '#4b5563',
+      fontWeight: 400
     }
-  }, "Campaigns by Verdict"), /*#__PURE__*/React.createElement("div", {
+  }, "· per day · % of spend")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
-      gap: 7,
-      marginTop: 6
+      gap: 9,
+      marginTop: 4
     }
-  }, byVerdict.map(({
-    verdict,
+  }, byGroup.map(({
+    group,
     count,
-    spend
-  }) => {
-    const cfg = VERDICT_CFG[verdict] || {
-      color: '#6b7280'
-    };
-    const pct = totalSpend > 0 ? spend / totalSpend * 100 : 0;
-    return /*#__PURE__*/React.createElement("div", {
-      key: verdict,
-      style: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        minWidth: 90
-      }
-    }, /*#__PURE__*/React.createElement(VBadge, {
-      verdict: verdict,
-      sm: true
-    })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        flex: 1,
-        height: 6,
-        background: '#1f2937',
-        borderRadius: 3
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: `${pct}%`,
-        height: '100%',
-        background: cfg.color,
-        borderRadius: 3,
-        opacity: 0.7,
-        transition: 'width 0.3s ease'
-      }
-    })), /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#9ca3af',
-        fontSize: 11,
-        minWidth: 20,
-        textAlign: 'right'
-      }
-    }, count), /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: '#4b5563',
-        fontSize: 10,
-        minWidth: 50,
-        textAlign: 'right'
-      }
-    }, fmt(spend, 'rsk')));
-  }))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    drrSpend,
+    pct,
+    color
+  }) => /*#__PURE__*/React.createElement("div", {
+    key: group,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 9,
+      height: 9,
+      borderRadius: 2,
+      background: color,
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#d1d5db',
+      fontSize: 11,
+      minWidth: 78,
+      fontWeight: 600
+    }
+  }, group), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      height: 8,
+      background: '#1f2937',
+      borderRadius: 3,
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: `${pct}%`,
+      height: '100%',
+      background: color,
+      opacity: 0.85,
+      borderRadius: 3
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#e5e7eb',
+      fontSize: 11,
+      fontWeight: 600,
+      minWidth: 56,
+      textAlign: 'right'
+    }
+  }, fmtDay(drrSpend)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      minWidth: 34,
+      textAlign: 'right'
+    }
+  }, pct.toFixed(0), "%"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 10,
+      minWidth: 26,
+      textAlign: 'right'
+    }
+  }, count))))), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#9ca3af',
       fontSize: 10,
@@ -4118,12 +4276,20 @@ function PortfolioView({
       letterSpacing: '0.08em',
       marginBottom: 14
     }
-  }, "Spend by Brand"), /*#__PURE__*/React.createElement(HBarChart, {
-    data: byBrand,
-    yKey: "brand",
-    xKey: "spend",
-    colorFn: d => d.color,
-    yWidth: 100
+  }, "Campaigns by Verdict ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontWeight: 400
+    }
+  }, "· count · % of spend")), /*#__PURE__*/React.createElement(DonutChart, {
+    data: byGroup.map(g => ({
+      label: `${g.group} (${g.count})`,
+      value: g.drrSpend,
+      color: g.color
+    })),
+    fmtVal: fmtDay,
+    valLabel: "spend/day",
+    size: 150
   })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#9ca3af',
@@ -4133,11 +4299,59 @@ function PortfolioView({
       letterSpacing: '0.08em',
       marginBottom: 14
     }
-  }, "Spend by Segment"), /*#__PURE__*/React.createElement(HBarChart, {
+  }, "Spend by Brand ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontWeight: 400
+    }
+  }, "· per day · % of spend")), /*#__PURE__*/React.createElement(DonutChart, {
+    data: byBrand,
+    fmtVal: fmtDay,
+    valLabel: "spend/day",
+    size: 150
+  })), /*#__PURE__*/React.createElement(Card, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 10,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em'
+    }
+  }, "Spend by Segment ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontWeight: 400
+    }
+  }, "· per day · % of spend")), /*#__PURE__*/React.createElement("select", {
+    value: segBrand,
+    onChange: e => setSegBrand(e.target.value),
+    style: {
+      marginLeft: 'auto',
+      background: '#111827',
+      border: '1px solid #1f2937',
+      color: '#d1d5db',
+      borderRadius: 6,
+      fontSize: 10,
+      padding: '3px 8px',
+      outline: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "All"
+  }, "All Brands"), brands.map(b => /*#__PURE__*/React.createElement("option", {
+    key: b,
+    value: b
+  }, b)))), /*#__PURE__*/React.createElement(DonutChart, {
     data: bySeg,
-    yKey: "seg",
-    xKey: "spend",
-    yWidth: 110
+    fmtVal: fmtDay,
+    valLabel: "spend/day",
+    size: 150
   }))));
 }
 
@@ -7138,7 +7352,7 @@ function CategorySalesView({
         marginLeft: 4,
         color: Math.abs(deltaPct) < 0.1 ? '#4b5563' : deltaPct > 0 ? '#22c55e' : '#ef4444'
       }
-    }, deltaPct > 0 ? '+' : '', deltaPct.toFixed(1), "pp"), prevPct != null && /*#__PURE__*/React.createElement("div", {
+    }, deltaPct > 0 ? '+' : '', deltaPct.toFixed(1), "%"), prevPct != null && /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#374151',
         fontSize: 9
@@ -7436,7 +7650,7 @@ function CategorySalesView({
             marginLeft: 3,
             color: Math.abs(cDeltaPct) < 0.05 ? '#4b5563' : cDeltaPct > 0 ? '#22c55e' : '#ef4444'
           }
-        }, cDeltaPct > 0 ? '+' : '', cDeltaPct.toFixed(1), "pp"), cPrevPct != null && /*#__PURE__*/React.createElement("div", {
+        }, cDeltaPct > 0 ? '+' : '', cDeltaPct.toFixed(1), "%"), cPrevPct != null && /*#__PURE__*/React.createElement("div", {
           style: {
             color: '#374151',
             fontSize: 8
@@ -7711,7 +7925,7 @@ function CategorySalesView({
   }), /*#__PURE__*/React.createElement(ThStatic, {
     label: "Segment"
   }), /*#__PURE__*/React.createElement(ThStatic, {
-    label: "% Contrib (Δpp)",
+    label: "% Contrib (Δ%)",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "deltaDQ",
@@ -8104,7 +8318,7 @@ function SalesFlowView({
       fontSize: 11,
       whiteSpace: 'nowrap'
     }
-  }, fmtS(sfSub.netrev), /*#__PURE__*/React.createElement(DPct, {
+  }, sfSub.netrev > 0 ? fmtS(sfSub.netrev) : '—', sfSub.netrev > 0 && /*#__PURE__*/React.createElement(DPct, {
     curr: sfSub.netrev,
     prev: sfSub.pNetrev
   })), /*#__PURE__*/React.createElement("td", {
@@ -8318,7 +8532,7 @@ function SalesFlowView({
         marginLeft: 3,
         color: Math.abs(deltaPct) < 0.1 ? '#4b5563' : deltaPct > 0 ? '#22c55e' : '#ef4444'
       }
-    }, deltaPct > 0 ? '+' : '', deltaPct.toFixed(1), "pp")), prevPct != null && /*#__PURE__*/React.createElement("div", {
+    }, deltaPct > 0 ? '+' : '', deltaPct.toFixed(1), "%")), prevPct != null && /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#374151',
         fontSize: 8
@@ -8418,7 +8632,7 @@ function SalesFlowView({
         marginLeft: 3,
         color: Math.abs(curr.spendPct - prev.spendPct) < 0.1 ? '#4b5563' : curr.spendPct > prev.spendPct ? '#22c55e' : '#ef4444'
       }
-    }, curr.spendPct > prev.spendPct ? '+' : '', (curr.spendPct - prev.spendPct).toFixed(1), "pp")), prev?.spendPct != null && /*#__PURE__*/React.createElement("div", {
+    }, curr.spendPct > prev.spendPct ? '+' : '', (curr.spendPct - prev.spendPct).toFixed(1), "%")), prev?.spendPct != null && /*#__PURE__*/React.createElement("div", {
       style: {
         color: '#374151',
         fontSize: 9
@@ -8772,7 +8986,7 @@ function SalesFlowView({
     col: "_name",
     label: "Category / Segment / Keyword / Campaign"
   }), /*#__PURE__*/React.createElement(ThS, {
-    label: "Qty Contrib (Δpp)",
+    label: "Qty Contrib (Δ%)",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
     col: "deltaDQ",
@@ -10345,7 +10559,7 @@ function DailyBriefView({
   })).filter(x => x.prev && x.prev.earnState === 'Earning' && (x.c.earnState === 'Burning' || x.c.earnState === 'Breakeven')).sort((a, b) => (b.c.drr?.spend || 0) - (a.c.drr?.spend || 0)), [live, prevMap]);
 
   // Qty drops at KEYWORD level (from Cat Sales aggregation, organic excluded).
-  // Ranked by share-of-sales lost (Δpp of brand×category total incl organic).
+  // Ranked by share-of-sales lost (Δ% of brand×category total incl organic).
   // A drop that is inline with a category-wide dip = market problem, not ads.
   const qtyDrops = useMemo(() => {
     if (!catCurr.length || !catPrev || !catPrev.length) return [];
@@ -10678,7 +10892,7 @@ function DailyBriefView({
       'Brand': r.brand || '',
       'Category': r.category || '',
       'Segment': SEG_SHORT[r.segment] || r.segment || '',
-      'Δ Contribution pp': deltaPP != null ? +deltaPP.toFixed(2) : null,
+      'Δ Contribution %': deltaPP != null ? +deltaPP.toFixed(2) : null,
       'Contrib prev %': contribPrev != null ? +contribPrev.toFixed(2) : null,
       'Contrib now %': contribNow != null ? +contribNow.toFixed(2) : null,
       'Δ units/d': +(cq - pq).toFixed(1),
@@ -10784,7 +10998,7 @@ function DailyBriefView({
         cq,
         deltaPP,
         catChg
-      }) => L.push(`[ ] "${r.keyword}" (${r.brand} · ${r.category}) · ${pq.toFixed(1)} → ${cq.toFixed(1)} units/d · share ${deltaPP != null ? (deltaPP > 0 ? '+' : '') + deltaPP.toFixed(1) + 'pp' : '—'} · ${inlineVerdict(deltaPP, catChg)}`));
+      }) => L.push(`[ ] "${r.keyword}" (${r.brand} · ${r.category}) · ${pq.toFixed(1)} → ${cq.toFixed(1)} units/d · share ${deltaPP != null ? (deltaPP > 0 ? '+' : '') + deltaPP.toFixed(1) + '%' : '—'} · ${inlineVerdict(deltaPP, catChg)}`));
     }
     if (scales.length) {
       L.push('', '— SCALE —');
@@ -11241,7 +11455,7 @@ function DailyBriefView({
     title: "Qty Drops A — Biggest Share Loss",
     accent: "#ef4444",
     count: qtyDrops.length,
-    sub: "losing share within its own category (Δpp) — the competitive signal · INLINE = market dipped too"
+    sub: "losing share within its own category (Δ%) — the competitive signal · INLINE = market dipped too"
   }, qtyDrops.slice(0, 12).map(({
     r,
     pq,
@@ -11255,7 +11469,7 @@ function DailyBriefView({
     id: 'qda_' + r.brand + r.category + r.segment + r.keyword,
     name: `"${r.keyword}"`,
     tag: `${r.brand} · ${r.category} · ${SEG_SHORT[r.segment] || r.segment}`,
-    impact: deltaPP != null ? `${deltaPP > 0 ? '+' : ''}${deltaPP.toFixed(1)}pp share` : '—',
+    impact: deltaPP != null ? `${deltaPP > 0 ? '+' : ''}${deltaPP.toFixed(1)}% share` : '—',
     impactColor: "#ef4444",
     action: `share ${contribPrev != null ? contribPrev.toFixed(1) : '—'}% → ${contribNow != null ? contribNow.toFixed(1) : '—'}% · ${pq.toFixed(1)} → ${cq.toFixed(1)} units/d`,
     meta: inlineVerdict(deltaPP, catChg)
@@ -11280,7 +11494,7 @@ function DailyBriefView({
     tag: `${r.brand} · ${r.category} · ${SEG_SHORT[r.segment] || r.segment}`,
     impact: `▼${(pq - cq).toFixed(1)}/d`,
     impactColor: "#ef4444",
-    action: `${pq.toFixed(1)} → ${cq.toFixed(1)} units/d (▼${Math.round((pq - cq) / pq * 100)}%) · share ${deltaPP != null ? (deltaPP > 0 ? '+' : '') + deltaPP.toFixed(1) + 'pp' : '—'}`,
+    action: `${pq.toFixed(1)} → ${cq.toFixed(1)} units/d (▼${Math.round((pq - cq) / pq * 100)}%) · share ${deltaPP != null ? (deltaPP > 0 ? '+' : '') + deltaPP.toFixed(1) + '%' : '—'}`,
     meta: inlineVerdict(deltaPP, catChg)
   }))), deteriorating.length > 0 && /*#__PURE__*/React.createElement(Sec, {
     icon: "📉",
@@ -13821,10 +14035,11 @@ function ChangeLedgerView({
 // Metrics per node from OUR competitor-conquest campaigns. Δ vs the selected date filter's prior window.
 const OWN_BRAND_TOKENS = new Set(['bebodywise', 'manmatters', 'littlejoys']);
 const isOwnBrandTag = s => OWN_BRAND_TOKENS.has(String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
+const isGenericTag = s => /generic/i.test(String(s || ''));
 function computeCompTree(allRows, startDate, endDate) {
   const numDays = Math.round((endDate - startDate) / 864e5) + 1;
-  // Exclude our own brands from the competitor column (brand-defense tags aren't competitors).
-  const win = allRows.filter(r => r.type === 'Search' && r.date >= startDate && r.date <= endDate && r.category && r.compBrand && !isOwnBrandTag(r.compBrand));
+  // Pure competitors only: drop our own brands (brand-defense) AND Generic (not a competitor).
+  const win = allRows.filter(r => r.type === 'Search' && r.date >= startDate && r.date <= endDate && r.category && r.compBrand && !isOwnBrandTag(r.compBrand) && !isGenericTag(r.compBrand));
   const cats = {};
   win.forEach(r => {
     const ck = `${r.brand || ''}||${r.category}`;
@@ -13878,6 +14093,7 @@ function CompTrackerView({
     dir: -1
   });
   const rows = Array.isArray(comp) ? comp : [];
+  const numDaysComp = rows[0] && rows[0].numDays || 1;
   const brands = useMemo(() => [...new Set(rows.map(r => r.brand).filter(Boolean))].sort(), [rows]);
   const compBrands = useMemo(() => {
     const s = new Set();
@@ -14121,6 +14337,65 @@ function CompTrackerView({
       fontSize: 9
     }
   }, fmtN(prev.drrDQ))));
+
+  // TOTAL row — aggregate all filtered categories (competitors only), with Δ vs prior window
+  const aggNodes = nodes => {
+    let spend = 0,
+      ds = 0,
+      is = 0,
+      dq = 0,
+      nu = 0,
+      imp = 0,
+      cpmN = 0,
+      cpmI = 0,
+      nd = numDaysComp;
+    nodes.forEach(n => {
+      if (!n) return;
+      spend += n.spend || 0;
+      ds += n.directSales || 0;
+      is += n.indirectSales || 0;
+      dq += n.directQty || 0;
+      nu += n.newUsers || 0;
+      imp += n.impressions || 0;
+      if (n.avgCpm != null && n.impressions > 0) {
+        cpmN += n.avgCpm * n.impressions;
+        cpmI += n.impressions;
+      }
+      if (n.numDays) nd = n.numDays;
+    });
+    return {
+      drrNU: nu / nd,
+      nur: dq > 0 ? Math.min(nu / dq, 1) : null,
+      directRoas: spend > 0 ? ds / spend : null,
+      totalRoas: spend > 0 ? (ds + is) / spend : null,
+      drrSpend: spend / nd,
+      avgCpm: cpmI > 0 ? cpmN / cpmI : null,
+      drrDQ: dq / nd
+    };
+  };
+  const subCur = aggNodes(filtered);
+  const subPrv = aggNodes(filtered.map(c => prevMap[`${c.brand}||${c.category}`]));
+  if (filtered.length > 0) tableRows.push(/*#__PURE__*/React.createElement("tr", {
+    key: "__comp_total__",
+    style: {
+      borderBottom: '2px solid #1f2937',
+      background: 'rgba(59,130,246,0.08)',
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      color: '#60a5fa',
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, "TOTAL ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontWeight: 400,
+      fontSize: 9
+    }
+  }, "(competitors · ", filtered.length, " categories)")), metricCells(subCur, subPrv)));
   sortByCol(filtered).forEach(cat => {
     const ck = `${cat.brand}||${cat.category}`;
     const isExp = expanded.has(ck);
@@ -14167,10 +14442,7 @@ function CompTrackerView({
       }
     }, cat.category))), metricCells(cat, prevMap[ck])));
     if (isExp && cat.comps) {
-      const pairs = Object.entries(cat.comps);
-      const generic = pairs.filter(([cb]) => /generic/i.test(cb));
-      const named = sortPairs(pairs.filter(([cb]) => !/generic/i.test(cb)));
-      [...named, ...generic].forEach(([cb, cd]) => {
+      sortPairs(Object.entries(cat.comps)).forEach(([cb, cd]) => {
         const compKey = `${ck}||${cb}`;
         const cExp = expanded.has(compKey);
         const hasCamps = Object.keys(cd.campaigns || {}).length > 0;
@@ -14208,7 +14480,7 @@ function CompTrackerView({
           }
         }), /*#__PURE__*/React.createElement("span", {
           style: {
-            color: /generic/i.test(cb) ? '#6b7280' : '#f59e0b',
+            color: '#f59e0b',
             fontSize: 11,
             fontWeight: 600
           }
@@ -14908,7 +15180,398 @@ function HelpView() {
       fontSize: 11,
       lineHeight: 1.6
     }
-  }, text)))), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Read it instantly:"), " 1.0 = the ad exactly pays for itself. 1.8 = every rupee brings back ₹1.80 of what it needs to. 0.5 = half the money is not coming back. Because each campaign is judged against", /*#__PURE__*/React.createElement(Hi, null, " its own"), " category margin and ", /*#__PURE__*/React.createElement(Hi, null, "its own"), " new-customer mix, an Earn of 1.2 means the same thing on Creatine as on Foot Cream — even though their breakeven ROAS differ 2x."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The actions write themselves:"), " ", /*#__PURE__*/React.createElement(Hi, {
+  }, text)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#0a0e14',
+      border: '1px solid #1f2937',
+      borderRadius: 10,
+      padding: '16px 18px',
+      margin: '14px 0'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#93c5fd',
+      fontSize: 11,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      marginBottom: 6
+    }
+  }, "Build it from one ₹100 sale"), /*#__PURE__*/React.createElement(P, {
+    style: {
+      marginTop: 0
+    }
+  }, "Start with the simplest thing: ", /*#__PURE__*/React.createElement(Hi, null, "one unit at ₹100 MRP"), ". After COGS, platform fee and the rest, say ", /*#__PURE__*/React.createElement(Hi, {
+    color: "#22c55e"
+  }, "₹33 is left as contribution margin (CM1)"), " — the real money that one sale makes us. Everything below is just that ₹33 turned into a bar the ad has to clear."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'stretch',
+      gap: 8,
+      margin: '12px 0 16px'
+    }
+  }, [{
+    t: '① One ₹100 sale',
+    v: 'CM1 = ₹33',
+    s: '₹33 profit on every ₹100 of sales → margin is 33%',
+    c: '#22c55e'
+  }, {
+    t: '② Breakeven ROAS',
+    v: '₹100 ÷ ₹33 = 3.0x',
+    s: 'To earn back ₹1 of ad spend I need ~₹3 of sales (1 ÷ 33%)',
+    c: '#3b82f6'
+  }, {
+    t: '③ New-customer credit',
+    v: 'NUR 50% → ×1.6',
+    s: 'Half the buyers are new; a new buyer reorders ~2.2×. Blend = 0.5×2.2 + 0.5 = 1.6',
+    c: '#8b5cf6'
+  }, {
+    t: '④ Floor (bar to beat)',
+    v: '3.0 ÷ 1.6 = 1.88x',
+    s: 'The ROAS this campaign must clear to break even in real profit',
+    c: '#f59e0b'
+  }, {
+    t: '⑤ What the ad did',
+    v: 'Direct ROAS 2.7x',
+    s: 'The actual return the campaign delivered this period',
+    c: '#e5e7eb'
+  }].map((b, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      flex: '1 1 140px',
+      minWidth: 140,
+      display: 'flex',
+      flexDirection: 'column'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#111827',
+      border: `1px solid ${b.c}44`,
+      borderLeft: `3px solid ${b.c}`,
+      borderRadius: 8,
+      padding: '9px 11px',
+      height: '100%'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+      marginBottom: 3
+    }
+  }, b.t), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: b.c,
+      fontSize: 13,
+      fontWeight: 700,
+      marginBottom: 4
+    }
+  }, b.v), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 10,
+      lineHeight: 1.5
+    }
+  }, b.s))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      flexWrap: 'wrap',
+      marginBottom: 14,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#9ca3af',
+      fontWeight: 600
+    }
+  }, "Earn Ratio"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6b7280'
+    }
+  }, "="), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#e5e7eb',
+      fontWeight: 700
+    }
+  }, "Direct ROAS 2.7x"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6b7280'
+    }
+  }, "÷"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#f59e0b',
+      fontWeight: 700
+    }
+  }, "Floor 1.88x"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6b7280'
+    }
+  }, "="), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#22c55e',
+      fontSize: 18,
+      fontWeight: 800
+    }
+  }, "1.44"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: 'rgba(34,197,94,0.12)',
+      color: '#22c55e',
+      fontSize: 11,
+      fontWeight: 700,
+      padding: '2px 8px',
+      borderRadius: 5
+    }
+  }, "🟢 EARNING")), (() => {
+    const scale = 2.5,
+      earn = 1.44;
+    const pct = v => Math.min(100, v / scale * 100);
+    const zones = [{
+      from: 0,
+      to: 0.85,
+      color: '#ef4444',
+      label: 'Burning'
+    }, {
+      from: 0.85,
+      to: 1.15,
+      color: '#f59e0b',
+      label: 'Breakeven'
+    }, {
+      from: 1.15,
+      to: scale,
+      color: '#22c55e',
+      label: 'Earning'
+    }];
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 4
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'relative',
+        height: 22,
+        borderRadius: 5,
+        overflow: 'hidden',
+        display: 'flex'
+      }
+    }, zones.map((z, i) => /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        width: `${(z.to - z.from) / scale * 100}%`,
+        background: z.color,
+        opacity: 0.28,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: z.color,
+        fontSize: 9,
+        fontWeight: 700
+      }
+    }, z.label))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        left: `${pct(1.0)}%`,
+        top: 0,
+        bottom: 0,
+        width: 1,
+        background: '#6b7280'
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        left: `${pct(earn)}%`,
+        top: -3,
+        bottom: -3,
+        width: 2,
+        background: '#f9fafb',
+        transform: 'translateX(-1px)'
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: 'absolute',
+        left: `${pct(earn)}%`,
+        top: -16,
+        transform: 'translateX(-50%)',
+        color: '#f9fafb',
+        fontSize: 10,
+        fontWeight: 700,
+        whiteSpace: 'nowrap'
+      }
+    }, "1.44 ▼")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        justifyContent: 'space-between',
+        marginTop: 4,
+        color: '#4b5563',
+        fontSize: 8
+      }
+    }, /*#__PURE__*/React.createElement("span", null, "0"), /*#__PURE__*/React.createElement("span", null, "0.85"), /*#__PURE__*/React.createElement("span", null, "1.0 = breakeven"), /*#__PURE__*/React.createElement("span", null, "1.15"), /*#__PURE__*/React.createElement("span", null, "2.5x")));
+  })(), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      lineHeight: 1.6,
+      marginTop: 12
+    }
+  }, "Change any input and the verdict shifts on its own: thinner margin (CM1 ₹25 on ₹100 → base 4.0x) lifts the floor and can flip this to Burning; more new customers eases the floor and the same ROAS looks better. That's why the ", /*#__PURE__*/React.createElement(Hi, null, "same 2.7x ROAS"), " can be Earning on an acquisition campaign and Burning on one re-selling to existing buyers — the ₹100/₹33 maths just re-runs with each campaign's own numbers."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: '1px solid #1f2937',
+      marginTop: 14,
+      paddingTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#93c5fd',
+      fontSize: 11,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      marginBottom: 6
+    }
+  }, "Why 2.2 orders per new customer?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#9ca3af',
+      fontSize: 11,
+      lineHeight: 1.7
+    }
+  }, "It's a deliberately simple, flat assumption (not a per-SKU LTV model) so the number stays honest and easy to defend:", /*#__PURE__*/React.createElement(Hi, null, " ~40% of new buyers come back"), ", and because these products run out in ~30 days a returner buys about", /*#__PURE__*/React.createElement(Hi, null, " 4× a year"), ". Blend it: ", /*#__PURE__*/React.createElement(Hi, {
+    color: "#e5e7eb"
+  }, "0.6 buyers × 1 order + 0.4 buyers × 4 orders = 2.2 orders"), " per acquired customer on average. A repeat buyer counts as just 1 order — they'd likely have bought anyway. Raise or lower this one dial (in the engine) and every floor moves together.")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: '1px solid #1f2937',
+      marginTop: 14,
+      paddingTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#93c5fd',
+      fontSize: 11,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      marginBottom: 4
+    }
+  }, "How it moves as new-customer % (NUR) rises"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      marginBottom: 10
+    }
+  }, "Same product (base 3.0x) · same ad (Direct ROAS 2.7x) · only NUR changes"), (() => {
+    const base = 3.0,
+      roas = 2.7,
+      R = 2.2;
+    const rows = [0, 0.25, 0.5, 0.75, 1.0].map(nur => {
+      const uplift = nur * R + (1 - nur);
+      const floor = base / uplift;
+      const earn = roas / floor;
+      const st = earn >= 1.15 ? ['Earning', '#22c55e'] : earn >= 0.85 ? ['Breakeven', '#f59e0b'] : ['Burning', '#ef4444'];
+      return {
+        nur,
+        uplift,
+        floor,
+        earn,
+        st
+      };
+    });
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        fontSize: 9,
+        color: '#4b5563',
+        fontWeight: 700,
+        textTransform: 'uppercase',
+        letterSpacing: '0.04em',
+        padding: '0 6px 5px'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: '0 0 70px'
+      }
+    }, "NUR"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        textAlign: 'right'
+      }
+    }, "Repeat uplift"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        textAlign: 'right'
+      }
+    }, "Floor"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        textAlign: 'right'
+      }
+    }, "Earn"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: '0 0 90px',
+        textAlign: 'right'
+      }
+    }, "Verdict")), rows.map((r, i) => /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        fontSize: 11,
+        padding: '6px',
+        borderTop: '1px solid #111827',
+        background: r.nur === 0.5 ? 'rgba(59,130,246,0.06)' : 'transparent'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: '0 0 70px',
+        color: '#c4b5fd',
+        fontWeight: 600
+      }
+    }, (r.nur * 100).toFixed(0), "%", r.nur === 0.5 ? ' ◄ ex.' : ''), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        textAlign: 'right',
+        color: '#9ca3af'
+      }
+    }, "×", r.uplift.toFixed(2)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        textAlign: 'right',
+        color: '#f59e0b'
+      }
+    }, r.floor.toFixed(2), "x"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        textAlign: 'right',
+        color: r.st[1],
+        fontWeight: 700
+      }
+    }, r.earn.toFixed(2)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: '0 0 90px',
+        textAlign: 'right',
+        color: r.st[1],
+        fontWeight: 600
+      }
+    }, r.st[0]))));
+  })(), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      lineHeight: 1.6,
+      marginTop: 10
+    }
+  }, "More new customers → the floor drops → the same 2.7x ROAS earns more. At ", /*#__PURE__*/React.createElement(Hi, null, "0% new"), " (pure repeat harvesting) the bar is the full 3.0x, so 2.7x is barely breakeven; at ", /*#__PURE__*/React.createElement(Hi, null, "100% new"), " the bar falls to ~1.36x and the same ad looks strongly profitable. This is the whole reason Comp and Generic terms get an easier bar automatically — they bring more new users, so NUR does it, not a hand-set exception."))), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Read it instantly:"), " 1.0 = the ad exactly pays for itself. 1.8 = every rupee brings back ₹1.80 of what it needs to. 0.5 = half the money is not coming back. Because each campaign is judged against", /*#__PURE__*/React.createElement(Hi, null, " its own"), " category margin and ", /*#__PURE__*/React.createElement(Hi, null, "its own"), " new-customer mix, an Earn of 1.2 means the same thing on Creatine as on Foot Cream — even though their breakeven ROAS differ 2x."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "The actions write themselves:"), " ", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
   }, "⬆ Scale"), " (winner + room to grow — budget step sized by how big the buffer is, capped at proven demand) · ", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
@@ -14940,7 +15603,7 @@ function HelpView() {
     color: "#ef4444"
   }, "⚠ Sudden changes"), " that have a safe counter-move are already ⚡ rows here. The rest (market dips, patterns, positions not worth defending) are informational — they live in 👀 Watching."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, null, "Where do suggestions come from?"), " The Earn engine: a campaign that's been losing real profit for 2 straight weeks gets a Pause/Budget row. One that's breakeven gets a Tune row naming the exact drag. A winner holding top rank while overpaying gets a Trim. A winner starved of budget gets a Scale. Healthy campaigns produce no rows at all — silence means fine."), /*#__PURE__*/React.createElement(P, null, /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
-  }, "📦 Qty Drops"), " — keywords selling fewer units than last month. The key number is", /*#__PURE__*/React.createElement(Hi, null, " \"pp share\""), " — did this keyword's SHARE of the category's sales fall, or did the whole category just have a slow month?", /*#__PURE__*/React.createElement(Hi, {
+  }, "📦 Qty Drops"), " — keywords selling fewer units than last month. The key number is the", /*#__PURE__*/React.createElement(Hi, null, " Δ% share"), " — did this keyword's SHARE of the category's sales fall (in percentage-of-the-pie terms), or did the whole category just have a slow month?", /*#__PURE__*/React.createElement(Hi, {
     color: "#22c55e"
   }, " \"INLINE with category dip\""), " = market slowed, ads are fine, don't panic.", /*#__PURE__*/React.createElement(Hi, {
     color: "#ef4444"
@@ -15241,6 +15904,42 @@ function App() {
     return aggregateByCategory(allRows, r.pStart, r.pEnd, campaignIndexMap, salesAgg, salesNetAgg, cm1Map);
   }, [appState, prevCampaigns, getPrevRange]);
 
+  // Portfolio net revenue/day (for STR% card) — sum Sales-import net rev across all cats in window
+  const portfolioNet = useMemo(() => {
+    if (!appState || !appState.salesNetAgg) return {
+      curr: null,
+      prev: null
+    };
+    const sumWin = (s, e) => {
+      let t = 0,
+        has = false;
+      Object.values(appState.salesNetAgg).forEach(byDate => {
+        Object.entries(byDate).forEach(([ts, v]) => {
+          const d = new Date(parseInt(ts));
+          if (d >= s && d <= e) {
+            t += v;
+            has = true;
+          }
+        });
+      });
+      return has ? t : null;
+    };
+    const nd = Math.round((appState.endDate - appState.startDate) / 864e5) + 1;
+    const cur = sumWin(appState.startDate, appState.endDate);
+    const curr = cur != null ? cur / nd : null;
+    const r = getPrevRange();
+    let prev = null;
+    if (r) {
+      const p = sumWin(r.pStart, r.pEnd);
+      const pnd = Math.round((r.pEnd - r.pStart) / 864e5) + 1;
+      prev = p != null ? p / pnd : null;
+    }
+    return {
+      curr,
+      prev
+    };
+  }, [appState, getPrevRange]);
+
   // Keyword aggregations (flattened to keyword level with per-campaign drill-down)
   const kwCurrent = useMemo(() => {
     if (!appState) return [];
@@ -15494,7 +16193,7 @@ function App() {
       fontWeight: 600,
       whiteSpace: 'nowrap'
     }
-  }, "v23"), /*#__PURE__*/React.createElement("div", {
+  }, "v24"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 3
@@ -15742,7 +16441,9 @@ function App() {
     reviewOnly: true
   })))), tab === 'portfolio' && /*#__PURE__*/React.createElement(PortfolioView, {
     campaigns: campaigns,
-    prevCampaigns: prevCampaigns
+    prevCampaigns: prevCampaigns,
+    netRevDrr: portfolioNet.curr,
+    pNetRevDrr: portfolioNet.prev
   }), tab === 'scorecard' && /*#__PURE__*/React.createElement(ScorecardView, {
     campaigns: campaigns,
     prevCampaigns: prevCampaigns,
