@@ -7098,7 +7098,12 @@ function CategorySalesView({
       padding: '6px 10px',
       color: '#60a5fa',
       fontSize: 11,
-      fontWeight: 700
+      fontWeight: 700,
+      position: 'sticky',
+      left: 0,
+      zIndex: 1,
+      background: '#0d1a2e',
+      borderRight: '1px solid #1f2937'
     }
   }, "TOTAL ", /*#__PURE__*/React.createElement("span", {
     style: {
@@ -7264,7 +7269,12 @@ function CategorySalesView({
       style: {
         padding: '5px 10px',
         minWidth: 180,
-        maxWidth: 280
+        maxWidth: 280,
+        position: 'sticky',
+        left: 0,
+        zIndex: 1,
+        background: isOrganic ? '#0c1512' : isExp ? '#12233a' : '#0a0e14',
+        borderRight: '1px solid #1f2937'
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -7610,7 +7620,12 @@ function CategorySalesView({
         }, /*#__PURE__*/React.createElement("td", {
           style: {
             padding: '4px 10px 4px 30px',
-            maxWidth: 280
+            maxWidth: 280,
+            position: 'sticky',
+            left: 0,
+            zIndex: 1,
+            background: '#0b0f16',
+            borderRight: '1px solid #1f2937'
           },
           colSpan: 1
         }, /*#__PURE__*/React.createElement("span", {
@@ -7919,10 +7934,27 @@ function CategorySalesView({
       borderCollapse: 'collapse',
       fontSize: 11
     }
-  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement(Th, {
-    col: "_name",
-    label: "Keyword"
-  }), /*#__PURE__*/React.createElement(ThStatic, {
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+    onClick: () => toggleSort('_name'),
+    style: {
+      padding: '7px 10px',
+      textAlign: 'left',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      cursor: 'pointer',
+      whiteSpace: 'nowrap',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      left: 0,
+      zIndex: 4,
+      borderBottom: '1px solid #1f2937',
+      borderRight: '1px solid #1f2937'
+    }
+  }, "Keyword"), /*#__PURE__*/React.createElement(ThStatic, {
     label: "Segment"
   }), /*#__PURE__*/React.createElement(ThStatic, {
     label: "% Contrib (Δ%)",
@@ -7965,6 +7997,39 @@ function CategorySalesView({
     label: "Budget/d",
     right: true
   }))), /*#__PURE__*/React.createElement("tbody", null, tableRows))));
+}
+
+// Plain-language "what likely happened" for a campaign, from curr-vs-prev movement.
+// No numbers (the table already shows them) — just the single most salient driver.
+function flowNote(c, p) {
+  if (!c) return null;
+  if (!p) return 'Newly active this period — no prior week to compare.';
+  const rel = (a, b) => b > 0 ? (a - b) / b : a > 0 ? 1 : 0;
+  const dRank = c.avgPos != null && p.avgPos != null ? c.avgPos - p.avgPos : 0; // + = worse
+  const cpmUp = c.avgCpm != null && p.avgCpm != null && rel(c.avgCpm, p.avgCpm) >= 0.10;
+  const cpmDn = c.avgCpm != null && p.avgCpm != null && rel(c.avgCpm, p.avgCpm) <= -0.10;
+  const spendUp = rel(c.drrSpend, p.drrSpend) >= 0.15;
+  const spendDn = rel(c.drrSpend, p.drrSpend) <= -0.15;
+  const dqUp = rel(c.drrDQ, p.drrDQ) >= 0.15;
+  const dqDn = rel(c.drrDQ, p.drrDQ) <= -0.15;
+  const roasDn = c.directRoas != null && p.directRoas != null && rel(c.directRoas, p.directRoas) <= -0.15;
+  const roasUp = c.directRoas != null && p.directRoas != null && rel(c.directRoas, p.directRoas) >= 0.15;
+  const impDn = rel(c.drrImp, p.drrImp) <= -0.12;
+  const nurDn = c.nur != null && p.nur != null && c.nur - p.nur <= -0.08;
+  const rankWorse = dRank >= 0.4,
+    rankBetter = dRank <= -0.4;
+  if (cpmUp && rankWorse) return 'CPM rose but rank still slipped — competition intensified on these keywords.';
+  if (rankWorse && impDn) return 'Rank fell and impressions dropped — likely outbid, or budget exhausting earlier in the day.';
+  if (cpmUp && rankBetter) return 'Bid up to push rank higher — holding a better slot at a higher cost per view.';
+  if (spendUp && (dqDn || !dqUp && roasDn)) return 'Spending more without more orders — efficiency slipping this week.';
+  if (roasDn && !dqUp) return 'Return weakened — sales not keeping pace with spend.';
+  if (dqDn && spendDn) return 'Pulled back — lower spend and fewer orders (looks intentional).';
+  if (dqDn && impDn) return 'Fewer impressions and orders — losing visibility vs last week.';
+  if (dqUp && (roasUp || !roasDn)) return 'Scaling cleanly — more orders at a healthy return.';
+  if (nurDn) return 'Fewer new customers — audience saturating, leaning on repeat buyers.';
+  if (cpmDn && rankBetter) return 'Rank improved as CPM eased — competition cooled off.';
+  if (impDn) return 'Visibility down — fewer impressions than last week.';
+  return 'Broadly stable vs last week — no single driver stands out.';
 }
 
 // ─── SALES FLOW VIEW (Category → Segment → Keyword → Campaign) ───────────────
@@ -8272,7 +8337,12 @@ function SalesFlowView({
       padding: '6px 10px',
       color: '#60a5fa',
       fontSize: 11,
-      fontWeight: 700
+      fontWeight: 700,
+      position: 'sticky',
+      left: 0,
+      zIndex: 1,
+      background: '#0d1a2e',
+      borderRight: '1px solid #1f2937'
     }
   }, "TOTAL (incl. Organic) ", /*#__PURE__*/React.createElement("span", {
     style: {
@@ -8452,8 +8522,13 @@ function SalesFlowView({
       style: {
         padding: '5px 10px',
         paddingLeft: 8 + indent,
-        minWidth: 160,
-        maxWidth: 280
+        minWidth: 220,
+        maxWidth: 300,
+        position: 'sticky',
+        left: 0,
+        zIndex: 1,
+        background: '#0a0e14',
+        borderRight: '1px solid #1f2937'
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -8496,7 +8571,19 @@ function SalesFlowView({
         color: '#374151',
         fontSize: 8
       }
-    }, labelSub)))), /*#__PURE__*/React.createElement("td", {
+    }, labelSub), level === 3 && (() => {
+      const n = flowNote(curr, prev);
+      return n ? /*#__PURE__*/React.createElement("div", {
+        style: {
+          color: '#8b93a5',
+          fontSize: 9,
+          fontStyle: 'italic',
+          whiteSpace: 'normal',
+          lineHeight: 1.35,
+          marginTop: 3
+        }
+      }, "💬 ", n) : null;
+    })()))), /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
         textAlign: 'right',
@@ -8982,10 +9069,25 @@ function SalesFlowView({
       borderCollapse: 'collapse',
       fontSize: 11
     }
-  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement(Th, {
-    col: "_name",
-    label: "Category / Segment / Keyword / Campaign"
-  }), /*#__PURE__*/React.createElement(ThS, {
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+    style: {
+      padding: '7px 10px',
+      textAlign: 'left',
+      color: '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      whiteSpace: 'nowrap',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      left: 0,
+      zIndex: 4,
+      borderBottom: '1px solid #1f2937',
+      borderRight: '1px solid #1f2937'
+    }
+  }, "Category / Segment / Keyword / Campaign"), /*#__PURE__*/React.createElement(ThS, {
     label: "Qty Contrib (Δ%)",
     right: true
   }), /*#__PURE__*/React.createElement(Th, {
@@ -14387,7 +14489,12 @@ function CompTrackerView({
       padding: '6px 10px',
       color: '#60a5fa',
       fontSize: 11,
-      fontWeight: 700
+      fontWeight: 700,
+      position: 'sticky',
+      left: 0,
+      zIndex: 1,
+      background: '#0d1a2e',
+      borderRight: '1px solid #1f2937'
     }
   }, "TOTAL ", /*#__PURE__*/React.createElement("span", {
     style: {
@@ -14411,7 +14518,12 @@ function CompTrackerView({
     }, /*#__PURE__*/React.createElement("td", {
       style: {
         padding: '5px 10px',
-        minWidth: 200
+        minWidth: 200,
+        position: 'sticky',
+        left: 0,
+        zIndex: 1,
+        background: isExp ? '#12233a' : '#0a0e14',
+        borderRight: '1px solid #1f2937'
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -14456,7 +14568,12 @@ function CompTrackerView({
           }
         }, /*#__PURE__*/React.createElement("td", {
           style: {
-            padding: '5px 10px 5px 28px'
+            padding: '5px 10px 5px 28px',
+            position: 'sticky',
+            left: 0,
+            zIndex: 1,
+            background: cExp ? '#101d2e' : '#0b0f16',
+            borderRight: '1px solid #1f2937'
           }
         }, /*#__PURE__*/React.createElement("div", {
           style: {
@@ -14497,7 +14614,12 @@ function CompTrackerView({
             }, /*#__PURE__*/React.createElement("td", {
               style: {
                 padding: '4px 10px 4px 48px',
-                maxWidth: 280
+                maxWidth: 280,
+                position: 'sticky',
+                left: 0,
+                zIndex: 1,
+                background: '#0a0d13',
+                borderRight: '1px solid #1f2937'
               }
             }, /*#__PURE__*/React.createElement("span", {
               style: {
@@ -14594,8 +14716,10 @@ function CompTrackerView({
       background: '#0a0e14',
       position: 'sticky',
       top: 0,
-      zIndex: 2,
-      borderBottom: '1px solid #1f2937'
+      left: 0,
+      zIndex: 4,
+      borderBottom: '1px solid #1f2937',
+      borderRight: '1px solid #1f2937'
     }
   }, "Category / Competitor / Campaign"), /*#__PURE__*/React.createElement(Th, {
     col: "drrNU",
@@ -16193,7 +16317,7 @@ function App() {
       fontWeight: 600,
       whiteSpace: 'nowrap'
     }
-  }, "v24"), /*#__PURE__*/React.createElement("div", {
+  }, "v25"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 3
