@@ -59,6 +59,11 @@ const CAMPAIGN_IDX_GID = 1095613721; // "Rough Analysis" — campaign → segmen
 const SALES_IMPORT_GID = 645442496; // Total sales (organic + ads) by date/brand/category
 const BK_SEARCH_GID = 1321541424; // "BK Import Search" — Blinkit search volume per keyword
 
+// "Search reco BK" — Blinkit's suggested keywords per brand×category (separate sheet).
+// Link-shared (not published-to-web), so export?format=csv is blank → use the gviz CSV endpoint.
+const RECO_SHEET_ID = '1UkeDfFaziuZZtA6jVixDAu1dsgbWbW6DX1MQcwYtYug';
+const RECO_GID = 244896497;
+const RECO_URL = `https://docs.google.com/spreadsheets/d/${RECO_SHEET_ID}/gviz/tq?tqx=out:csv&gid=${RECO_GID}`;
 const BENCHMARKS = {
   'Generic Head': {
     roasF: 1.2,
@@ -1025,6 +1030,82 @@ async function clearSheetCache() {
   } catch (e) {}
 }
 
+// ─── KEYWORD RECO ("Search reco BK") ─────────────────────────────────────────
+// Cols: Brand | Category | Downloaded_Date | Keyword | Searches (Last 30 Days) | Keyword Type | Asset Type | Trending
+function parseRecoKeywords(text) {
+  if (!text) return [];
+  const rows = parseCSV(text);
+  let h = -1;
+  for (let i = 0; i < Math.min(6, rows.length); i++) {
+    const nr = (rows[i] || []).map(normHdr);
+    if (nr.includes('keyword') && nr.includes('brand')) {
+      h = i;
+      break;
+    }
+  }
+  if (h < 0) return [];
+  const hdr = rows[h].map(normHdr);
+  const col = (names, fb) => {
+    for (const n of names) {
+      const i = hdr.indexOf(n);
+      if (i >= 0) return i;
+    }
+    return fb;
+  };
+  const ci = {
+    brand: col(['brand'], 0),
+    cat: col(['category'], 1),
+    date: col(['downloaded_date', 'downloaded date', 'date'], 2),
+    kw: col(['keyword'], 3),
+    searches: col(['searches (last 30 days)', 'searches last 30 days', 'searches'], 4),
+    ktype: col(['keyword type'], 5),
+    trending: col(['trending'], 7)
+  };
+  const out = [];
+  rows.slice(h + 1).forEach(r => {
+    const kw = String(r[ci.kw] || '').trim();
+    if (!kw) return;
+    const ds = String(r[ci.date] || '').trim();
+    const p = ds.split(/[-/]/);
+    const d = p.length === 3 ? new Date(parseInt(p[0]) > 31 ? p[0] : p[2], parseInt(p[1]) - 1, parseInt(p[0]) > 31 ? p[2] : p[0]) : null;
+    out.push({
+      brand: String(r[ci.brand] || '').trim(),
+      category: String(r[ci.cat] || '').trim(),
+      date: d && !isNaN(d.getTime()) ? d : null,
+      keyword: kw,
+      searches: parseFloat(String(r[ci.searches] || '').replace(/,/g, '')) || 0,
+      ktype: String(r[ci.ktype] || '').trim(),
+      trending: !!String(r[ci.trending] || '').trim()
+    });
+  });
+  return out;
+}
+
+// Last 14 days (by Downloaded_Date), unique keyword×brand×category, MAX search DRR.
+function aggregateReco(recs) {
+  if (!recs || !recs.length) return [];
+  const dated = recs.filter(r => r.date);
+  const maxDate = dated.length ? dated.reduce((m, r) => r.date > m ? r.date : m, dated[0].date) : null;
+  const start = maxDate ? new Date(maxDate.getTime() - 13 * 864e5) : null;
+  const win = maxDate ? recs.filter(r => r.date && r.date >= start && r.date <= maxDate) : recs;
+  const g = {};
+  win.forEach(r => {
+    const k = `${r.brand}||${r.category}||${r.keyword.toLowerCase()}`;
+    if (!g[k]) g[k] = {
+      brand: r.brand,
+      category: r.category,
+      keyword: r.keyword,
+      ktype: r.ktype,
+      searches: 0,
+      trending: false
+    };
+    g[k].searches = Math.max(g[k].searches, r.searches);
+    if (r.trending) g[k].trending = true;
+    if (r.ktype) g[k].ktype = r.ktype;
+  });
+  return Object.values(g).sort((a, b) => b.searches - a.searches);
+}
+
 // ─── DATA FETCH ──────────────────────────────────────────────────────────────
 
 async function fetchAllDataFromSheets() {
@@ -1040,7 +1121,7 @@ async function fetchAllDataFromSheets() {
 
   // CACHE_VER: bump when the sheet schema changes (e.g. Net Revenue col added) so old
   // cached CSVs are ignored automatically — no manual ↺ Refresh needed after a deploy.
-  const CACHE_VER = 'v23net';
+  const CACHE_VER = 'v26reco';
   const fetchWithCache = async gid => {
     const cacheKey = `blinkit_sheet_${CACHE_VER}_${gid}`;
     const cached = await idbGet(cacheKey);
@@ -1054,9 +1135,26 @@ async function fetchAllDataFromSheets() {
     }); // fire-and-forget
     return text;
   };
-  const [condText, idxText, salesText, bkText, ...rawTexts] = await Promise.all([fetchWithCache(CONDITIONS_GID), fetchWithCache(CAMPAIGN_IDX_GID), fetchWithCache(SALES_IMPORT_GID), fetchWithCache(BK_SEARCH_GID).catch(() => ''),
+  // Full-URL variant for sheets on a different doc (e.g. the reco sheet via gviz).
+  const fetchUrlWithCache = async (url, key) => {
+    const cacheKey = `blinkit_sheet_${CACHE_VER}_${key}`;
+    const cached = await idbGet(cacheKey);
+    if (cached && cached.ts && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`Sheet ${key} returned ${r.status}`);
+    const text = await r.text();
+    idbSet(cacheKey, {
+      ts: Date.now(),
+      data: text
+    });
+    return text;
+  };
+  const [condText, idxText, salesText, bkText, recoText, ...rawTexts] = await Promise.all([fetchWithCache(CONDITIONS_GID), fetchWithCache(CAMPAIGN_IDX_GID), fetchWithCache(SALES_IMPORT_GID), fetchWithCache(BK_SEARCH_GID).catch(() => ''),
   // optional feed — dashboard works without it
+  fetchUrlWithCache(RECO_URL, 'reco_bk').catch(() => ''),
+  // optional — keyword-reco feed
   ...RAW_SHEET_CFGS.map(c => fetchWithCache(c.gid))]);
+  const recoRows = parseRecoKeywords(recoText);
 
   // Parse BK search volume: hdr rows 1-4, A=keyword, B=type, C=comp brand,
   // D=category, E=trending volume (search drr), F+= monthly columns (trend)
@@ -1238,6 +1336,7 @@ async function fetchAllDataFromSheets() {
     salesNetAgg,
     kwVolume,
     cm1Map,
+    recoRows,
     cutoffDate
   };
 }
@@ -10032,7 +10131,8 @@ function LoadingScreen({
         salesAgg,
         salesNetAgg,
         kwVolume,
-        cm1Map
+        cm1Map,
+        recoRows
       } = await fetchAllDataFromSheets();
       setStep('Processing & scoring campaigns…');
       const allRows = parseAllRows(rawTexts);
@@ -10044,7 +10144,8 @@ function LoadingScreen({
         salesAgg,
         salesNetAgg,
         kwVolume,
-        cm1Map
+        cm1Map,
+        recoRows
       });
     } catch (e) {
       setStatus('error');
@@ -12518,6 +12619,40 @@ function clearForceAct(campaign) {
     localStorage.setItem(FORCEACT_KEY, JSON.stringify(m));
   } catch (e) {}
 }
+
+// Keyword-reco "ignore" — snooze a suggestion 14 days (browser-local, self-expiring)
+const KWIGNORE_KEY = 'kwexpl_ignore';
+function getKwIgnore() {
+  try {
+    const m = JSON.parse(localStorage.getItem(KWIGNORE_KEY) || '{}');
+    const now = Date.now();
+    let ch = false;
+    Object.keys(m).forEach(k => {
+      if (!m[k] || m[k] < now) {
+        delete m[k];
+        ch = true;
+      }
+    });
+    if (ch) localStorage.setItem(KWIGNORE_KEY, JSON.stringify(m));
+    return m;
+  } catch (e) {
+    return {};
+  }
+}
+function setKwIgnore(key) {
+  try {
+    const m = getKwIgnore();
+    m[key] = Date.now() + 14 * 864e5;
+    localStorage.setItem(KWIGNORE_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
+function clearKwIgnore(key) {
+  try {
+    const m = getKwIgnore();
+    delete m[key];
+    localStorage.setItem(KWIGNORE_KEY, JSON.stringify(m));
+  } catch (e) {}
+}
 function HistoryView() {
   const log = getActivityLog();
   if (!log.length) return /*#__PURE__*/React.createElement(Card, {
@@ -14752,6 +14887,380 @@ function CompTrackerView({
   }, "No competitor-tagged campaigns in this window. (Comp brand = col AD in \"This Month- Product Listing\".)"))))));
 }
 
+// ─── KEYWORD EXPLORER ────────────────────────────────────────────────────────
+// Blinkit's suggested keywords (Search reco BK sheet) flagged against what we run.
+// Untapped = suggested but no live ad. Ignore snoozes a suggestion for 14 days.
+function KeywordExplorerView({
+  reco,
+  liveKwSet
+}) {
+  const [brandF, setBrandF] = useState([]);
+  const [catF, setCatF] = useState([]);
+  const [typeF, setTypeF] = useState([]);
+  const [status, setStatus] = useState('untapped'); // untapped | running | all
+  const [showIgnored, setShowIgnored] = useState(false);
+  const [ignoreMap, setIgnoreMap] = useState(() => getKwIgnore());
+  const [sort, setSort] = useState({
+    col: 'searches',
+    dir: -1
+  });
+  const rows = Array.isArray(reco) ? reco : [];
+  const decorated = useMemo(() => rows.map(r => {
+    const running = liveKwSet.has(`${(r.brand || '').toLowerCase()}||${r.keyword.toLowerCase().trim()}`);
+    const ignKey = `${r.brand}||${r.category}||${r.keyword.toLowerCase()}`;
+    const ignored = !!ignoreMap[ignKey];
+    return {
+      ...r,
+      running,
+      ignored,
+      ignKey
+    };
+  }), [rows, liveKwSet, ignoreMap]);
+  const brands = useMemo(() => [...new Set(rows.map(r => r.brand).filter(Boolean))].sort(), [rows]);
+  const cats = useMemo(() => {
+    const src = brandF.length ? rows.filter(r => brandF.includes(r.brand)) : rows;
+    return [...new Set(src.map(r => r.category).filter(Boolean))].sort();
+  }, [rows, brandF]);
+  const types = useMemo(() => [...new Set(rows.map(r => r.ktype).filter(Boolean))].sort(), [rows]);
+  const filtered = useMemo(() => {
+    let out = decorated;
+    if (brandF.length) out = out.filter(r => brandF.includes(r.brand));
+    if (catF.length) out = out.filter(r => catF.includes(r.category));
+    if (typeF.length) out = out.filter(r => typeF.includes(r.ktype));
+    if (status === 'untapped') out = out.filter(r => !r.running);else if (status === 'running') out = out.filter(r => r.running);
+    if (!showIgnored) out = out.filter(r => !r.ignored);
+    return [...out].sort((a, b) => sort.dir * ((a[sort.col] || 0) > (b[sort.col] || 0) ? 1 : (a[sort.col] || 0) < (b[sort.col] || 0) ? -1 : 0));
+  }, [decorated, brandF, catF, typeF, status, showIgnored, sort]);
+  const ignore = key => {
+    setKwIgnore(key);
+    setIgnoreMap(getKwIgnore());
+  };
+  const unignore = key => {
+    clearKwIgnore(key);
+    setIgnoreMap(getKwIgnore());
+  };
+  const untappedAll = decorated.filter(r => !r.running && !r.ignored);
+  const untappedVol = untappedAll.reduce((s, r) => s + (r.searches || 0), 0);
+  const fmtV = n => n >= 100000 ? (n / 100000).toFixed(1) + 'L' : n >= 1000 ? (n / 1000).toFixed(1) + 'K' : Math.round(n).toString();
+  const toggleSort = col => setSort(s => ({
+    col,
+    dir: s.col === col ? -s.dir : -1
+  }));
+  const kpi = (label, val, color, sub) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 150,
+      background: '#0d1117',
+      border: '1px solid #1f2937',
+      borderRadius: 8,
+      padding: '12px 14px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+      marginBottom: 4
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color,
+      fontSize: 18,
+      fontWeight: 700
+    }
+  }, val), sub && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginTop: 2
+    }
+  }, sub));
+  const Th = ({
+    col,
+    label,
+    left
+  }) => /*#__PURE__*/React.createElement("th", {
+    onClick: col ? () => toggleSort(col) : undefined,
+    style: {
+      padding: '7px 10px',
+      textAlign: left ? 'left' : 'right',
+      color: sort.col === col ? '#93c5fd' : '#6b7280',
+      fontSize: 9,
+      fontWeight: 600,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      cursor: col ? 'pointer' : 'default',
+      whiteSpace: 'nowrap',
+      background: '#0a0e14',
+      position: 'sticky',
+      top: 0,
+      left: left ? 0 : undefined,
+      zIndex: left ? 4 : 2,
+      borderBottom: '1px solid #1f2937',
+      borderRight: left ? '1px solid #1f2937' : undefined
+    }
+  }, label, sort.col === col ? sort.dir > 0 ? ' ↑' : ' ↓' : '');
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap'
+    }
+  }, kpi('Suggested Keywords', decorated.length.toLocaleString('en-IN'), '#3b82f6', 'last 14 days · Blinkit reco'), kpi('Untapped (no ads)', untappedAll.length.toLocaleString('en-IN'), '#ef4444', 'not currently running'), kpi('Untapped Search Vol', fmtV(untappedVol), '#f59e0b', 'max searches 30d, summed'), kpi('Already Running', decorated.filter(r => r.running).length.toLocaleString('en-IN'), '#22c55e', 'suggestion already covered')), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement(MultiSelect, {
+    values: brandF,
+    onChange: v => {
+      setBrandF(v);
+      setCatF([]);
+    },
+    options: brands,
+    placeholder: "All Brands"
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: catF,
+    onChange: setCatF,
+    options: cats,
+    placeholder: "All Categories"
+  }), /*#__PURE__*/React.createElement(MultiSelect, {
+    values: typeF,
+    onChange: setTypeF,
+    options: types,
+    placeholder: "All Types"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 2,
+      background: '#111827',
+      border: '1px solid #1f2937',
+      borderRadius: 6,
+      padding: 2
+    }
+  }, [['untapped', 'Untapped'], ['running', 'Running'], ['all', 'All']].map(([v, l]) => /*#__PURE__*/React.createElement("button", {
+    key: v,
+    onClick: () => setStatus(v),
+    style: {
+      background: status === v ? '#1e3a5f' : 'transparent',
+      color: status === v ? '#93c5fd' : '#6b7280',
+      border: 'none',
+      borderRadius: 4,
+      padding: '3px 10px',
+      fontSize: 10,
+      cursor: 'pointer',
+      fontWeight: status === v ? 600 : 400
+    }
+  }, l))), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      color: '#6b7280',
+      fontSize: 10,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: showIgnored,
+    onChange: e => setShowIgnored(e.target.checked)
+  }), " Show ignored"), brandF.length || catF.length || typeF.length ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setBrandF([]);
+      setCatF([]);
+      setTypeF([]);
+    },
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      background: 'transparent',
+      border: 'none',
+      cursor: 'pointer'
+    }
+  }, "✕ Clear") : null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#4b5563',
+      fontSize: 9,
+      marginLeft: 'auto'
+    }
+  }, filtered.length, " shown · ignore hides a suggestion for 2 weeks")), rows.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 40,
+      textAlign: 'center',
+      color: '#4b5563',
+      border: '1px solid #1f2937',
+      borderRadius: 10
+    }
+  }, "No keyword-reco data yet. The \"Search reco BK\" sheet fills daily — this lights up once it has rows.") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: 'auto',
+      borderRadius: 10,
+      border: '1px solid #1f2937',
+      maxHeight: '72vh',
+      overflowY: 'auto'
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: '100%',
+      borderCollapse: 'collapse',
+      fontSize: 11
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement(Th, {
+    col: "keyword",
+    label: "Keyword",
+    left: true
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: "searches",
+    label: "Search DRR (max 14d)"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: null,
+    label: "Brand"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: null,
+    label: "Category"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: null,
+    label: "Type"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: null,
+    label: "Status"
+  }), /*#__PURE__*/React.createElement(Th, {
+    col: null,
+    label: "Action"
+  }))), /*#__PURE__*/React.createElement("tbody", null, filtered.map((r, i) => /*#__PURE__*/React.createElement("tr", {
+    key: r.ignKey + i,
+    style: {
+      borderBottom: '1px solid #111827',
+      background: r.ignored ? 'rgba(107,114,128,0.06)' : 'transparent',
+      opacity: r.ignored ? 0.6 : 1
+    }
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      position: 'sticky',
+      left: 0,
+      zIndex: 1,
+      background: '#0a0e14',
+      borderRight: '1px solid #1f2937',
+      maxWidth: 280
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#e5e7eb',
+      fontSize: 11,
+      fontWeight: 500
+    }
+  }, r.keyword), r.trending && /*#__PURE__*/React.createElement("span", {
+    title: "Trending on Blinkit",
+    style: {
+      marginLeft: 6,
+      color: '#f59e0b',
+      fontSize: 9,
+      fontWeight: 700
+    }
+  }, "🔥 trending")), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#e5e7eb',
+      fontWeight: 600,
+      whiteSpace: 'nowrap'
+    }
+  }, fmtV(r.searches)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: BRAND_COLORS[r.brand] || '#9ca3af',
+      fontSize: 10,
+      fontWeight: 600,
+      whiteSpace: 'nowrap'
+    }
+  }, r.brand), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: '#9ca3af',
+      fontSize: 10,
+      whiteSpace: 'nowrap'
+    }
+  }, r.category), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      color: r.ktype === 'Branded' ? '#c084fc' : '#60a5fa',
+      fontSize: 10,
+      whiteSpace: 'nowrap'
+    }
+  }, r.ktype || '—'), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, r.ignored ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6b7280',
+      fontSize: 10,
+      fontWeight: 600
+    }
+  }, "⏸ Ignored") : r.running ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#22c55e',
+      fontSize: 10,
+      fontWeight: 600
+    }
+  }, "🟢 Running") : /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#ef4444',
+      fontSize: 10,
+      fontWeight: 600
+    }
+  }, "🔴 Not running")), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: '6px 10px',
+      textAlign: 'right',
+      whiteSpace: 'nowrap'
+    }
+  }, r.ignored ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => unignore(r.ignKey),
+    style: {
+      background: 'transparent',
+      border: '1px solid #374151',
+      color: '#9ca3af',
+      borderRadius: 5,
+      padding: '2px 9px',
+      fontSize: 10,
+      cursor: 'pointer'
+    }
+  }, "↩ Un-ignore") : !r.running ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => ignore(r.ignKey),
+    style: {
+      background: 'transparent',
+      border: '1px solid #374151',
+      color: '#9ca3af',
+      borderRadius: 5,
+      padding: '2px 9px',
+      fontSize: 10,
+      cursor: 'pointer'
+    }
+  }, "⏸ Ignore 2wk") : /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#374151',
+      fontSize: 10
+    }
+  }, "—"))))))));
+}
+
 // ─── OPPORTUNITIES (BK search volume feed) ───────────────────────────────────
 // Uses the "BK Import Search" sheet (Blinkit search volume per keyword) to find
 // demand we're not capturing: untargeted keywords with volume, and targeted
@@ -15852,7 +16361,8 @@ function App() {
     salesAgg,
     salesNetAgg,
     kwVolume,
-    cm1Map
+    cm1Map,
+    recoRows
   }) => {
     const bounds = getDateBounds(allRows);
     const endDate = bounds.max;
@@ -15866,6 +16376,7 @@ function App() {
       salesNetAgg: salesNetAgg || {},
       kwVolume: kwVolume || {},
       cm1Map: cm1Map || {},
+      recoRows: recoRows || [],
       bounds,
       startDate: startDate < bounds.min ? bounds.min : startDate,
       endDate,
@@ -16064,6 +16575,26 @@ function App() {
     };
   }, [appState, getPrevRange]);
 
+  // Keyword reco (Blinkit-suggested) — last 14d max search DRR per kw×brand×cat
+  const recoAgg = useMemo(() => {
+    if (!appState) return [];
+    return aggregateReco(appState.recoRows || []);
+  }, [appState]);
+
+  // Keywords we ARE running (Search ads, last 14d from data max) → brand||keyword set
+  const liveKwSet = useMemo(() => {
+    const s = new Set();
+    if (!appState) return s;
+    const maxD = appState.bounds.max;
+    const start = new Date(maxD.getTime() - 13 * 864e5);
+    appState.allRows.forEach(r => {
+      if (r.type === 'Search' && r.keyword && r.date && r.date >= start && r.date <= maxD && (r.spend > 0 || r.impressions > 0)) {
+        s.add(`${(r.brand || '').toLowerCase()}||${r.keyword.toLowerCase().trim()}`);
+      }
+    });
+    return s;
+  }, [appState]);
+
   // Keyword aggregations (flattened to keyword level with per-campaign drill-down)
   const kwCurrent = useMemo(() => {
     if (!appState) return [];
@@ -16244,6 +16775,9 @@ function App() {
     id: 'keywords',
     label: 'Keywords'
   }, {
+    id: 'kwexplorer',
+    label: '🔎 Kw Explorer'
+  }, {
     id: 'catsales',
     label: 'Cat. Sales'
   }, {
@@ -16317,7 +16851,7 @@ function App() {
       fontWeight: 600,
       whiteSpace: 'nowrap'
     }
-  }, "v25"), /*#__PURE__*/React.createElement("div", {
+  }, "v26"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 3
@@ -16579,6 +17113,9 @@ function App() {
   }), tab === 'keywords' && /*#__PURE__*/React.createElement(KeywordScorecardView, {
     kwCurrent: kwCurrent,
     kwPrev: kwPrev
+  }), tab === 'kwexplorer' && /*#__PURE__*/React.createElement(KeywordExplorerView, {
+    reco: recoAgg,
+    liveKwSet: liveKwSet
   }), tab === 'catsales' && /*#__PURE__*/React.createElement(CategorySalesView, {
     catCurr: catCurr,
     catPrev: catPrev
